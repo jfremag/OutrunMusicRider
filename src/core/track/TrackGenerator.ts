@@ -1,6 +1,6 @@
 import * as THREE from 'three'
-import { MusicMap, EnergySample } from '../audio/AudioAnalysis'
-import { TrackData, TrackNode } from './TrackTypes'
+import { BeatMarker, MusicMap, EnergySample } from '../audio/AudioAnalysis'
+import { TrackData, TrackNode, TreblePulse } from './TrackTypes'
 
 export function generateTrack(musicMap: MusicMap): TrackData {
   const duration = musicMap.duration
@@ -75,9 +75,10 @@ export function generateTrack(musicMap: MusicMap): TrackData {
   if (nodes.length > 1) {
     nodes[nodes.length - 1].forward = nodes[nodes.length - 2].forward.clone()
   }
-  
+
   return {
     nodes,
+    treblePulses: createTreblePulses(musicMap.treblePeaks, nodes, duration),
     length: totalLength
   }
 }
@@ -116,9 +117,42 @@ function smoothRMS(energySamples: EnergySample[], targetCount: number): number[]
 
 function calculateBeatThreshold(beats: { strength: number }[]): number {
   if (beats.length === 0) return 0
-  
+
   const strengths = beats.map(b => b.strength).sort((a, b) => a - b)
   const median = strengths[Math.floor(strengths.length / 2)]
   return median * 1.2 // 20% above median
+}
+
+function createTreblePulses(
+  treblePeaks: BeatMarker[],
+  nodes: TrackNode[],
+  duration: number
+): TreblePulse[] {
+  if (treblePeaks.length === 0 || nodes.length === 0 || duration <= 0) {
+    return []
+  }
+
+  const maxStrength = Math.max(...treblePeaks.map(peak => peak.strength))
+
+  return treblePeaks.map((peak, index) => {
+    const normalizedTime = Math.max(0, Math.min(1, peak.time / duration))
+    const nodeIndex = Math.min(nodes.length - 1, Math.round(normalizedTime * (nodes.length - 1)))
+    const node = nodes[nodeIndex]
+
+    const right = new THREE.Vector3().crossVectors(node.forward, node.up).normalize()
+    const side = index % 2 === 0 ? 1 : -1
+    const lateralOffset = 4.5
+    const normalizedIntensity = maxStrength > 0 ? peak.strength / maxStrength : 0
+
+    const pos = node.pos.clone()
+      .add(right.clone().multiplyScalar(side * lateralOffset))
+      .add(new THREE.Vector3(0, 1.2 + normalizedIntensity * 2.2, 0))
+
+    return {
+      time: peak.time,
+      pos,
+      intensity: normalizedIntensity
+    }
+  })
 }
 

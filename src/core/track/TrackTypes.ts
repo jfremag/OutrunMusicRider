@@ -9,8 +9,15 @@ export interface TrackNode {
   isJump: boolean
 }
 
+export interface TreblePulse {
+  time: number
+  pos: THREE.Vector3
+  intensity: number
+}
+
 export interface TrackData {
   nodes: TrackNode[]
+  treblePulses: TreblePulse[]
   length: number
 }
 

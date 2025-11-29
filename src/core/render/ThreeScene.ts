@@ -11,6 +11,7 @@ export class ThreeScene {
   private trackData: TrackData | null = null
   private skyMesh: THREE.Mesh | null = null
   private gridMesh: THREE.Mesh | null = null
+  private trebleMeshes: THREE.Mesh[] = []
 
   constructor(canvas: HTMLCanvasElement) {
     // Ensure canvas has dimensions
@@ -167,6 +168,8 @@ export class ThreeScene {
   setTrack(track: TrackData): void {
     this.trackData = track
 
+    this.clearTrebleMeshes()
+
     // Remove old road if exists
     if (this.roadMesh) {
       this.scene.remove(this.roadMesh)
@@ -236,6 +239,9 @@ export class ThreeScene {
 
     // Add lane markers
     this.addLaneMarkers(track, roadWidth)
+
+    // Add treble-driven accents
+    this.addTreblePulses(track)
   }
 
   private addLaneMarkers(track: TrackData, roadWidth: number): void {
@@ -265,6 +271,45 @@ export class ThreeScene {
         this.scene.add(marker)
       }
     }
+  }
+
+  private addTreblePulses(track: TrackData): void {
+    for (const pulse of track.treblePulses) {
+      const pulseGeometry = new THREE.ConeGeometry(0.35, 1.6, 12)
+      const pulseMaterial = new THREE.MeshStandardMaterial({
+        color: 0x00e5ff,
+        emissive: 0xffffff,
+        emissiveIntensity: 1.3,
+        transparent: true,
+        opacity: 0.9,
+        roughness: 0.3,
+        metalness: 0.4
+      })
+
+      const pulseMesh = new THREE.Mesh(pulseGeometry, pulseMaterial)
+      const scale = 0.85 + pulse.intensity * 1.3
+      pulseMesh.scale.set(scale, scale, scale)
+      pulseMesh.position.copy(pulse.pos)
+      pulseMesh.rotation.x = Math.PI
+      pulseMesh.rotation.y = pulse.time
+
+      this.scene.add(pulseMesh)
+      this.trebleMeshes.push(pulseMesh)
+    }
+  }
+
+  private clearTrebleMeshes(): void {
+    for (const mesh of this.trebleMeshes) {
+      this.scene.remove(mesh)
+      mesh.geometry.dispose()
+
+      if (mesh.material instanceof THREE.Material) {
+        mesh.material.dispose()
+      } else if (Array.isArray(mesh.material)) {
+        mesh.material.forEach(material => material.dispose())
+      }
+    }
+    this.trebleMeshes = []
   }
 
   resize(width: number, height: number): void {
