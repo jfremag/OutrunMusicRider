@@ -14,6 +14,7 @@ export class ThreeScene {
   private starField: THREE.Points | null = null
   private sunMesh: THREE.Mesh | null = null
   private trebleMeshes: THREE.Mesh[] = []
+  private startTime = performance.now()
 
   constructor(canvas: HTMLCanvasElement) {
     // Ensure canvas has dimensions
@@ -193,7 +194,8 @@ export class ThreeScene {
     this.sunMesh = new THREE.Mesh(sunGeometry, sunMaterial)
     this.sunMesh.position.set(0, 30, -250)
     this.sunMesh.lookAt(new THREE.Vector3(0, 15, 1000))
-    this.sunMesh.renderOrder = -5
+    this.sunMesh.renderOrder = 10
+    this.sunMesh.frustumCulled = false
     this.scene.add(this.sunMesh)
 
     // Add fog for depth effect aligned to new palette
@@ -431,6 +433,7 @@ export class ThreeScene {
       this.camera.updateProjectionMatrix()
 
       // Render
+      this.updateSunPlacement()
       this.renderer.render(this.scene, this.camera)
       return
     }
@@ -511,16 +514,25 @@ export class ThreeScene {
     const viewDir = new THREE.Vector3()
     this.camera.getWorldDirection(viewDir)
 
+    const elapsed = (performance.now() - this.startTime) / 1000
     const sunDistance = 800
-    const sunHeight = 40
+
+    // Keep a gentle east-west sweep and vertical drift so the sun returns regularly
+    const horizonWave = Math.sin(elapsed * 0.2) * 0.35
+    const heightWave = Math.sin(elapsed * 0.12) * 20
+
+    const right = new THREE.Vector3().crossVectors(viewDir, new THREE.Vector3(0, 1, 0)).normalize()
 
     const targetPos = this.camera.position
       .clone()
       .add(viewDir.clone().multiplyScalar(sunDistance))
-    targetPos.y = Math.max(targetPos.y, sunHeight)
+      .add(right.multiplyScalar(sunDistance * 0.2 * horizonWave))
+
+    const horizonBase = Math.max(20, this.camera.position.y * 0.2)
+    targetPos.y = Math.max(horizonBase, horizonBase + heightWave)
 
     this.sunMesh.position.copy(targetPos)
-    this.sunMesh.lookAt(targetPos.clone().add(viewDir.clone().multiplyScalar(200)))
+    this.sunMesh.quaternion.copy(this.camera.quaternion)
   }
 }
 
