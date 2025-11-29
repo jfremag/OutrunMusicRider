@@ -5,4 +5,3 @@
 <script setup lang="ts">
 import GameRoot from './components/GameRoot.vue'
 </script>
-

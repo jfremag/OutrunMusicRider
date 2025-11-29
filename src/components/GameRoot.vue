@@ -2,9 +2,7 @@
   <div class="game-root">
     <div class="controls">
       <div class="file-input-container">
-        <label for="audio-file" class="file-label">
-          Choose Audio File
-        </label>
+        <label for="audio-file" class="file-label"> Choose Audio File </label>
         <input
           id="audio-file"
           type="file"
@@ -132,7 +130,11 @@ onMounted(async () => {
       loadedFileName.value = '06 boxing day.mp3'
       console.log('Audio file loaded and analyzed successfully')
     } else {
-      console.warn('Default audio file not found at', audioPath, '- user can upload one manually')
+      console.warn(
+        'Default audio file not found at',
+        audioPath,
+        '- user can upload one manually'
+      )
     }
   } catch (error) {
     console.error('Failed to load default audio file:', error)
@@ -292,4 +294,3 @@ const handlePause = () => {
   border: 1px solid rgba(0, 255, 0, 0.3);
 }
 </style>
-
