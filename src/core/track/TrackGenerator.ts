@@ -10,7 +10,7 @@ export function generateTrack(musicMap: MusicMap): TrackData {
   
   const nodes: TrackNode[] = []
   const baseY = 0
-  const amplitude = 3
+  const amplitude = 6
   const xFrequency = 0.1 // Frequency of horizontal curve
   
   // Smooth RMS values for vertical variation
