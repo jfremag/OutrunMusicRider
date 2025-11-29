@@ -39,11 +39,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, shallowRef, markRaw, onMounted, onUnmounted } from 'vue'
 import { GameController } from '../core/game/GameController'
 
 const canvasEl = ref<HTMLCanvasElement | null>(null)
-const gameController = ref<GameController | null>(null)
+const gameController = shallowRef<GameController | null>(null)
 const isReady = ref(false)
 const isPlaying = ref(false)
 const loadedFileName = ref<string>('')
@@ -89,7 +89,7 @@ onMounted(async () => {
   window.addEventListener('resize', resizeCanvas)
 
   // Create game controller - this will initialize Three.js
-  gameController.value = new GameController(canvasEl.value)
+  gameController.value = markRaw(new GameController(canvasEl.value))
 
   // Start animation loop
   lastTime = performance.now()
