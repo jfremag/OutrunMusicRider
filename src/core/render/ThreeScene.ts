@@ -501,7 +501,26 @@ export class ThreeScene {
     this.camera.lookAt(carPos.clone().add(carForward.clone().multiplyScalar(5)))
 
     // Render
+    this.updateSunPlacement()
     this.renderer.render(this.scene, this.camera)
+  }
+
+  private updateSunPlacement(): void {
+    if (!this.sunMesh) return
+
+    const viewDir = new THREE.Vector3()
+    this.camera.getWorldDirection(viewDir)
+
+    const sunDistance = 800
+    const sunHeight = 40
+
+    const targetPos = this.camera.position
+      .clone()
+      .add(viewDir.clone().multiplyScalar(sunDistance))
+    targetPos.y = Math.max(targetPos.y, sunHeight)
+
+    this.sunMesh.position.copy(targetPos)
+    this.sunMesh.lookAt(targetPos.clone().add(viewDir.clone().multiplyScalar(200)))
   }
 }
 
