@@ -11,6 +11,8 @@ export class ThreeScene {
   private trackData: TrackData | null = null
   private skyMesh: THREE.Mesh | null = null
   private gridMesh: THREE.Mesh | null = null
+  private starField: THREE.Points | null = null
+  private sunMesh: THREE.Mesh | null = null
   private trebleMeshes: THREE.Mesh[] = []
 
   constructor(canvas: HTMLCanvasElement) {
@@ -88,22 +90,114 @@ export class ThreeScene {
   }
 
   private createBackground(): void {
-    // Create gradient sky using a large sphere with simpler material
-    const skyGeometry = new THREE.SphereGeometry(5000, 32, 32)
-    
-    // Use MeshBasicMaterial for now to avoid shader proxy issues
-    // We can enhance with shaders later if needed
-    const skyMaterial = new THREE.MeshBasicMaterial({
-      color: 0x0a0a1a, // Dark blue-black base
+    // Create gradient sky dome with shader for synthwave hues
+    const skyGeometry = new THREE.SphereGeometry(5000, 64, 64)
+    const skyMaterial = new THREE.ShaderMaterial({
       side: THREE.BackSide,
-      fog: false
+      depthWrite: false,
+      uniforms: {
+        topColor: { value: new THREE.Color(0x0a0324) },
+        midColor: { value: new THREE.Color(0x1a0a4a) },
+        horizonColor: { value: new THREE.Color(0xff55d3) },
+        glowIntensity: { value: 1.0 }
+      },
+      vertexShader: `
+        varying vec3 vWorldPosition;
+        void main() {
+          vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+          vWorldPosition = worldPosition.xyz;
+          gl_Position = projectionMatrix * viewMatrix * worldPosition;
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vWorldPosition;
+        uniform vec3 topColor;
+        uniform vec3 midColor;
+        uniform vec3 horizonColor;
+        uniform float glowIntensity;
+
+        void main() {
+          float h = normalize(vWorldPosition).y * 0.5 + 0.5;
+          float horizonGlow = pow(clamp(1.0 - h, 0.0, 1.0), 2.0) * glowIntensity;
+          vec3 gradient = mix(horizonColor, midColor, smoothstep(0.05, 0.35, h));
+          gradient = mix(gradient, topColor, smoothstep(0.35, 1.0, h));
+          gradient += vec3(1.0, 0.35, 0.6) * horizonGlow * 0.35;
+          gl_FragColor = vec4(gradient, 1.0);
+        }
+      `
     })
 
     this.skyMesh = new THREE.Mesh(skyGeometry, skyMaterial)
     this.scene.add(this.skyMesh)
 
-    // Add fog for depth effect
-    this.scene.fog = new THREE.Fog(0x0a0a1a, 100, 2000)
+    // Add star field to keep the sky lively without a texture
+    const starGeometry = new THREE.BufferGeometry()
+    const starCount = 600
+    const starPositions = new Float32Array(starCount * 3)
+    for (let i = 0; i < starCount; i++) {
+      const theta = Math.random() * Math.PI * 2
+      const phi = Math.acos(THREE.MathUtils.randFloat(-0.2, 1))
+      const radius = 4800
+      const x = radius * Math.sin(phi) * Math.cos(theta)
+      const y = radius * Math.cos(phi)
+      const z = radius * Math.sin(phi) * Math.sin(theta)
+      starPositions[i * 3] = x
+      starPositions[i * 3 + 1] = y
+      starPositions[i * 3 + 2] = z
+    }
+    starGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3))
+    const starMaterial = new THREE.PointsMaterial({
+      color: 0xffffff,
+      size: 8,
+      sizeAttenuation: true,
+      transparent: true,
+      opacity: 0.8,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    })
+    this.starField = new THREE.Points(starGeometry, starMaterial)
+    this.scene.add(this.starField)
+
+    // Add retro sun disc hovering on the horizon
+    const sunGeometry = new THREE.PlaneGeometry(120, 120, 1, 1)
+    const sunMaterial = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      uniforms: {
+        innerColor: { value: new THREE.Color(0xffe066) },
+        rimColor: { value: new THREE.Color(0xff4fd8) }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        varying vec2 vUv;
+        uniform vec3 innerColor;
+        uniform vec3 rimColor;
+
+        void main() {
+          vec2 center = vUv - 0.5;
+          float dist = length(center);
+          float alpha = smoothstep(0.5, 0.1, dist);
+          float rim = smoothstep(0.35, 0.18, dist);
+          vec3 color = mix(rimColor, innerColor, rim);
+          gl_FragColor = vec4(color, alpha * 0.95);
+        }
+      `
+    })
+    this.sunMesh = new THREE.Mesh(sunGeometry, sunMaterial)
+    this.sunMesh.position.set(0, 30, -250)
+    this.sunMesh.lookAt(new THREE.Vector3(0, 15, 1000))
+    this.sunMesh.renderOrder = -5
+    this.scene.add(this.sunMesh)
+
+    // Add fog for depth effect aligned to new palette
+    this.scene.fog = new THREE.Fog(0x0a0324, 150, 2000)
 
     // Create neon grid plane - make it more visible
     const gridSize = 200
