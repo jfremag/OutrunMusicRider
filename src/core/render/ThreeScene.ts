@@ -695,10 +695,6 @@ export class ThreeScene {
       // velocity when the track keeps rising.
       const grounded = this.carVerticalOffset <= 0.01
 
-      // Only apply impulse while grounded so we don't keep stacking upward
-      // velocity when the track keeps rising.
-      const grounded = this.carVerticalOffset <= 0.01
-
       // Detect the top of a bump: we climbed into this node and are about to
       // level out or descend. Only then should we fire a jump impulse so we
       // don't launch early on small ramps.
