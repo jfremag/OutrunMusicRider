@@ -20,6 +20,10 @@ export class ThreeScene {
   private smoothedCarPosition = new THREE.Vector3()
   private smoothedCarForward = new THREE.Vector3(0, 0, 1)
   private carOrientation = new THREE.Quaternion()
+  private carVerticalVelocity = 0
+  private carVerticalOffset = 0
+  private lastTrackHeight = 0
+  private lastFrameTime: number | null = null
   private carTemplate: THREE.Object3D | null = null
   private carTemplatePromise: Promise<THREE.Object3D | null> | null = null
 
@@ -363,6 +367,10 @@ export class ThreeScene {
     this.smoothedCarPosition.set(0, 0, 0)
     this.smoothedCarForward.set(0, 0, 1)
     this.carOrientation.identity()
+    this.carVerticalVelocity = 0
+    this.carVerticalOffset = 0
+    this.lastTrackHeight = track.nodes[0]?.pos.y ?? 0
+    this.lastFrameTime = null
 
     this.clearTrebleMeshes()
 
@@ -580,6 +588,12 @@ export class ThreeScene {
   }
 
   renderFrame(gameState: GameState): void {
+    const now = performance.now()
+    const deltaSeconds = this.lastFrameTime
+      ? Math.min((now - this.lastFrameTime) / 1000, 0.05)
+      : 0
+    this.lastFrameTime = now
+
     if (!this.carMesh) {
       // Car not created yet, just render the scene
       this.renderer.render(this.scene, this.camera)
@@ -663,6 +677,34 @@ export class ThreeScene {
     const laneOffsetVec = right.clone().multiplyScalar(gameState.car.laneOffset)
     carPos.add(laneOffsetVec)
 
+    if (deltaSeconds === 0) {
+      this.lastTrackHeight = carPos.y
+    }
+
+    if (deltaSeconds > 0) {
+      const slopeSpeed = (carPos.y - this.lastTrackHeight) / deltaSeconds
+      const upwardKick = Math.max(0, slopeSpeed - 2) * 0.08
+
+      if (upwardKick > 0) {
+        this.carVerticalVelocity += upwardKick
+      }
+
+      if (currentNode.isJump || nextNode.isJump) {
+        this.carVerticalVelocity = Math.max(this.carVerticalVelocity, 12)
+      }
+
+      const gravity = 28
+      this.carVerticalVelocity -= gravity * deltaSeconds
+      this.carVerticalOffset += this.carVerticalVelocity * deltaSeconds
+
+      if (this.carVerticalOffset < 0) {
+        this.carVerticalOffset = 0
+        this.carVerticalVelocity = Math.max(0, -this.carVerticalVelocity * 0.25)
+      }
+
+      this.lastTrackHeight = carPos.y
+    }
+
     if (this.smoothedCarPosition.lengthSq() === 0) {
       this.smoothedCarPosition.copy(carPos)
       this.smoothedCarForward.copy(carForward)
@@ -690,8 +732,11 @@ export class ThreeScene {
     )
     this.carOrientation.slerp(targetCarOrientation, 0.2)
 
+    const visualCarPosition = this.smoothedCarPosition.clone()
+    visualCarPosition.y += this.carVerticalOffset
+
     // Position and orient car
-    this.carMesh.position.copy(this.smoothedCarPosition)
+    this.carMesh.position.copy(visualCarPosition)
     this.carMesh.quaternion.copy(this.carOrientation)
 
     const smoothedRight = new THREE.Vector3()
@@ -708,10 +753,10 @@ export class ThreeScene {
 
     baseCameraOffset.applyAxisAngle(currentNode.up, this.cameraOrbitAngle)
 
-    const cameraPosition = carPos.clone().add(baseCameraOffset)
+    const cameraPosition = visualCarPosition.clone().add(baseCameraOffset)
     this.camera.position.lerp(cameraPosition, 0.2)
 
-    const lookTarget = this.smoothedCarPosition
+    const lookTarget = visualCarPosition
       .clone()
       .add(this.smoothedCarForward.clone().multiplyScalar(5))
       .add(
