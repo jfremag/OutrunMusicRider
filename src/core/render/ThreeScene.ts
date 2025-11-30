@@ -14,6 +14,8 @@ export class ThreeScene {
   private starField: THREE.Points | null = null
   private sunMesh: THREE.Mesh | null = null
   private trebleMeshes: THREE.Object3D[] = []
+  private swordTemplate: THREE.Object3D | null = null
+  private swordTemplatePromise: Promise<THREE.Object3D | null> | null = null
   private startTime = performance.now()
   private cameraOrbitAngle = 0
   private smoothedCarPosition = new THREE.Vector3()
@@ -479,89 +481,108 @@ export class ThreeScene {
   }
 
   private addTreblePulses(track: TrackData): void {
-    for (const pulse of track.treblePulses) {
-      const hazardGroup = new THREE.Group()
+    const currentTrack = this.trackData
+    this.loadSwordTemplate().then(template => {
+      for (const pulse of track.treblePulses) {
+        // Avoid placing hazards from outdated tracks if a new one was set
+        if (currentTrack && currentTrack !== this.trackData) {
+          break
+        }
 
-      const bladeHeight = 5.5
-      const bladeGeometry = new THREE.CylinderGeometry(0.55, 0.18, bladeHeight, 10, 6, true)
-      bladeGeometry.translate(0, bladeHeight / 2, 0)
+        const hazardGroup = new THREE.Group()
+        hazardGroup.position.copy(pulse.pos)
+        hazardGroup.position.y = Math.max(0, pulse.pos.y)
 
-      const bladePosition = bladeGeometry.getAttribute('position')
-      const workingVec = new THREE.Vector3()
+        const warningPlateGeometry = new THREE.CylinderGeometry(1.05, 0.95, 0.18, 20)
+        const warningPlateMaterial = new THREE.MeshStandardMaterial({
+          color: 0x5d0015,
+          emissive: 0xe60035,
+          emissiveIntensity: 1.45,
+          roughness: 0.4,
+          metalness: 0.2,
+          opacity: 0.85,
+          transparent: true
+        })
+        const warningPlate = new THREE.Mesh(warningPlateGeometry, warningPlateMaterial)
+        warningPlate.position.y = 0.04
+        hazardGroup.add(warningPlate)
 
-      for (let i = 0; i < bladePosition.count; i++) {
-        workingVec.fromBufferAttribute(bladePosition, i)
-        const heightT = THREE.MathUtils.clamp(workingVec.y / bladeHeight, 0, 1)
-        const twist = THREE.MathUtils.lerp(0, Math.PI * 0.55, heightT)
-        const jagged = 0.08 + (1 - heightT) * 0.16
+        if (template) {
+          const sword = this.cloneSwordTemplate(template)
+          const scale = 0.8 + pulse.intensity * 1.1
+          sword.scale.multiplyScalar(scale)
+          sword.position.y = 0.1
+          sword.rotation.set(
+            THREE.MathUtils.degToRad(-75),
+            pulse.time * 0.6 + THREE.MathUtils.degToRad(30),
+            THREE.MathUtils.degToRad(4)
+          )
+          hazardGroup.add(sword)
+        }
 
-        const radius = new THREE.Vector2(workingVec.x, workingVec.z).length()
-        const angle = Math.atan2(workingVec.z, workingVec.x) + twist
-        const warpedRadius = radius + (Math.random() - 0.5) * jagged
-
-        workingVec.x = Math.cos(angle) * warpedRadius
-        workingVec.z = Math.sin(angle) * warpedRadius
-        workingVec.y += (Math.random() - 0.5) * jagged * 0.35
-
-        bladePosition.setXYZ(i, workingVec.x, workingVec.y, workingVec.z)
+        this.scene.add(hazardGroup)
+        this.trebleMeshes.push(hazardGroup)
       }
+    })
+  }
 
-      bladePosition.needsUpdate = true
-      bladeGeometry.computeVertexNormals()
+  private loadSwordTemplate(): Promise<THREE.Object3D | null> {
+    if (!this.swordTemplatePromise) {
+      const loader = new GLTFLoader()
+      const SWORD_MODEL_URL = '/models/Claymore.glb'
 
-      const crystalMaterial = new THREE.MeshPhysicalMaterial({
-        color: 0xff204d,
-        emissive: 0x9f002c,
-        emissiveIntensity: 1.6,
-        roughness: 0.18,
-        metalness: 0.25,
-        transmission: 0.48,
-        thickness: 0.65,
-        clearcoat: 0.65,
-        clearcoatRoughness: 0.08,
-        flatShading: false
+      this.swordTemplatePromise = new Promise(resolve => {
+        loader.load(
+          SWORD_MODEL_URL,
+          gltf => {
+            this.swordTemplate = gltf.scene
+            resolve(this.swordTemplate)
+          },
+          undefined,
+          error => {
+            console.error('Unable to load sword model', error)
+            resolve(null)
+          }
+        )
       })
-
-      const blade = new THREE.Mesh(bladeGeometry, crystalMaterial)
-      const scale = 0.9 + pulse.intensity * 1.2
-      blade.scale.set(scale, scale * 1.2, scale)
-      blade.position.y = 0.35
-      blade.rotation.y = pulse.time * 0.9 + THREE.MathUtils.degToRad(20)
-      blade.rotation.x = THREE.MathUtils.degToRad(-96)
-
-      const sideShardGeometry = new THREE.ConeGeometry(0.16, 2.8, 6)
-      const shardA = new THREE.Mesh(sideShardGeometry, crystalMaterial)
-      shardA.position.set(0.5, 0.9, -0.2)
-      shardA.rotation.set(Math.PI * 0.94, pulse.time * 1.2, Math.PI * 0.18)
-      shardA.scale.setScalar(0.8 + pulse.intensity * 0.6)
-
-      const shardB = shardA.clone()
-      shardB.position.set(-0.42, 0.7, 0.25)
-      shardB.rotation.set(Math.PI * 0.9, pulse.time * 1.05, Math.PI * -0.25)
-
-      const warningPlateGeometry = new THREE.CylinderGeometry(1.05, 0.95, 0.18, 20)
-      const warningPlateMaterial = new THREE.MeshStandardMaterial({
-        color: 0x5d0015,
-        emissive: 0xe60035,
-        emissiveIntensity: 1.45,
-        roughness: 0.4,
-        metalness: 0.2,
-        opacity: 0.85,
-        transparent: true
-      })
-      const warningPlate = new THREE.Mesh(warningPlateGeometry, warningPlateMaterial)
-      warningPlate.position.y = 0.04
-
-      hazardGroup.add(warningPlate)
-      hazardGroup.add(blade)
-      hazardGroup.add(shardA)
-      hazardGroup.add(shardB)
-      hazardGroup.position.copy(pulse.pos)
-      hazardGroup.position.y = Math.max(0, pulse.pos.y)
-
-      this.scene.add(hazardGroup)
-      this.trebleMeshes.push(hazardGroup)
     }
+
+    return this.swordTemplatePromise
+  }
+
+  private cloneSwordTemplate(template: THREE.Object3D): THREE.Object3D {
+    const clone = template.clone(true)
+
+    clone.traverse(obj => {
+      if (obj instanceof THREE.Mesh) {
+        obj.castShadow = true
+        obj.receiveShadow = true
+        const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
+
+        for (const material of materials) {
+          if (
+            material instanceof THREE.MeshStandardMaterial ||
+            material instanceof THREE.MeshPhysicalMaterial
+          ) {
+            const isBlade = material.color.r > material.color.g * 1.1 && material.color.r > material.color.b
+            if (isBlade) {
+              material.emissive = new THREE.Color(0xff0f2f)
+              material.emissiveIntensity = 1.75
+              material.transparent = true
+              material.opacity = Math.max(material.opacity ?? 0.72, 0.72)
+              if ('transmission' in material) {
+                // @ts-expect-error transmission exists on physical materials
+                material.transmission = Math.max(material.transmission ?? 0.35, 0.35)
+              }
+            }
+
+            material.needsUpdate = true
+          }
+        }
+      }
+    })
+
+    return clone
   }
 
   private clearTrebleMeshes(): void {
