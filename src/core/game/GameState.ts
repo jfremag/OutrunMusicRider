@@ -9,7 +9,7 @@ export interface GameState {
   car: CarState
 }
 
-const LANE_WIDTH = 2.5
+export const LANE_WIDTH = 2.5
 
 export function initGameState(): GameState {
   return {

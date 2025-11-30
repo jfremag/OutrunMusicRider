@@ -13,8 +13,9 @@ export class ThreeScene {
   private gridMesh: THREE.Mesh | null = null
   private starField: THREE.Points | null = null
   private sunMesh: THREE.Mesh | null = null
-  private trebleMeshes: THREE.Mesh[] = []
+  private trebleMeshes: THREE.Object3D[] = []
   private startTime = performance.now()
+  private cameraOrbitAngle = 0
 
   constructor(canvas: HTMLCanvasElement) {
     // Ensure canvas has dimensions
@@ -371,39 +372,63 @@ export class ThreeScene {
 
   private addTreblePulses(track: TrackData): void {
     for (const pulse of track.treblePulses) {
-      const pulseGeometry = new THREE.ConeGeometry(0.35, 1.6, 12)
+      const hazardGroup = new THREE.Group()
+
+      const pulseGeometry = new THREE.ConeGeometry(0.45, 1.45, 16)
       const pulseMaterial = new THREE.MeshStandardMaterial({
-        color: 0x00e5ff,
-        emissive: 0xffffff,
-        emissiveIntensity: 1.3,
+        color: 0xff2d55,
+        emissive: 0xff002f,
+        emissiveIntensity: 1.8,
         transparent: true,
-        opacity: 0.9,
-        roughness: 0.3,
-        metalness: 0.4
+        opacity: 0.95,
+        roughness: 0.25,
+        metalness: 0.45
       })
 
       const pulseMesh = new THREE.Mesh(pulseGeometry, pulseMaterial)
-      const scale = 0.85 + pulse.intensity * 1.3
+      const scale = 0.9 + pulse.intensity * 1.4
       pulseMesh.scale.set(scale, scale, scale)
-      pulseMesh.position.copy(pulse.pos)
+      pulseMesh.position.y = 0.9
       pulseMesh.rotation.x = Math.PI
       pulseMesh.rotation.y = pulse.time
 
-      this.scene.add(pulseMesh)
-      this.trebleMeshes.push(pulseMesh)
+      const warningPlateGeometry = new THREE.CylinderGeometry(0.75, 0.75, 0.12, 18)
+      const warningPlateMaterial = new THREE.MeshStandardMaterial({
+        color: 0xff6a9e,
+        emissive: 0xff003b,
+        emissiveIntensity: 1.4,
+        roughness: 0.4,
+        metalness: 0.2,
+        opacity: 0.7,
+        transparent: true
+      })
+      const warningPlate = new THREE.Mesh(warningPlateGeometry, warningPlateMaterial)
+      warningPlate.position.y = 0.05
+
+      hazardGroup.add(warningPlate)
+      hazardGroup.add(pulseMesh)
+      hazardGroup.position.copy(pulse.pos)
+      hazardGroup.position.y = Math.max(0, pulse.pos.y)
+
+      this.scene.add(hazardGroup)
+      this.trebleMeshes.push(hazardGroup)
     }
   }
 
   private clearTrebleMeshes(): void {
     for (const mesh of this.trebleMeshes) {
       this.scene.remove(mesh)
-      mesh.geometry.dispose()
+      mesh.traverse(child => {
+        if (child instanceof THREE.Mesh) {
+          child.geometry.dispose()
 
-      if (mesh.material instanceof THREE.Material) {
-        mesh.material.dispose()
-      } else if (Array.isArray(mesh.material)) {
-        mesh.material.forEach(material => material.dispose())
-      }
+          if (child.material instanceof THREE.Material) {
+            child.material.dispose()
+          } else if (Array.isArray(child.material)) {
+            child.material.forEach(material => material.dispose())
+          }
+        }
+      })
     }
     this.trebleMeshes = []
   }
@@ -478,13 +503,21 @@ export class ThreeScene {
     // Apply lane offset
     const right = new THREE.Vector3().crossVectors(carForward, currentNode.up).normalize()
     const targetLaneOffset = getLaneOffset(gameState.car.laneOffsetIndex)
-    
+
     // Smooth lane interpolation
     const laneLerpSpeed = 0.1
     gameState.car.laneOffset = THREE.MathUtils.lerp(
       gameState.car.laneOffset,
       targetLaneOffset,
       laneLerpSpeed
+    )
+
+    const laneWidth = Math.max(1, Math.abs(getLaneOffset(1)))
+    const targetOrbitAngle = (gameState.car.laneOffset / laneWidth) * 0.3
+    this.cameraOrbitAngle = THREE.MathUtils.lerp(
+      this.cameraOrbitAngle,
+      targetOrbitAngle,
+      0.08
     )
 
     const laneOffsetVec = right.clone().multiplyScalar(gameState.car.laneOffset)
@@ -494,14 +527,25 @@ export class ThreeScene {
     this.carMesh.position.copy(carPos)
     this.carMesh.lookAt(carPos.clone().add(carForward))
 
-    // Position camera behind and slightly above car
+    // Position camera behind and slightly above car with orbiting glide during lane changes
     const cameraDistance = 8
     const cameraHeight = 3
-    const cameraOffset = carForward.clone().multiplyScalar(-cameraDistance)
-    cameraOffset.y = cameraHeight
+    const baseCameraOffset = carForward
+      .clone()
+      .multiplyScalar(-cameraDistance)
+      .add(currentNode.up.clone().multiplyScalar(cameraHeight))
 
-    this.camera.position.copy(carPos.clone().add(cameraOffset))
-    this.camera.lookAt(carPos.clone().add(carForward.clone().multiplyScalar(5)))
+    baseCameraOffset.applyAxisAngle(currentNode.up, this.cameraOrbitAngle)
+
+    const cameraPosition = carPos.clone().add(baseCameraOffset)
+    this.camera.position.copy(cameraPosition)
+
+    const lookTarget = carPos
+      .clone()
+      .add(carForward.clone().multiplyScalar(5))
+      .add(right.clone().multiplyScalar(this.cameraOrbitAngle * cameraDistance * 0.4))
+
+    this.camera.lookAt(lookTarget)
 
     // Render
     this.updateSunPlacement()

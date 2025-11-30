@@ -13,6 +13,7 @@ export interface TreblePulse {
   time: number
   pos: THREE.Vector3
   intensity: number
+  laneIndex: -1 | 0 | 1
 }
 
 export interface TrackData {

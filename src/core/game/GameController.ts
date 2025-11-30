@@ -11,6 +11,7 @@ export class GameController {
   private musicMap: MusicMap | null = null
   private trackData: TrackData | null = null
   private gameState: GameState
+  private lastAutoLaneChange = 0
 
   constructor(canvas: HTMLCanvasElement) {
     this.audioEngine = new AudioEngine()
@@ -79,6 +80,9 @@ export class GameController {
     // Update car distance
     this.gameState.car.distance = Math.min(targetDistance, this.trackData.length)
 
+    // Anticipate treble obstacles and dodge within the lane grid
+    this.maybeAutoDodge(audioTime)
+
     // Render frame
     this.threeScene.renderFrame(this.gameState)
   }
@@ -89,6 +93,49 @@ export class GameController {
 
   isReady(): boolean {
     return this.trackData !== null
+  }
+
+  private maybeAutoDodge(audioTime: number): void {
+    if (!this.trackData) return
+
+    const carDistance = this.gameState.car.distance
+    const lookAhead = 25
+    const conflictRange = 8
+    const cooldown = 0.4
+
+    if (audioTime - this.lastAutoLaneChange < cooldown) {
+      return
+    }
+
+    const upcomingPulses = this.trackData.treblePulses.filter(pulse => {
+      const delta = pulse.pos.z - carDistance
+      return delta > 0 && delta < lookAhead
+    })
+
+    const blockingPulse = upcomingPulses.find(pulse =>
+      pulse.laneIndex === this.gameState.car.laneOffsetIndex &&
+      pulse.pos.z - carDistance < conflictRange
+    )
+
+    if (!blockingPulse) return
+
+    const candidateLanes: Array<-1 | 0 | 1> = [-1, 0, 1]
+    const safeLanes = candidateLanes.filter(lane =>
+      lane !== blockingPulse.laneIndex &&
+      !upcomingPulses.some(pulse =>
+        pulse.laneIndex === lane &&
+        pulse.pos.z - carDistance < conflictRange
+      )
+    )
+
+    if (safeLanes.length === 0) return
+
+    safeLanes.sort(
+      (a, b) => Math.abs(a - this.gameState.car.laneOffsetIndex) - Math.abs(b - this.gameState.car.laneOffsetIndex)
+    )
+
+    this.gameState.car.laneOffsetIndex = safeLanes[0]
+    this.lastAutoLaneChange = audioTime
   }
 }
 

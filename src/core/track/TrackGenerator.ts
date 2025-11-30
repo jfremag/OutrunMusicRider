@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { BeatMarker, MusicMap, EnergySample } from '../audio/AudioAnalysis'
 import { TrackData, TrackNode, TreblePulse } from './TrackTypes'
+import { LANE_WIDTH } from '../game/GameState'
 
 export function generateTrack(musicMap: MusicMap): TrackData {
   const duration = musicMap.duration
@@ -134,24 +135,27 @@ function createTreblePulses(
 
   const maxStrength = Math.max(...treblePeaks.map(peak => peak.strength))
 
+  const lanePattern: Array<-1 | 0 | 1> = [-1, 1, 0]
+
   return treblePeaks.map((peak, index) => {
     const normalizedTime = Math.max(0, Math.min(1, peak.time / duration))
     const nodeIndex = Math.min(nodes.length - 1, Math.round(normalizedTime * (nodes.length - 1)))
     const node = nodes[nodeIndex]
 
     const right = new THREE.Vector3().crossVectors(node.forward, node.up).normalize()
-    const side = index % 2 === 0 ? 1 : -1
-    const lateralOffset = 4.5
+    const laneIndex = lanePattern[index % lanePattern.length]
+    const lateralOffset = laneIndex * LANE_WIDTH
     const normalizedIntensity = maxStrength > 0 ? peak.strength / maxStrength : 0
 
     const pos = node.pos.clone()
-      .add(right.clone().multiplyScalar(side * lateralOffset))
-      .add(new THREE.Vector3(0, 1.2 + normalizedIntensity * 2.2, 0))
+      .add(right.clone().multiplyScalar(lateralOffset))
+      .add(new THREE.Vector3(0, 0.6 + normalizedIntensity * 1.8, 0))
 
     return {
       time: peak.time,
       pos,
-      intensity: normalizedIntensity
+      intensity: normalizedIntensity,
+      laneIndex
     }
   })
 }
