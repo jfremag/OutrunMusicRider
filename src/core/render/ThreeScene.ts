@@ -23,6 +23,7 @@ export class ThreeScene {
   private carVerticalOffset = 0
   private lastTrackHeight = 0
   private lastFrameTime: number | null = null
+  private lastNodeIndex = 0
   private carTemplate: THREE.Object3D | null = null
   private carTemplatePromise: Promise<THREE.Object3D | null> | null = null
 
@@ -370,6 +371,7 @@ export class ThreeScene {
     this.carVerticalOffset = 0
     this.lastTrackHeight = track.nodes[0]?.pos.y ?? 0
     this.lastFrameTime = null
+    this.lastNodeIndex = 0
 
     this.clearTrebleMeshes()
 
@@ -617,23 +619,25 @@ export class ThreeScene {
     }
 
     // Track data exists - use existing logic
-    // Find nearest track node
+    // Step forward through the node list instead of oscillating around the nearest node
     const carDistance = gameState.car.distance
-    let nearestNodeIndex = 0
-    let minDist = Infinity
+    const nodes = this.trackData.nodes
 
-    for (let i = 0; i < this.trackData.nodes.length; i++) {
-      const node = this.trackData.nodes[i]
-      const dist = Math.abs(node.s - carDistance)
-      if (dist < minDist) {
-        minDist = dist
-        nearestNodeIndex = i
-      }
+    // Advance forward while the car passes nodes, and allow rewinding gently if needed
+    while (
+      this.lastNodeIndex < nodes.length - 2 &&
+      carDistance > nodes[this.lastNodeIndex + 1].s
+    ) {
+      this.lastNodeIndex++
     }
 
-    const currentNode = this.trackData.nodes[nearestNodeIndex]
-    const nextNodeIndex = Math.min(nearestNodeIndex + 1, this.trackData.nodes.length - 1)
-    const nextNode = this.trackData.nodes[nextNodeIndex]
+    while (this.lastNodeIndex > 0 && carDistance < nodes[this.lastNodeIndex].s) {
+      this.lastNodeIndex--
+    }
+
+    const currentNode = nodes[this.lastNodeIndex]
+    const nextNodeIndex = Math.min(this.lastNodeIndex + 1, nodes.length - 1)
+    const nextNode = nodes[nextNodeIndex]
 
     // Interpolate position between nodes
     const segmentLength = nextNode.s - currentNode.s
