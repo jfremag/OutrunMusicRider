@@ -691,6 +691,10 @@ export class ThreeScene {
       const lookaheadHeight = nodes[lookaheadIndex].pos.y
       const bumpHeightAhead = Math.max(0, lookaheadHeight - carPos.y)
 
+      // Only apply impulse while grounded so we don't keep stacking upward
+      // velocity when the track keeps rising.
+      const grounded = this.carVerticalOffset <= 0.01
+
       // Boost jump strength based on how tall the upcoming bump is as well as
       // how quickly the track is rising right now. Taller bumps fling the car
       // higher so action-y hops scale with the terrain.
@@ -698,17 +702,23 @@ export class ThreeScene {
       const slopeKick = Math.max(0, slopeSpeed) * 0.05
       const upwardKick = Math.max(bumpKick, slopeKick)
 
-      if (upwardKick > 0) {
-        this.carVerticalVelocity += upwardKick
+      if (grounded && upwardKick > 0) {
+        this.carVerticalVelocity += Math.min(upwardKick, 10)
       }
 
-      if (currentNode.isJump || nextNode.isJump) {
+      if (grounded && (currentNode.isJump || nextNode.isJump)) {
         this.carVerticalVelocity = Math.max(this.carVerticalVelocity, 12)
       }
 
-      const gravity = 28
+      const gravity = 32
       this.carVerticalVelocity -= gravity * deltaSeconds
+      this.carVerticalVelocity = THREE.MathUtils.clamp(
+        this.carVerticalVelocity,
+        -30,
+        30
+      )
       this.carVerticalOffset += this.carVerticalVelocity * deltaSeconds
+      this.carVerticalOffset = Math.min(this.carVerticalOffset, 8)
 
       if (this.carVerticalOffset < 0) {
         this.carVerticalOffset = 0
