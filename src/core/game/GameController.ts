@@ -130,11 +130,29 @@ export class GameController {
 
     if (safeLanes.length === 0) return
 
-    safeLanes.sort(
-      (a, b) => Math.abs(a - this.gameState.car.laneOffsetIndex) - Math.abs(b - this.gameState.car.laneOffsetIndex)
-    )
+    const scoredLanes = safeLanes.map(lane => {
+      const lanePulses = upcomingPulses.filter(pulse => pulse.laneIndex === lane)
+      const nearestObstacle = lanePulses.reduce((nearest, pulse) => {
+        const delta = pulse.pos.z - carDistance
+        return delta > 0 ? Math.min(nearest, delta) : nearest
+      }, lookAhead)
 
-    this.gameState.car.laneOffsetIndex = safeLanes[0]
+      const obstaclePressure = lanePulses.reduce((pressure, pulse) => {
+        const delta = pulse.pos.z - carDistance
+        return pressure + (delta > 0 ? 1 / Math.max(1, delta) : 0)
+      }, 0)
+
+      const laneChangeCost = Math.abs(lane - this.gameState.car.laneOffsetIndex) * 0.35
+      const randomness = Math.random() * 0.15
+
+      const safetyScore = nearestObstacle - obstaclePressure - laneChangeCost + randomness
+
+      return { lane, safetyScore }
+    })
+
+    scoredLanes.sort((a, b) => b.safetyScore - a.safetyScore)
+
+    this.gameState.car.laneOffsetIndex = scoredLanes[0].lane
     this.lastAutoLaneChange = audioTime
   }
 }

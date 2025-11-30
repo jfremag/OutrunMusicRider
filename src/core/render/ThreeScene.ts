@@ -374,39 +374,65 @@ export class ThreeScene {
     for (const pulse of track.treblePulses) {
       const hazardGroup = new THREE.Group()
 
-      const pulseGeometry = new THREE.ConeGeometry(0.45, 1.45, 16)
-      const pulseMaterial = new THREE.MeshStandardMaterial({
-        color: 0xff2d55,
-        emissive: 0xff002f,
-        emissiveIntensity: 1.8,
-        transparent: true,
-        opacity: 0.95,
-        roughness: 0.25,
-        metalness: 0.45
+      const crystalGeometry = new THREE.ConeGeometry(0.45, 3.6, 8, 1, true)
+      const positionAttr = crystalGeometry.getAttribute('position')
+      const displacement = new THREE.Vector3()
+
+      for (let i = 0; i < positionAttr.count; i++) {
+        displacement.set(0, 0, 0).randomDirection().multiplyScalar(Math.random() * 0.18)
+        positionAttr.setXYZ(
+          i,
+          positionAttr.getX(i) + displacement.x * 0.6,
+          positionAttr.getY(i) + displacement.y,
+          positionAttr.getZ(i) + displacement.z * 0.6
+        )
+      }
+      positionAttr.needsUpdate = true
+      crystalGeometry.computeVertexNormals()
+
+      const crystalMaterial = new THREE.MeshPhysicalMaterial({
+        color: 0xff1a2b,
+        emissive: 0xff0018,
+        emissiveIntensity: 1.9,
+        roughness: 0.2,
+        metalness: 0.15,
+        transmission: 0.35,
+        thickness: 0.45,
+        clearcoat: 0.55,
+        clearcoatRoughness: 0.1,
+        flatShading: true
       })
 
-      const pulseMesh = new THREE.Mesh(pulseGeometry, pulseMaterial)
-      const scale = 0.9 + pulse.intensity * 1.4
-      pulseMesh.scale.set(scale, scale, scale)
-      pulseMesh.position.y = 0.9
-      pulseMesh.rotation.x = Math.PI
-      pulseMesh.rotation.y = pulse.time
+      const blade = new THREE.Mesh(crystalGeometry, crystalMaterial)
+      const scale = 0.9 + pulse.intensity * 1.6
+      blade.scale.set(scale, scale * 1.15, scale)
+      blade.position.y = 1.25
+      blade.rotation.x = Math.PI
+      blade.rotation.y = pulse.time * 1.5
+      blade.rotation.z = THREE.MathUtils.degToRad(6 + Math.random() * 8)
 
-      const warningPlateGeometry = new THREE.CylinderGeometry(0.75, 0.75, 0.12, 18)
+      const shardGeometry = new THREE.ConeGeometry(0.25, 2.4, 6)
+      const shard = new THREE.Mesh(shardGeometry, crystalMaterial)
+      shard.position.set(0.5, 0.9, -0.2)
+      shard.rotation.set(Math.PI * 0.92, pulse.time * 1.8, Math.PI * 0.12)
+      shard.scale.setScalar(0.9 + pulse.intensity)
+
+      const warningPlateGeometry = new THREE.CylinderGeometry(0.9, 0.9, 0.14, 24)
       const warningPlateMaterial = new THREE.MeshStandardMaterial({
-        color: 0xff6a9e,
-        emissive: 0xff003b,
-        emissiveIntensity: 1.4,
-        roughness: 0.4,
-        metalness: 0.2,
-        opacity: 0.7,
+        color: 0x77000f,
+        emissive: 0xff002b,
+        emissiveIntensity: 1.2,
+        roughness: 0.35,
+        metalness: 0.15,
+        opacity: 0.8,
         transparent: true
       })
       const warningPlate = new THREE.Mesh(warningPlateGeometry, warningPlateMaterial)
       warningPlate.position.y = 0.05
 
       hazardGroup.add(warningPlate)
-      hazardGroup.add(pulseMesh)
+      hazardGroup.add(blade)
+      hazardGroup.add(shard)
       hazardGroup.position.copy(pulse.pos)
       hazardGroup.position.y = Math.max(0, pulse.pos.y)
 
@@ -517,7 +543,7 @@ export class ThreeScene {
     this.cameraOrbitAngle = THREE.MathUtils.lerp(
       this.cameraOrbitAngle,
       targetOrbitAngle,
-      0.08
+      0.16
     )
 
     const laneOffsetVec = right.clone().multiplyScalar(gameState.car.laneOffset)
@@ -538,14 +564,17 @@ export class ThreeScene {
     baseCameraOffset.applyAxisAngle(currentNode.up, this.cameraOrbitAngle)
 
     const cameraPosition = carPos.clone().add(baseCameraOffset)
-    this.camera.position.copy(cameraPosition)
+    this.camera.position.lerp(cameraPosition, 0.2)
 
     const lookTarget = carPos
       .clone()
       .add(carForward.clone().multiplyScalar(5))
-      .add(right.clone().multiplyScalar(this.cameraOrbitAngle * cameraDistance * 0.4))
+      .add(right.clone().multiplyScalar(this.cameraOrbitAngle * cameraDistance * 0.45))
 
-    this.camera.lookAt(lookTarget)
+    const targetMatrix = new THREE.Matrix4().lookAt(this.camera.position, lookTarget, currentNode.up)
+    const targetQuaternion = new THREE.Quaternion().setFromRotationMatrix(targetMatrix)
+
+    this.camera.quaternion.slerp(targetQuaternion, 0.25)
 
     // Render
     this.updateSunPlacement()
