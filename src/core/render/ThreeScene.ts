@@ -17,7 +17,7 @@ export class ThreeScene {
   private startTime = performance.now()
   private cameraOrbitAngle = 0
   private smoothedCarPosition = new THREE.Vector3()
-  private smoothedCarForward = new THREE.Vector3()
+  private smoothedCarForward = new THREE.Vector3(0, 0, 1)
   private carOrientation = new THREE.Quaternion()
 
   constructor(canvas: HTMLCanvasElement) {
