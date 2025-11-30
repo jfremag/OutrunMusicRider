@@ -16,6 +16,9 @@ export class ThreeScene {
   private trebleMeshes: THREE.Object3D[] = []
   private startTime = performance.now()
   private cameraOrbitAngle = 0
+  private smoothedCarPosition = new THREE.Vector3()
+  private smoothedCarForward = new THREE.Vector3()
+  private carOrientation = new THREE.Quaternion()
 
   constructor(canvas: HTMLCanvasElement) {
     // Ensure canvas has dimensions
@@ -264,6 +267,9 @@ export class ThreeScene {
 
   setTrack(track: TrackData): void {
     this.trackData = track
+    this.smoothedCarPosition.set(0, 0, 0)
+    this.smoothedCarForward.set(0, 0, 1)
+    this.carOrientation.identity()
 
     this.clearTrebleMeshes()
 
@@ -374,65 +380,80 @@ export class ThreeScene {
     for (const pulse of track.treblePulses) {
       const hazardGroup = new THREE.Group()
 
-      const crystalGeometry = new THREE.ConeGeometry(0.45, 3.6, 8, 1, true)
-      const positionAttr = crystalGeometry.getAttribute('position')
-      const displacement = new THREE.Vector3()
+      const bladeHeight = 5.5
+      const bladeGeometry = new THREE.CylinderGeometry(0.55, 0.18, bladeHeight, 10, 6, true)
+      bladeGeometry.translate(0, bladeHeight / 2, 0)
 
-      for (let i = 0; i < positionAttr.count; i++) {
-        displacement.set(0, 0, 0).randomDirection().multiplyScalar(Math.random() * 0.18)
-        positionAttr.setXYZ(
-          i,
-          positionAttr.getX(i) + displacement.x * 0.6,
-          positionAttr.getY(i) + displacement.y,
-          positionAttr.getZ(i) + displacement.z * 0.6
-        )
+      const bladePosition = bladeGeometry.getAttribute('position')
+      const workingVec = new THREE.Vector3()
+
+      for (let i = 0; i < bladePosition.count; i++) {
+        workingVec.fromBufferAttribute(bladePosition, i)
+        const heightT = THREE.MathUtils.clamp(workingVec.y / bladeHeight, 0, 1)
+        const twist = THREE.MathUtils.lerp(0, Math.PI * 0.55, heightT)
+        const jagged = 0.08 + (1 - heightT) * 0.16
+
+        const radius = new THREE.Vector2(workingVec.x, workingVec.z).length()
+        const angle = Math.atan2(workingVec.z, workingVec.x) + twist
+        const warpedRadius = radius + (Math.random() - 0.5) * jagged
+
+        workingVec.x = Math.cos(angle) * warpedRadius
+        workingVec.z = Math.sin(angle) * warpedRadius
+        workingVec.y += (Math.random() - 0.5) * jagged * 0.35
+
+        bladePosition.setXYZ(i, workingVec.x, workingVec.y, workingVec.z)
       }
-      positionAttr.needsUpdate = true
-      crystalGeometry.computeVertexNormals()
+
+      bladePosition.needsUpdate = true
+      bladeGeometry.computeVertexNormals()
 
       const crystalMaterial = new THREE.MeshPhysicalMaterial({
-        color: 0xff1a2b,
-        emissive: 0xff0018,
-        emissiveIntensity: 1.9,
-        roughness: 0.2,
-        metalness: 0.15,
-        transmission: 0.35,
-        thickness: 0.45,
-        clearcoat: 0.55,
-        clearcoatRoughness: 0.1,
-        flatShading: true
+        color: 0xff204d,
+        emissive: 0x9f002c,
+        emissiveIntensity: 1.6,
+        roughness: 0.18,
+        metalness: 0.25,
+        transmission: 0.48,
+        thickness: 0.65,
+        clearcoat: 0.65,
+        clearcoatRoughness: 0.08,
+        flatShading: false
       })
 
-      const blade = new THREE.Mesh(crystalGeometry, crystalMaterial)
-      const scale = 0.9 + pulse.intensity * 1.6
-      blade.scale.set(scale, scale * 1.15, scale)
-      blade.position.y = 1.25
-      blade.rotation.x = Math.PI
-      blade.rotation.y = pulse.time * 1.5
-      blade.rotation.z = THREE.MathUtils.degToRad(6 + Math.random() * 8)
+      const blade = new THREE.Mesh(bladeGeometry, crystalMaterial)
+      const scale = 0.9 + pulse.intensity * 1.2
+      blade.scale.set(scale, scale * 1.2, scale)
+      blade.position.y = 0.35
+      blade.rotation.y = pulse.time * 0.9 + THREE.MathUtils.degToRad(20)
+      blade.rotation.x = THREE.MathUtils.degToRad(-96)
 
-      const shardGeometry = new THREE.ConeGeometry(0.25, 2.4, 6)
-      const shard = new THREE.Mesh(shardGeometry, crystalMaterial)
-      shard.position.set(0.5, 0.9, -0.2)
-      shard.rotation.set(Math.PI * 0.92, pulse.time * 1.8, Math.PI * 0.12)
-      shard.scale.setScalar(0.9 + pulse.intensity)
+      const sideShardGeometry = new THREE.ConeGeometry(0.16, 2.8, 6)
+      const shardA = new THREE.Mesh(sideShardGeometry, crystalMaterial)
+      shardA.position.set(0.5, 0.9, -0.2)
+      shardA.rotation.set(Math.PI * 0.94, pulse.time * 1.2, Math.PI * 0.18)
+      shardA.scale.setScalar(0.8 + pulse.intensity * 0.6)
 
-      const warningPlateGeometry = new THREE.CylinderGeometry(0.9, 0.9, 0.14, 24)
+      const shardB = shardA.clone()
+      shardB.position.set(-0.42, 0.7, 0.25)
+      shardB.rotation.set(Math.PI * 0.9, pulse.time * 1.05, Math.PI * -0.25)
+
+      const warningPlateGeometry = new THREE.CylinderGeometry(1.05, 0.95, 0.18, 20)
       const warningPlateMaterial = new THREE.MeshStandardMaterial({
-        color: 0x77000f,
-        emissive: 0xff002b,
-        emissiveIntensity: 1.2,
-        roughness: 0.35,
-        metalness: 0.15,
-        opacity: 0.8,
+        color: 0x5d0015,
+        emissive: 0xe60035,
+        emissiveIntensity: 1.45,
+        roughness: 0.4,
+        metalness: 0.2,
+        opacity: 0.85,
         transparent: true
       })
       const warningPlate = new THREE.Mesh(warningPlateGeometry, warningPlateMaterial)
-      warningPlate.position.y = 0.05
+      warningPlate.position.y = 0.04
 
       hazardGroup.add(warningPlate)
       hazardGroup.add(blade)
-      hazardGroup.add(shard)
+      hazardGroup.add(shardA)
+      hazardGroup.add(shardB)
       hazardGroup.position.copy(pulse.pos)
       hazardGroup.position.y = Math.max(0, pulse.pos.y)
 
@@ -519,7 +540,7 @@ export class ThreeScene {
       clampedT
     )
 
-    // Interpolate forward direction
+    // Interpolate forward direction and gently smooth it to reduce jitter
     const carForward = new THREE.Vector3().lerpVectors(
       currentNode.forward,
       nextNode.forward,
@@ -549,14 +570,45 @@ export class ThreeScene {
     const laneOffsetVec = right.clone().multiplyScalar(gameState.car.laneOffset)
     carPos.add(laneOffsetVec)
 
+    if (this.smoothedCarPosition.lengthSq() === 0) {
+      this.smoothedCarPosition.copy(carPos)
+      this.smoothedCarForward.copy(carForward)
+      const initialMatrix = new THREE.Matrix4().lookAt(
+        carPos,
+        carPos.clone().add(carForward),
+        currentNode.up
+      )
+      this.carOrientation.setFromRotationMatrix(initialMatrix)
+    }
+
+    const positionSmooth = 0.2
+    const forwardSmooth = 0.15
+
+    this.smoothedCarPosition.lerp(carPos, positionSmooth)
+    this.smoothedCarForward.lerp(carForward, forwardSmooth).normalize()
+
+    const targetCarMatrix = new THREE.Matrix4().lookAt(
+      this.smoothedCarPosition,
+      this.smoothedCarPosition.clone().add(this.smoothedCarForward),
+      currentNode.up
+    )
+    const targetCarOrientation = new THREE.Quaternion().setFromRotationMatrix(
+      targetCarMatrix
+    )
+    this.carOrientation.slerp(targetCarOrientation, 0.2)
+
     // Position and orient car
-    this.carMesh.position.copy(carPos)
-    this.carMesh.lookAt(carPos.clone().add(carForward))
+    this.carMesh.position.copy(this.smoothedCarPosition)
+    this.carMesh.quaternion.copy(this.carOrientation)
+
+    const smoothedRight = new THREE.Vector3()
+      .crossVectors(this.smoothedCarForward, currentNode.up)
+      .normalize()
 
     // Position camera behind and slightly above car with orbiting glide during lane changes
     const cameraDistance = 8
     const cameraHeight = 3
-    const baseCameraOffset = carForward
+    const baseCameraOffset = this.smoothedCarForward
       .clone()
       .multiplyScalar(-cameraDistance)
       .add(currentNode.up.clone().multiplyScalar(cameraHeight))
@@ -566,10 +618,12 @@ export class ThreeScene {
     const cameraPosition = carPos.clone().add(baseCameraOffset)
     this.camera.position.lerp(cameraPosition, 0.2)
 
-    const lookTarget = carPos
+    const lookTarget = this.smoothedCarPosition
       .clone()
-      .add(carForward.clone().multiplyScalar(5))
-      .add(right.clone().multiplyScalar(this.cameraOrbitAngle * cameraDistance * 0.45))
+      .add(this.smoothedCarForward.clone().multiplyScalar(5))
+      .add(
+        smoothedRight.clone().multiplyScalar(this.cameraOrbitAngle * cameraDistance * 0.45)
+      )
 
     const targetMatrix = new THREE.Matrix4().lookAt(this.camera.position, lookTarget, currentNode.up)
     const targetQuaternion = new THREE.Quaternion().setFromRotationMatrix(targetMatrix)
