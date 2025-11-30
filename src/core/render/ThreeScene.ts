@@ -276,6 +276,9 @@ export class ThreeScene {
     this.disposeCarChildren(target)
 
     const clone = template.clone(true)
+    // Align the imported model so its nose points down +Z to match track forward vectors
+    clone.rotation.y += Math.PI
+
     const bounds = new THREE.Box3().setFromObject(clone)
     const size = new THREE.Vector3()
     bounds.getSize(size)
