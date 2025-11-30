@@ -255,7 +255,7 @@ export class ThreeScene {
   private loadCarTemplate(): Promise<THREE.Object3D | null> {
     if (!this.carTemplatePromise) {
       const loader = new GLTFLoader()
-      const CAR_MODEL_URL = '/models/Sports%20Car.glb'
+      const CAR_MODEL_URL = '/models/Kart.glb'
 
       this.carTemplatePromise = new Promise(resolve => {
         loader.load(
