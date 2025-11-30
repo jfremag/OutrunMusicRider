@@ -695,31 +695,46 @@ export class ThreeScene {
       // velocity when the track keeps rising.
       const grounded = this.carVerticalOffset <= 0.01
 
-      // Boost jump strength based on how tall the upcoming bump is as well as
-      // how quickly the track is rising right now. Taller bumps fling the car
-      // higher so action-y hops scale with the terrain.
-      const bumpKick = bumpHeightAhead > 0.25 ? bumpHeightAhead * 8 + riseThisFrame * 12 : 0
-      const slopeKick = Math.max(0, slopeSpeed) * 0.08
-      const upwardKick = Math.max(bumpKick, slopeKick)
+      // Only apply impulse while grounded so we don't keep stacking upward
+      // velocity when the track keeps rising.
+      const grounded = this.carVerticalOffset <= 0.01
 
-      if (grounded && upwardKick > 0) {
-        this.carVerticalVelocity += Math.min(upwardKick, 12)
+      // Detect the top of a bump: we climbed into this node and are about to
+      // level out or descend. Only then should we fire a jump impulse so we
+      // don't launch early on small ramps.
+      const prevNodeIndex = Math.max(this.lastNodeIndex - 1, 0)
+      const prevNode = nodes[prevNodeIndex]
+      const prevSegment = Math.max(currentNode.s - prevNode.s, 1)
+      const nextSegment = Math.max(nextNode.s - currentNode.s, 1)
+      const slopeBehind = (currentNode.pos.y - prevNode.pos.y) / prevSegment
+      const slopeAhead = (nextNode.pos.y - currentNode.pos.y) / nextSegment
+      const cresting = slopeBehind > 0.02 && slopeAhead <= 0.005
+      const crestWindow = clampedT > 0.55
+      const crestHeight = Math.max(0, currentNode.pos.y - prevNode.pos.y)
+      const significantCrest = crestHeight > 0.2 || bumpHeightAhead > 0.25
+
+      if (grounded && cresting && crestWindow && significantCrest) {
+        const crestKick = crestHeight * 9 + Math.max(0, bumpHeightAhead) * 6
+        const momentumKick = Math.max(0, slopeSpeed) * 0.06 + riseThisFrame * 8
+        const jumpStrength = 12 + crestKick + momentumKick
+        this.carVerticalVelocity = Math.max(this.carVerticalVelocity, Math.min(jumpStrength, 20))
       }
 
-      const jumpWindow = clampedT > 0.28
+      const jumpWindow = clampedT > 0.55
       if (grounded && jumpWindow && (currentNode.isJump || nextNode.isJump)) {
-        this.carVerticalVelocity = Math.max(this.carVerticalVelocity, 16)
+        this.carVerticalVelocity = Math.max(this.carVerticalVelocity, 18)
       }
 
-      const gravity = 26
-      this.carVerticalVelocity -= gravity * deltaSeconds
+      const gravity = 32
+      const fallMultiplier = this.carVerticalVelocity < 0 ? 1.35 : 1
+      this.carVerticalVelocity -= gravity * fallMultiplier * deltaSeconds
       this.carVerticalVelocity = THREE.MathUtils.clamp(
         this.carVerticalVelocity,
-        -30,
+        -38,
         30
       )
       this.carVerticalOffset += this.carVerticalVelocity * deltaSeconds
-      this.carVerticalOffset = Math.min(this.carVerticalOffset, 8)
+      this.carVerticalOffset = Math.min(this.carVerticalOffset, 7)
 
       if (this.carVerticalOffset < 0) {
         this.carVerticalOffset = 0
