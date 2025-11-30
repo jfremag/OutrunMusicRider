@@ -11,7 +11,6 @@ export class ThreeScene {
   private carMesh: THREE.Group | null = null
   private trackData: TrackData | null = null
   private skyMesh: THREE.Mesh | null = null
-  private gridMesh: THREE.Mesh | null = null
   private starField: THREE.Points | null = null
   private sunMesh: THREE.Mesh | null = null
   private trebleMeshes: THREE.Object3D[] = []

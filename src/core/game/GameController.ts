@@ -61,7 +61,7 @@ export class GameController {
     }
   }
 
-  update(dt: number): void {
+  update(): void {
     // Always render, regardless of track or playback state
     if (!this.trackData || !this.audioEngine.isAudioPlaying()) {
       // Still render even if not playing

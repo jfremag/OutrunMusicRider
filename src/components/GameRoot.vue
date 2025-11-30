@@ -48,7 +48,6 @@ const isReady = ref(false)
 const isPlaying = ref(false)
 const loadedFileName = ref<string>('')
 let animationFrameId: number | null = null
-let lastTime = 0
 
 let resizeCanvas: (() => void) | null = null
 let handleKeyDown: ((e: KeyboardEvent) => void) | null = null
@@ -92,13 +91,9 @@ onMounted(async () => {
   gameController.value = markRaw(new GameController(canvasEl.value))
 
   // Start animation loop
-  lastTime = performance.now()
-  const animate = (currentTime: number) => {
-    const dt = (currentTime - lastTime) / 1000 // Convert to seconds
-    lastTime = currentTime
-
+  const animate = () => {
     if (gameController.value) {
-      gameController.value.update(dt)
+      gameController.value.update()
     }
 
     animationFrameId = requestAnimationFrame(animate)
