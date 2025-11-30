@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { TrackData } from '../track/TrackTypes'
 import { GameState, getLaneOffset } from '../game/GameState'
 
@@ -19,6 +20,8 @@ export class ThreeScene {
   private smoothedCarPosition = new THREE.Vector3()
   private smoothedCarForward = new THREE.Vector3(0, 0, 1)
   private carOrientation = new THREE.Quaternion()
+  private carTemplate: THREE.Object3D | null = null
+  private carTemplatePromise: Promise<THREE.Object3D | null> | null = null
 
   constructor(canvas: HTMLCanvasElement) {
     // Ensure canvas has dimensions
@@ -69,7 +72,9 @@ export class ThreeScene {
     this.createBackground()
 
     // Create initial car
-    this.createCar()
+    this.createCar().catch(error => {
+      console.error('Failed to create car', error)
+    })
 
     // Set default camera position - closer to see the scene better
     this.camera.position.set(0, 3, 8)
@@ -225,12 +230,88 @@ export class ThreeScene {
     this.scene.add(ground)
   }
 
-  private createCar(): void {
+  private async createCar(): Promise<void> {
     const carGroup = new THREE.Group()
+    this.carMesh = carGroup
+    this.scene.add(carGroup)
 
-    // Car body (lower box) - make it more visible with emissive
+    // Build a quick neon fallback while the glTF loads (or if it fails)
+    this.buildFallbackCar(carGroup)
+
+    try {
+      const template = await this.loadCarTemplate()
+      if (template) {
+        this.replaceCarWithTemplate(carGroup, template)
+      }
+    } catch (error) {
+      console.warn('Falling back to procedural car because the GLB failed to load', error)
+    }
+  }
+
+  private loadCarTemplate(): Promise<THREE.Object3D | null> {
+    if (!this.carTemplatePromise) {
+      const loader = new GLTFLoader()
+      const CAR_MODEL_URL = '/models/Sports%20Car.glb'
+
+      this.carTemplatePromise = new Promise(resolve => {
+        loader.load(
+          CAR_MODEL_URL,
+          gltf => {
+            this.carTemplate = gltf.scene
+            resolve(this.carTemplate)
+          },
+          undefined,
+          error => {
+            console.error('Unable to load car model', error)
+            resolve(null)
+          }
+        )
+      })
+    }
+
+    return this.carTemplatePromise
+  }
+
+  private replaceCarWithTemplate(target: THREE.Group, template: THREE.Object3D): void {
+    this.disposeCarChildren(target)
+
+    const clone = template.clone(true)
+    const bounds = new THREE.Box3().setFromObject(clone)
+    const size = new THREE.Vector3()
+    bounds.getSize(size)
+
+    const desiredLength = 2.4
+    const scaleFactor = size.z > 0 ? desiredLength / size.z : 1
+    clone.scale.setScalar(scaleFactor)
+
+    // Lift the model so its lowest point sits on the ground plane
+    const baseOffset = -bounds.min.y * scaleFactor
+    if (!Number.isNaN(baseOffset)) {
+      clone.position.y += baseOffset
+    }
+
+    clone.traverse(obj => {
+      if (obj instanceof THREE.Mesh) {
+        obj.castShadow = true
+        obj.receiveShadow = true
+        if (Array.isArray(obj.material)) {
+          obj.material.forEach(mat => {
+            if (mat instanceof THREE.Material) {
+              mat.needsUpdate = true
+            }
+          })
+        } else if (obj.material instanceof THREE.Material) {
+          obj.material.needsUpdate = true
+        }
+      }
+    })
+
+    target.add(clone)
+  }
+
+  private buildFallbackCar(carGroup: THREE.Group): void {
     const bodyGeometry = new THREE.BoxGeometry(1.2, 0.4, 2)
-    const bodyMaterial = new THREE.MeshStandardMaterial({ 
+    const bodyMaterial = new THREE.MeshStandardMaterial({
       color: 0xff0066,
       emissive: 0xff0066,
       emissiveIntensity: 0.3
@@ -239,9 +320,8 @@ export class ThreeScene {
     body.position.y = 0.2
     carGroup.add(body)
 
-    // Car cabin (upper box) - make it more visible with emissive
     const cabinGeometry = new THREE.BoxGeometry(0.9, 0.5, 1.2)
-    const cabinMaterial = new THREE.MeshStandardMaterial({ 
+    const cabinMaterial = new THREE.MeshStandardMaterial({
       color: 0x00ffff,
       emissive: 0x00ffff,
       emissiveIntensity: 0.3
@@ -250,7 +330,6 @@ export class ThreeScene {
     cabin.position.set(0, 0.65, -0.2)
     carGroup.add(cabin)
 
-    // Add some neon glow effect
     const glowGeometry = new THREE.BoxGeometry(1.3, 0.5, 2.1)
     const glowMaterial = new THREE.MeshBasicMaterial({
       color: 0xff00ff,
@@ -260,9 +339,20 @@ export class ThreeScene {
     const glow = new THREE.Mesh(glowGeometry, glowMaterial)
     glow.position.y = 0.25
     carGroup.add(glow)
+  }
 
-    this.carMesh = carGroup
-    this.scene.add(carGroup)
+  private disposeCarChildren(target: THREE.Group): void {
+    for (const child of [...target.children]) {
+      target.remove(child)
+      if (child instanceof THREE.Mesh) {
+        child.geometry.dispose()
+        if (Array.isArray(child.material)) {
+          child.material.forEach(mat => mat.dispose())
+        } else if (child.material instanceof THREE.Material) {
+          child.material.dispose()
+        }
+      }
+    }
   }
 
   setTrack(track: TrackData): void {
