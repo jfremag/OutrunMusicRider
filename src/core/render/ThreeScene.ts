@@ -698,19 +698,20 @@ export class ThreeScene {
       // Boost jump strength based on how tall the upcoming bump is as well as
       // how quickly the track is rising right now. Taller bumps fling the car
       // higher so action-y hops scale with the terrain.
-      const bumpKick = bumpHeightAhead * 6 + riseThisFrame * 10
-      const slopeKick = Math.max(0, slopeSpeed) * 0.05
+      const bumpKick = bumpHeightAhead > 0.25 ? bumpHeightAhead * 8 + riseThisFrame * 12 : 0
+      const slopeKick = Math.max(0, slopeSpeed) * 0.08
       const upwardKick = Math.max(bumpKick, slopeKick)
 
       if (grounded && upwardKick > 0) {
-        this.carVerticalVelocity += Math.min(upwardKick, 10)
+        this.carVerticalVelocity += Math.min(upwardKick, 12)
       }
 
-      if (grounded && (currentNode.isJump || nextNode.isJump)) {
-        this.carVerticalVelocity = Math.max(this.carVerticalVelocity, 12)
+      const jumpWindow = clampedT > 0.28
+      if (grounded && jumpWindow && (currentNode.isJump || nextNode.isJump)) {
+        this.carVerticalVelocity = Math.max(this.carVerticalVelocity, 16)
       }
 
-      const gravity = 32
+      const gravity = 26
       this.carVerticalVelocity -= gravity * deltaSeconds
       this.carVerticalVelocity = THREE.MathUtils.clamp(
         this.carVerticalVelocity,
