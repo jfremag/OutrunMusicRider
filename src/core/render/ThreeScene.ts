@@ -264,6 +264,8 @@ export class ThreeScene {
           CAR_MODEL_URL,
           gltf => {
             this.carTemplate = gltf.scene
+            // --- FIX ORIENTATION: turn front from -X to +Z ---
+            this.carTemplate.rotation.y = -Math.PI / 2; // 90 degrees
             resolve(this.carTemplate)
           },
           undefined,
