@@ -35,6 +35,7 @@
       </div>
     </div>
     <canvas ref="canvasEl" class="game-canvas"></canvas>
+    <div class="damage-flash" :class="{ 'is-visible': showDamageFlash }"></div>
   </div>
 </template>
 
@@ -47,7 +48,9 @@ const gameController = shallowRef<GameController | null>(null)
 const isReady = ref(false)
 const isPlaying = ref(false)
 const loadedFileName = ref<string>('')
+const showDamageFlash = ref(false)
 let animationFrameId: number | null = null
+let flashTimeoutId: number | null = null
 
 let resizeCanvas: (() => void) | null = null
 let handleKeyDown: ((e: KeyboardEvent) => void) | null = null
@@ -89,6 +92,17 @@ onMounted(async () => {
 
   // Create game controller - this will initialize Three.js
   gameController.value = markRaw(new GameController(canvasEl.value))
+
+  gameController.value.setCollisionHandler(() => {
+    showDamageFlash.value = true
+    if (flashTimeoutId !== null) {
+      window.clearTimeout(flashTimeoutId)
+    }
+    flashTimeoutId = window.setTimeout(() => {
+      showDamageFlash.value = false
+      flashTimeoutId = null
+    }, 180)
+  })
 
   // Start animation loop
   const animate = () => {
@@ -144,6 +158,9 @@ onUnmounted(() => {
   if (handleKeyDown) {
     window.removeEventListener('keydown', handleKeyDown)
   }
+  if (flashTimeoutId !== null) {
+    window.clearTimeout(flashTimeoutId)
+  }
   if (animationFrameId !== null) {
     cancelAnimationFrame(animationFrameId)
   }
@@ -197,6 +214,20 @@ const handlePause = () => {
   top: 0;
   left: 0;
   z-index: 1;
+}
+
+.damage-flash {
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 0, 0, 0.5);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  z-index: 15;
+}
+
+.damage-flash.is-visible {
+  opacity: 1;
 }
 
 .controls {

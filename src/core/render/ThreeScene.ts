@@ -28,6 +28,8 @@ export class ThreeScene {
   private lastNodeIndex = 0
   private carTemplate: THREE.Object3D | null = null
   private carTemplatePromise: Promise<THREE.Object3D | null> | null = null
+  private collisionCallback: (() => void) | null = null
+  private lastCollisionTime = 0
 
   constructor(canvas: HTMLCanvasElement) {
     // Ensure canvas has dimensions
@@ -373,6 +375,7 @@ export class ThreeScene {
     this.carOrientation.identity()
     this.carVerticalVelocity = 0
     this.carVerticalOffset = 0
+    this.lastCollisionTime = 0
     this.lastTrackHeight = track.nodes[0]?.pos.y ?? 0
     this.lastFrameTime = null
     this.lastNodeIndex = 0
@@ -451,6 +454,10 @@ export class ThreeScene {
 
     // Add treble-driven accents
     this.addTreblePulses(track)
+  }
+
+  setCollisionCallback(callback: (() => void) | null): void {
+    this.collisionCallback = callback
   }
 
   private addLaneMarkers(track: TrackData, roadWidth: number): void {
@@ -611,6 +618,35 @@ export class ThreeScene {
     this.renderer.setSize(width, height)
   }
 
+  private handleObstacleCollision(carPosition: THREE.Vector3): void {
+    if (!this.trackData || !this.collisionCallback) return
+
+    // Allow the car to clear hazards when sufficiently airborne
+    if (this.carVerticalOffset > 0.5) return
+
+    const now = performance.now()
+    const cooldownMs = 400
+
+    if (now - this.lastCollisionTime < cooldownMs) return
+
+    const hazardRadius = 1.3
+    const verticalTolerance = 1.5
+
+    const collision = this.trackData.treblePulses.some(pulse => {
+      if (Math.abs(carPosition.y - pulse.pos.y) > verticalTolerance) {
+        return false
+      }
+
+      const distance = carPosition.distanceTo(pulse.pos)
+      return distance < hazardRadius
+    })
+
+    if (collision) {
+      this.lastCollisionTime = now
+      this.collisionCallback()
+    }
+  }
+
   renderFrame(gameState: GameState): void {
     const now = performance.now()
     const deltaSeconds = this.lastFrameTime
@@ -708,6 +744,12 @@ export class ThreeScene {
     }
 
     if (deltaSeconds > 0) {
+      const trackDelta = carPos.y - this.lastTrackHeight
+
+      if (this.carVerticalOffset > 0) {
+        this.carVerticalOffset = Math.max(0, this.carVerticalOffset - trackDelta)
+      }
+
       const slopeSpeed = (carPos.y - this.lastTrackHeight) / deltaSeconds
       const riseThisFrame = Math.max(0, carPos.y - this.lastTrackHeight)
       const lookaheadIndex = Math.min(nextNodeIndex + 3, nodes.length - 1)
@@ -792,6 +834,14 @@ export class ThreeScene {
 
     const visualCarPosition = this.smoothedCarPosition.clone()
     visualCarPosition.y += this.carVerticalOffset
+
+    const relativeVerticalOffset = Math.max(
+      0,
+      visualCarPosition.y - this.smoothedCarPosition.y
+    )
+    gameState.car.verticalOffset = relativeVerticalOffset
+
+    this.handleObstacleCollision(visualCarPosition)
 
     // Position and orient car
     this.carMesh.position.copy(visualCarPosition)

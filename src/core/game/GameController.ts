@@ -50,6 +50,10 @@ export class GameController {
   }
 
   handleInput(key: string): void {
+    if (!this.canSteer()) {
+      return
+    }
+
     if (key === 'ArrowLeft') {
       const currentLane = this.gameState.car.laneOffsetIndex
       const newLane = Math.max(-1, currentLane - 1) as -1 | 0 | 1
@@ -96,6 +100,8 @@ export class GameController {
   }
 
   private maybeAutoDodge(audioTime: number): void {
+    if (!this.canSteer()) return
+
     if (!this.trackData) return
 
     const carDistance = this.gameState.car.distance
@@ -154,6 +160,14 @@ export class GameController {
 
     this.gameState.car.laneOffsetIndex = scoredLanes[0].lane
     this.lastAutoLaneChange = audioTime
+  }
+
+  setCollisionHandler(handler: (() => void) | null): void {
+    this.threeScene.setCollisionCallback(handler)
+  }
+
+  private canSteer(): boolean {
+    return this.gameState.car.verticalOffset <= 0.05
   }
 }
 
