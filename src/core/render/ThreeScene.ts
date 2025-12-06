@@ -495,19 +495,19 @@ export class ThreeScene {
         hazardGroup.position.copy(pulse.pos)
         hazardGroup.position.y = Math.max(0, pulse.pos.y)
 
-        const warningPlateGeometry = new THREE.CylinderGeometry(1.05, 0.95, 0.18, 20)
-        const warningPlateMaterial = new THREE.MeshStandardMaterial({
-          color: 0x5d0015,
-          emissive: 0xe60035,
-          emissiveIntensity: 1.45,
-          roughness: 0.4,
-          metalness: 0.2,
-          opacity: 0.85,
-          transparent: true
-        })
-        const warningPlate = new THREE.Mesh(warningPlateGeometry, warningPlateMaterial)
-        warningPlate.position.y = 0.04
-        hazardGroup.add(warningPlate)
+        // const warningPlateGeometry = new THREE.CylinderGeometry(1.05, 0.95, 0.18, 20)
+        // const warningPlateMaterial = new THREE.MeshStandardMaterial({
+        //   color: 0x5d0015,
+        //   emissive: 0xe60035,
+        //   emissiveIntensity: 1.45,
+        //   roughness: 0.4,
+        //   metalness: 0.2,
+        //   opacity: 0.85,
+        //   transparent: true
+        // })
+        // const warningPlate = new THREE.Mesh(warningPlateGeometry, warningPlateMaterial)
+        // warningPlate.position.y = 0.04
+        // hazardGroup.add(warningPlate)
 
         if (template) {
           const sword = this.cloneSwordTemplate(template)
@@ -515,9 +515,9 @@ export class ThreeScene {
           sword.scale.multiplyScalar(scale)
           sword.position.y = 0.1
           sword.rotation.set(
-            THREE.MathUtils.degToRad(-75),
-            pulse.time * 0.6 + THREE.MathUtils.degToRad(30),
-            THREE.MathUtils.degToRad(4)
+            THREE.MathUtils.degToRad(-15),
+            pulse.time * 0.1 + THREE.MathUtils.degToRad(120),
+            THREE.MathUtils.degToRad(1)
           )
           hazardGroup.add(sword)
         }
