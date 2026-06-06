@@ -8,6 +8,7 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js'
 import { createFilmGrainPass } from './FilmGrainPass'
 import { createVignettePass } from './VignettePass'
+import { createColorGradePass } from './ColorGradePass'
 import { createChromaticAberrationPass } from './ChromaticAberrationPass'
 import { createNeonCompositePass } from './NeonCompositePass'
 import { RimGlowShell } from './RimGlowShell'
@@ -83,7 +84,7 @@ const SHAKE_DURATION_MS = 400 // envelope length: amplitude eases to 0 over this
 const SHAKE_DECAY = 0.92 // residual offset decay multiplier per frame (clean settle)
 const COLLISION_SHAKE_AMPLITUDE = 0.6 // fixed Wipeout-style impact spike
 const PARTICLES_PER_DROP_UNIT = 60 // burst count multiplier on drop entry (× dropStrength)
-const PARTICLES_PER_COLLISION = 80 // burst count on an obstacle hit
+const PARTICLES_PER_COLLISION = 42 // burst count on an obstacle hit (kept below a bloom wash)
 const PARTICLE_LIFETIME_DROP = 0.6 // seconds a drop-burst particle lives
 const PARTICLE_LIFETIME_COLLISION = 0.5 // seconds a collision-burst particle lives
 
@@ -102,7 +103,7 @@ const VIGNETTE_DARKNESS = 0.7 // corner brightness (30% darker) to frame the car
 // Collision is now a punchy spike that STACKS on top of an always-present flux
 // baseline (iteration 5), so it's pulled down from 1.0 -> 0.8: the lens kick still
 // reads as a hard impact but no longer oversaturates against the live baseline.
-const CHROMATIC_COLLISION_PEAK = 0.8 // max CA contribution at the instant of a hit
+const CHROMATIC_COLLISION_PEAK = 0.6 // max CA contribution at the instant of a hit
 const CHROMATIC_DECAY_MS = 220 // ease the lens kick back to 0 over this window
 
 // Spectral-flux -> chromatic-aberration tuning (iteration 5). Flux (treble
@@ -198,7 +199,16 @@ const ANALOGOUS_PALETTE = {
   aquaCore: new THREE.Color(0x1ee0ff),
   cyanGlow: new THREE.Color(0x6af6ff),
   mintHighlight: new THREE.Color(0x30f3c8),
-  redAccent: new THREE.Color(0xff3a53)
+  redAccent: new THREE.Color(0xff3a53),
+  // "Sunny outrun holiday" warm sunset band (live-tuning pass). Synthwave is the
+  // juxtaposition of a WARM sunset sky against COOL neon geometry: these warm tones
+  // drive the sky gradient, the banded retro sun and the horizon haze, while the
+  // cyan/magenta neons above keep driving the grid, car, edges and obstacles.
+  sunGold: new THREE.Color(0xffd86b), // brightest horizon / sun core
+  sunAmber: new THREE.Color(0xff8a3d), // sun mid / horizon glow
+  hotMagenta: new THREE.Color(0xff2e7e), // sky mid band / sun rim
+  deepPurple: new THREE.Color(0x3a1170), // sky upper band
+  skyIndigo: new THREE.Color(0x0a0a2e) // sky zenith (deep indigo, never dead black)
 }
 
 export class ThreeScene {
@@ -219,6 +229,7 @@ export class ThreeScene {
   // collision envelope; grain advances its time uniform each frame; vignette is static.
   private chromaticPass: ShaderPass
   private filmGrainPass: ShaderPass
+  private colorGradePass: ShaderPass
   // Proper anti-aliasing (SMAA). The composer renders to offscreen targets, which bypasses
   // the renderer's MSAA, so geometry edges (the road/sword silhouettes against the bright
   // sky) were aliased; this pass smooths them on the tone-mapped image.
@@ -250,7 +261,13 @@ export class ThreeScene {
   private skyMaterial: THREE.ShaderMaterial | null = null
   private starField: THREE.Points | null = null
   private sunMesh: THREE.Mesh | null = null
+  private sunMaterial: THREE.ShaderMaterial | null = null
   private gridHelper: THREE.GridHelper | null = null
+  private groundMesh: THREE.Mesh | null = null
+  // Cell size of the neon floor grid. The grid + ground snap-follow the car in
+  // whole-cell steps so the signature synthwave floor scrolls infinitely beneath
+  // the car instead of being left behind at the world origin.
+  private gridCellSize = 10
   private beatIndicator: THREE.Sprite | null = null
   private beatIndicatorMaterial: THREE.SpriteMaterial | null = null
   private trebleMeshes: THREE.Object3D[] = []
@@ -367,6 +384,17 @@ export class ThreeScene {
     this.composer.addPass(this.bloomPass)
     this.composer.addPass(new OutputPass())
 
+    // Cinematic colour grade (vibrance + teal-orange split-tone + warmth) on the
+    // tone-mapped image — the "professional finish" pass. Applied before AA/lens FX so
+    // it grades the clean image, then SMAA smooths, then the lens effects sit on top.
+    this.colorGradePass = createColorGradePass({
+      saturation: 0.22,
+      splitTone: 0.55,
+      warmth: 0.02,
+      contrast: 0.08
+    })
+    this.composer.addPass(this.colorGradePass)
+
     // Anti-aliasing on the tone-mapped (LDR/sRGB) image, right after OutputPass and before
     // the lens grade, so it smooths the geometry edges without fighting the intentional
     // chromatic-aberration fringing that follows.
@@ -430,11 +458,14 @@ export class ThreeScene {
     this.composer.addPass(this.neonCompositePass)
 
     // Lighting - brighter for better visibility
-    const ambientLight = new THREE.AmbientLight(ANALOGOUS_PALETTE.cyanGlow, 0.4)
+    // Cool teal ambient fill — the shadow side of the natural teal/orange split.
+    const ambientLight = new THREE.AmbientLight(ANALOGOUS_PALETTE.cyanGlow, 0.38)
     this.scene.add(ambientLight)
 
-    const directionalLight = new THREE.DirectionalLight(ANALOGOUS_PALETTE.mintHighlight, 1.15)
-    directionalLight.position.set(10, 10, 10)
+    // Warm golden key, low on the horizon like the setting sun: the highlight side
+    // of the split-tone, so surfaces read teal in shadow and gold where the sun hits.
+    const directionalLight = new THREE.DirectionalLight(ANALOGOUS_PALETTE.sunGold, 1.35)
+    directionalLight.position.set(-6, 5, 12)
     this.scene.add(directionalLight)
 
     // Add a point light near the car for better visibility
@@ -490,14 +521,17 @@ export class ThreeScene {
       side: THREE.BackSide,
       depthWrite: false,
       uniforms: {
-        topColor: { value: ANALOGOUS_PALETTE.abyss.clone() },
-        midColor: { value: ANALOGOUS_PALETTE.midnight.clone() },
-        horizonColor: { value: ANALOGOUS_PALETTE.cyanGlow.clone() },
+        // Warm sunset stops, horizon (brightest) -> zenith. The fragment shader
+        // stacks them into a 5-band gradient for the classic outrun sky.
+        horizonColor: { value: ANALOGOUS_PALETTE.sunGold.clone() },
+        amberColor: { value: ANALOGOUS_PALETTE.sunAmber.clone() },
+        magentaColor: { value: ANALOGOUS_PALETTE.hotMagenta.clone() },
+        purpleColor: { value: ANALOGOUS_PALETTE.deepPurple.clone() },
+        topColor: { value: ANALOGOUS_PALETTE.skyIndigo.clone() },
         glowIntensity: { value: 1.0 },
         // Mood uniforms (iteration 2): perceived brightness 0..1 and the drop
-        // decay envelope 0..1. The fragment shader blends the horizon band from
-        // cool cyan toward hot magenta in HSL as these rise, so the whole sky
-        // emotionally tracks the music.
+        // decay envelope 0..1. As they rise the sky brightens and the horizon
+        // glow shifts amber -> hot-pink, so the whole sky tracks the music.
         spectralCentroidNorm: { value: 0.0 },
         dropIntensity: { value: 0.0 }
       },
@@ -511,53 +545,40 @@ export class ThreeScene {
       `,
       fragmentShader: `
         varying vec3 vWorldPosition;
-        uniform vec3 topColor;
-        uniform vec3 midColor;
         uniform vec3 horizonColor;
+        uniform vec3 amberColor;
+        uniform vec3 magentaColor;
+        uniform vec3 purpleColor;
+        uniform vec3 topColor;
         uniform float glowIntensity;
         uniform float spectralCentroidNorm;
         uniform float dropIntensity;
 
-        // Standard HSL->RGB so we can sweep hue/sat/lightness by mood directly.
-        vec3 hsl2rgb(vec3 hsl) {
-          float h = hsl.x;
-          float s = hsl.y;
-          float l = hsl.z;
-          float c = (1.0 - abs(2.0 * l - 1.0)) * s;
-          float hp = h * 6.0;
-          float x = c * (1.0 - abs(mod(hp, 2.0) - 1.0));
-          vec3 rgb;
-          if (hp < 1.0) rgb = vec3(c, x, 0.0);
-          else if (hp < 2.0) rgb = vec3(x, c, 0.0);
-          else if (hp < 3.0) rgb = vec3(0.0, c, x);
-          else if (hp < 4.0) rgb = vec3(0.0, x, c);
-          else if (hp < 5.0) rgb = vec3(x, 0.0, c);
-          else rgb = vec3(c, 0.0, x);
-          return rgb + (l - 0.5 * c);
-        }
-
         void main() {
-          float h = normalize(vWorldPosition).y * 0.5 + 0.5;
-          float horizonGlow = pow(clamp(1.0 - h, 0.0, 1.0), 2.0) * glowIntensity;
+          float h = clamp(normalize(vWorldPosition).y * 0.5 + 0.5, 0.0, 1.0);
 
-          // Mood drive: combine slow brightness with the drop spike for the warmth.
-          float mood = clamp(spectralCentroidNorm + dropIntensity * 0.5, 0.0, 1.0);
+          // Mood: slow brightness + the drop spike. Lifts/heats the sky on energy.
+          float mood = clamp(spectralCentroidNorm * 0.6 + dropIntensity * 0.5, 0.0, 1.0);
 
-          // Hue 200deg (cyan) -> 320deg (magenta); sat 0.4 -> 1.0; light 0.2 -> 0.35.
-          float hue = mix(200.0, 320.0, mood) / 360.0;
-          float sat = mix(0.4, 1.0, mood);
-          float light = mix(0.2, 0.35, mood);
-          vec3 moodHorizon = hsl2rgb(vec3(hue, sat, light));
+          // Warm sunset, five stops: gold horizon -> amber -> hot magenta ->
+          // deep purple -> indigo zenith. Purple is delayed so the warm amber/pink
+          // ("golden hour") carries higher up the sky before it cools to purple/indigo.
+          vec3 col = mix(horizonColor, amberColor, smoothstep(0.0, 0.13, h));
+          col = mix(col, magentaColor, smoothstep(0.11, 0.34, h));
+          col = mix(col, purpleColor, smoothstep(0.36, 0.62, h));
+          col = mix(col, topColor, smoothstep(0.60, 0.98, h));
 
-          // Blend the static palette horizon toward the mood color as mood rises.
-          vec3 horizon = mix(horizonColor, moodHorizon, mood);
+          // Tight horizon glow band: the sun bleeding its warmth into the sky. Amber
+          // at rest, pushes toward hot pink as the music energizes. Kept moderate so
+          // the defined sun disc stays the brightest element (no bloom wash on drops).
+          float horizonGlow = pow(clamp(1.0 - h, 0.0, 1.0), 3.5) * glowIntensity;
+          vec3 glowTint = mix(vec3(1.0, 0.55, 0.22), vec3(1.0, 0.32, 0.55), mood);
+          col += glowTint * horizonGlow * (0.5 + dropIntensity * 0.25);
 
-          vec3 gradient = mix(horizon, midColor, smoothstep(0.05, 0.35, h));
-          gradient = mix(gradient, topColor, smoothstep(0.35, 1.0, h));
-          // Warm horizon glow tint also shifts toward magenta on hot moods.
-          vec3 glowTint = mix(vec3(1.0, 0.23, 0.33), vec3(1.0, 0.15, 0.7), mood);
-          gradient += glowTint * horizonGlow * (0.48 + dropIntensity * 0.25);
-          gl_FragColor = vec4(gradient, 1.0);
+          // Emotional lift: gently brighten the whole sky on energetic sections.
+          col += col * mood * 0.12;
+
+          gl_FragColor = vec4(col, 1.0);
         }
       `
     })
@@ -569,11 +590,13 @@ export class ThreeScene {
 
     // Add star field to keep the sky lively without a texture
     const starGeometry = new THREE.BufferGeometry()
-    const starCount = 600
+    const starCount = 1800
     const starPositions = new Float32Array(starCount * 3)
     for (let i = 0; i < starCount; i++) {
       const theta = Math.random() * Math.PI * 2
-      const phi = Math.acos(THREE.MathUtils.randFloat(-0.2, 1))
+      // Bias well into the upper hemisphere so stars sit above the bright sunset band
+      // rather than washing out inside the horizon glow.
+      const phi = Math.acos(THREE.MathUtils.randFloat(0.08, 1))
       const radius = 4800
       const x = radius * Math.sin(phi) * Math.cos(theta)
       const y = radius * Math.cos(phi)
@@ -584,11 +607,11 @@ export class ThreeScene {
     }
     starGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3))
     const starMaterial = new THREE.PointsMaterial({
-      color: ANALOGOUS_PALETTE.cyanGlow,
-      size: 8,
+      color: new THREE.Color(0xfff2e0), // warm white
+      size: 6,
       sizeAttenuation: true,
       transparent: true,
-      opacity: 0.9,
+      opacity: 0.85,
       blending: THREE.AdditiveBlending,
       depthWrite: false
     })
@@ -596,15 +619,21 @@ export class ThreeScene {
     this.starField.layers.set(NEON_LAYER) // glowing hero (iteration 7)
     this.scene.add(this.starField)
 
-    // Add retro sun disc hovering on the horizon
-    const sunGeometry = new THREE.PlaneGeometry(120, 120, 1, 1)
+    // The iconic big banded retro sun. A DEFINED disc (normal-blended, not additive)
+    // with a gold->magenta vertical gradient and classic outrun horizontal scanline
+    // gaps across its lower half that widen toward the bottom so it dissolves into the
+    // horizon. Normal blending + saturated (non-white) colors keep it from blowing out
+    // the frame the way the old soft additive blob did; the primary bloom pass gives it
+    // a tasteful halo. Stays OFF the hero-isolation layer so it never washes the composite.
+    const sunGeometry = new THREE.PlaneGeometry(380, 380, 1, 1)
     const sunMaterial = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      blending: THREE.NormalBlending,
       uniforms: {
-        innerColor: { value: ANALOGOUS_PALETTE.cyanGlow.clone() },
-        rimColor: { value: ANALOGOUS_PALETTE.redAccent.clone() }
+        topColor: { value: ANALOGOUS_PALETTE.sunGold.clone() },
+        bottomColor: { value: ANALOGOUS_PALETTE.hotMagenta.clone() },
+        dropIntensity: { value: 0.0 }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -615,65 +644,120 @@ export class ThreeScene {
       `,
       fragmentShader: `
         varying vec2 vUv;
-        uniform vec3 innerColor;
-        uniform vec3 rimColor;
+        uniform vec3 topColor;
+        uniform vec3 bottomColor;
+        uniform float dropIntensity;
 
         void main() {
-          vec2 center = vUv - 0.5;
-          float dist = length(center);
-          float alpha = smoothstep(0.5, 0.1, dist);
-          float rim = smoothstep(0.35, 0.18, dist);
-          vec3 color = mix(rimColor, innerColor, rim);
-          gl_FragColor = vec4(color, alpha * 1.0);
+          vec2 p = vUv - 0.5;
+          float dist = length(p);
+
+          // Crisp disc plus a soft hot-pink corona beyond it — the underlit magenta halo
+          // that makes a synthwave sun read as iconic rather than merely "a gold circle".
+          // Both MUST fade out before the inscribed-circle radius (0.5), otherwise the halo
+          // bleeds into the square plane's corners and the quad edge clips it into a box.
+          float disc = smoothstep(0.4, 0.37, dist);
+          float halo = smoothstep(0.49, 0.4, dist) * (1.0 - disc);
+
+          // Magenta-dominant two-tone: gold only across the top third, hot pink/magenta
+          // through the broad lower body so the sun sings synthwave, not just sunset gold.
+          vec3 col = mix(bottomColor, topColor, smoothstep(0.55, 0.96, vUv.y));
+
+          // Bold outrun scanline gaps across the lower half; fewer, wider bars whose gaps
+          // grow toward the bottom so the sun dissolves into the horizon.
+          float bands = 1.0;
+          if (vUv.y < 0.5) {
+            float t = (0.5 - vUv.y) / 0.5;        // 0 at center, 1 at the bottom
+            float gapFrac = mix(0.18, 0.85, t);   // gaps grow toward the bottom
+            float s = fract(vUv.y * 18.0);
+            bands = smoothstep(gapFrac - 0.05, gapFrac + 0.05, s);
+          }
+
+          vec3 haloColor = vec3(1.0, 0.16, 0.52); // hot magenta corona
+          float discA = disc * bands;
+          float alpha = max(discA, halo * 0.4);
+          if (alpha < 0.01) discard;
+          vec3 outCol = mix(haloColor, col, discA);
+          // Slight headroom (0.92) so the bright disc doesn't run the bloom away on drops;
+          // a gentle swell keeps it alive on emotional peaks without washing the horizon.
+          outCol *= 0.92 + dropIntensity * 0.15;
+          gl_FragColor = vec4(outCol, alpha);
         }
       `
     })
+    this.sunMaterial = sunMaterial
     this.sunMesh = new THREE.Mesh(sunGeometry, sunMaterial)
     this.sunMesh.position.set(0, 30, -250)
-    this.sunMesh.lookAt(new THREE.Vector3(0, 15, 1000))
-    this.sunMesh.renderOrder = 10
+    this.sunMesh.renderOrder = 5
     this.sunMesh.frustumCulled = false
     this.sunMesh.layers.set(NEON_LAYER) // glowing hero (iteration 7)
     this.scene.add(this.sunMesh)
 
-    // Add fog for depth effect aligned to new palette
-    this.scene.fog = new THREE.Fog(ANALOGOUS_PALETTE.midnight.getHex(), 150, 2000)
+    // Warm sunset haze: distant geometry melts into a magenta/purple horizon glow
+    // instead of a cold teal. Pulled in a touch so the grid fades into the sunset.
+    const fogColor = ANALOGOUS_PALETTE.deepPurple.clone().lerp(ANALOGOUS_PALETTE.hotMagenta, 0.45)
+    this.scene.fog = new THREE.Fog(fogColor.getHex(), 120, 1500)
 
-    // Create neon grid plane - make it more visible
-    const gridSize = 200
-    const gridDivisions = 50
+    // Signature synthwave neon floor. Large enough to reach the horizon haze and
+    // snap-following the car (see updateFloorFollow) so it scrolls infinitely rather
+    // than being left behind at the origin. Lives on NEON_LAYER so it blooms — the
+    // glowing grid is the cool neon counterpoint to the warm sunset sky.
+    const gridSize = 2000
+    const gridDivisions = gridSize / this.gridCellSize // 10-unit cells
     const gridHelper = new THREE.GridHelper(
       gridSize,
       gridDivisions,
-      ANALOGOUS_PALETTE.redAccent.getHex(),
-      ANALOGOUS_PALETTE.cyanGlow.getHex()
+      ANALOGOUS_PALETTE.hotMagenta.getHex(), // center cross (sits under the car)
+      ANALOGOUS_PALETTE.cyanGlow.getHex() // grid lines
     )
-    gridHelper.position.y = 0
-    // GridHelper uses a vertex-colored LineBasicMaterial (no emissive channel), so
-    // we drive its "glow" by scaling the material color's brightness each frame —
-    // brighter lines feed more energy into the bloom pass. Mark vertex colors so we
-    // can multiply the whole material uniformly. Tone-map disabled keeps neon punchy.
+    gridHelper.position.y = 0.02
     const gridMaterial = gridHelper.material as THREE.LineBasicMaterial
     gridMaterial.toneMapped = false
     gridMaterial.transparent = true
-    // Sharp, non-neon geometry stays on the default layer (iteration 7): the focal
-    // hierarchy keeps the grid crisp and below the bloom threshold so it doesn't smear.
-    gridHelper.layers.set(LAYER_DEFAULT)
+    gridHelper.layers.set(NEON_LAYER) // glowing neon floor
     this.gridHelper = gridHelper
     this.scene.add(gridHelper)
-    
-    // Add a ground plane for better visibility
-    const groundGeometry = new THREE.PlaneGeometry(200, 200)
+
+    // Dark indigo ground beneath the grid so the neon lines pop and the floor reads
+    // as wet, sunset-reflecting asphalt. Also snap-follows the car (updateFloorFollow).
+    const groundGeometry = new THREE.PlaneGeometry(4000, 4000)
+    // Matte (no metalness): with no environment map, metalness only yields a harsh
+    // specular highlight of the key light that blooms into a stray hotspot. Keep it
+    // matte and dark so the neon grid + sun stay the only bright things on the floor.
     const groundMaterial = new THREE.MeshStandardMaterial({
-      color: ANALOGOUS_PALETTE.tealShadow,
-      emissive: ANALOGOUS_PALETTE.abyss,
-      emissiveIntensity: 0.5
+      color: new THREE.Color(0x0a1230),
+      emissive: ANALOGOUS_PALETTE.deepPurple,
+      emissiveIntensity: 0.22,
+      roughness: 0.95,
+      metalness: 0.0
     })
     const ground = new THREE.Mesh(groundGeometry, groundMaterial)
     ground.rotation.x = -Math.PI / 2
-    ground.position.y = 0
-    ground.layers.set(LAYER_DEFAULT) // sharp non-neon geometry (iteration 7)
+    ground.position.y = -0.2
+    ground.layers.set(LAYER_DEFAULT) // sharp non-neon backdrop
+    this.groundMesh = ground
     this.scene.add(ground)
+  }
+
+  /**
+   * Snap the neon floor grid and the ground plane to the car in whole-cell steps so
+   * the signature synthwave floor scrolls infinitely beneath the car. Without this the
+   * static origin-centered grid is left behind almost immediately (the "grid disappears
+   * in motion" bug). Whole-cell snapping keeps the lines phase-aligned so the motion
+   * reads as the world streaming past, not the grid sliding.
+   */
+  private updateFloorFollow(center: THREE.Vector3): void {
+    const cell = this.gridCellSize
+    const snappedX = Math.round(center.x / cell) * cell
+    const snappedZ = Math.round(center.z / cell) * cell
+    if (this.gridHelper) {
+      this.gridHelper.position.x = snappedX
+      this.gridHelper.position.z = snappedZ
+    }
+    if (this.groundMesh) {
+      this.groundMesh.position.x = center.x
+      this.groundMesh.position.z = center.z
+    }
   }
 
   /**
@@ -1068,14 +1152,37 @@ export class ThreeScene {
     roadGeometry.setIndex(indices)
     roadGeometry.computeVertexNormals()
 
-    // Road material with synthwave colors
+    // Road material: dark, wet, sunset-reflecting asphalt. Low roughness + higher
+    // metalness so the warm key light and neon edges streak across it like a wet
+    // night highway, while staying dark enough that the neon edges/grid read as the
+    // brightest things on the floor.
     const roadMaterial = new THREE.MeshStandardMaterial({
-      color: ANALOGOUS_PALETTE.tealShadow,
+      color: new THREE.Color(0x0a2236),
       emissive: ANALOGOUS_PALETTE.midnight,
-      emissiveIntensity: 0.55,
-      roughness: 0.55,
-      metalness: 0.25
+      emissiveIntensity: 0.4,
+      roughness: 0.6,
+      metalness: 0.15
     })
+    // Bake glowing neon edges + lane-divider lines straight into the road's emissive
+    // using the across-width UV.x. Baking (rather than separate strip meshes) means
+    // they ride the per-frame road morph perfectly and need no disposal — the road IS
+    // the Wipeout/Tron light-track. USE_UV forces the vUv varying through the standard
+    // shader even though the road carries no texture map.
+    roadMaterial.defines = { USE_UV: '' }
+    roadMaterial.onBeforeCompile = (shader) => {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+        float ru = vUv.x;
+        float rEdge = smoothstep(0.045, 0.0, ru) + smoothstep(0.955, 1.0, ru);
+        float rDiv = smoothstep(0.012, 0.0, abs(ru - 0.3333)) + smoothstep(0.012, 0.0, abs(ru - 0.6667));
+        // Fade the neon down the track so the long edge lines don't accumulate into a
+        // blown-out bloom hotspot at the vanishing point — bright by the car, hazing out
+        // into the distance (reads as natural atmospheric depth too).
+        float rFade = 1.0 - smoothstep(35.0, 300.0, length(vViewPosition));
+        totalEmissiveRadiance += (vec3(0.25, 0.85, 1.0) * rEdge * 1.35 + vec3(0.6, 0.95, 1.0) * rDiv * 0.6) * rFade;`
+      )
+    }
 
     this.roadMesh = new THREE.Mesh(roadGeometry, roadMaterial)
     this.roadMesh.layers.set(LAYER_DEFAULT) // sharp non-neon geometry (iteration 7)
@@ -1089,9 +1196,6 @@ export class ThreeScene {
     this.baseRoadPositions = new Float32Array(basePosAttr.array as Float32Array)
     this.roadMorphAmplitude = 0
     this.roadMorphPhase = 0
-
-    // Add lane markers
-    this.addLaneMarkers(track, roadWidth)
 
     // Add treble-driven accents
     this.addTreblePulses(track)
@@ -1150,35 +1254,6 @@ export class ThreeScene {
     origin.y += 0.55 + Math.random() * 0.4
     origin.z += (Math.random() - 0.5) * 0.8
     this.particlePool.emitBurst(count, origin, TREBLE_BURST_SPEED, color, TREBLE_BURST_LIFETIME)
-  }
-
-  private addLaneMarkers(track: TrackData, roadWidth: number): void {
-    const laneMarkerGeometry = new THREE.BoxGeometry(0.1, 0.05, 0.5)
-    const laneMarkerMaterial = new THREE.MeshStandardMaterial({
-      color: ANALOGOUS_PALETTE.redAccent,
-      emissive: ANALOGOUS_PALETTE.redAccent,
-      emissiveIntensity: 0.85
-    })
-
-    const laneWidth = roadWidth / 3
-    const laneOffsets = [-laneWidth, 0, laneWidth]
-
-    // Add markers periodically along the track
-    for (let i = 0; i < track.nodes.length; i += 5) {
-      const node = track.nodes[i]
-      const direction = node.forward
-      const right = new THREE.Vector3().crossVectors(direction, node.up).normalize()
-
-      for (const offset of laneOffsets) {
-        const markerPos = new THREE.Vector3()
-          .addVectors(node.pos, right.clone().multiplyScalar(offset))
-
-        const marker = new THREE.Mesh(laneMarkerGeometry, laneMarkerMaterial)
-        marker.position.copy(markerPos)
-        marker.lookAt(markerPos.clone().add(direction))
-        this.scene.add(marker)
-      }
-    }
   }
 
   private addTreblePulses(track: TrackData): void {
@@ -1341,7 +1416,13 @@ export class ThreeScene {
 
     if (now - this.lastCollisionTime < cooldownMs) return
 
-    const hazardRadius = 1.3
+    // The global planner guarantees the car is always planned into a clear lane, so a
+    // genuine same-lane hit never happens — collisions only came from the smooth lane-
+    // change lerp lagging the discrete plan and grazing an adjacent-lane blade. Lane
+    // centres are 2.5 apart; a 1.0 radius registers a real overlap (car driven into a
+    // blade) without false-firing on the autopilot's mid-transition near-misses, so the
+    // self-driving reads as flawless.
+    const hazardRadius = 1.0
     const verticalTolerance = 1.5
 
     const hitPulse = this.trackData.treblePulses.find(pulse => {
@@ -1650,6 +1731,10 @@ export class ThreeScene {
       this.skyMaterial.uniforms.dropIntensity.value = dropIntensity
     }
 
+    if (this.sunMaterial) {
+      this.sunMaterial.uniforms.dropIntensity.value = dropIntensity
+    }
+
     if (this.gridHelper) {
       const material = this.gridHelper.material as THREE.LineBasicMaterial
       // Map centroid -> a brightness multiplier in the 0.3..0.7 "emissive" range the
@@ -1934,6 +2019,9 @@ export class ThreeScene {
     // sampled this frame.
     this.morphRoadToMusic(gameState, deltaSeconds)
 
+    // Keep the neon floor + ground streaming beneath the car (infinite scroll).
+    this.updateFloorFollow(this.smoothedCarPosition)
+
     // Render
     this.updateSunPlacement()
     this.renderComposite(gameState)
@@ -2101,9 +2189,10 @@ export class ThreeScene {
     const elapsed = (performance.now() - this.startTime) / 1000
     const sunDistance = 800
 
-    // Keep a gentle east-west sweep and vertical drift so the sun returns regularly
-    const horizonWave = Math.sin(elapsed * 0.2) * 0.35
-    const heightWave = Math.sin(elapsed * 0.12) * 20
+    // Mostly pinned dead-center on the horizon (the iconic outrun framing) with only a
+    // whisper of drift so it never reads as a frozen sprite.
+    const horizonWave = Math.sin(elapsed * 0.15) * 0.06
+    const heightWave = Math.sin(elapsed * 0.1) * 6
 
     const right = new THREE.Vector3().crossVectors(viewDir, new THREE.Vector3(0, 1, 0)).normalize()
 
@@ -2112,8 +2201,10 @@ export class ThreeScene {
       .add(viewDir.clone().multiplyScalar(sunDistance))
       .add(right.multiplyScalar(sunDistance * 0.2 * horizonWave))
 
-    const horizonBase = Math.max(20, this.camera.position.y * 0.2)
-    targetPos.y = Math.max(horizonBase, horizonBase + heightWave)
+    // Seat the sun so most of the disc — including its banded lower half — clears the
+    // horizon line and reads as a big sun resting on the grid.
+    const horizonBase = Math.max(55, this.camera.position.y * 0.2 + 48)
+    targetPos.y = horizonBase + heightWave
 
     this.sunMesh.position.copy(targetPos)
     this.sunMesh.quaternion.copy(this.camera.quaternion)

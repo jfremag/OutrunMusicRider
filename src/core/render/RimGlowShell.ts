@@ -109,7 +109,7 @@ export class RimGlowShell {
       0.8 +
       beatStrength * 0.9 +
       spectralCentroid * 0.4 +
-      collisionEnvelope * 1.4 // hard, bright flash on a hit
+      collisionEnvelope * 0.6 // bright punch on a hit (kept below a full-frame bloom wash)
     // Ease toward the target (fast attack feel, soft settle).
     this.smoothedIntensity += (target - this.smoothedIntensity) * 0.4
 
@@ -118,7 +118,7 @@ export class RimGlowShell {
     const hueT = THREE.MathUtils.clamp((spectralCentroid - 0.4) / 0.2, 0, 1)
     this.color.copy(RIM_COLOR_COOL).lerp(RIM_COLOR_HOT, hueT)
     if (collisionEnvelope > 0) {
-      this.color.lerp(WHITE, collisionEnvelope * 0.8)
+      this.color.lerp(WHITE, collisionEnvelope * 0.45)
     }
     const u = this.material.uniforms
     ;(u.glowColor.value as THREE.Color).copy(this.color)
