@@ -3,6 +3,16 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { TrackData } from '../track/TrackTypes'
 import { GameState, getLaneOffset } from '../game/GameState'
 
+const ANALOGOUS_PALETTE = {
+  abyss: new THREE.Color(0x041226),
+  midnight: new THREE.Color(0x0a2f44),
+  tealShadow: new THREE.Color(0x0f3c56),
+  aquaCore: new THREE.Color(0x1ee0ff),
+  cyanGlow: new THREE.Color(0x6af6ff),
+  mintHighlight: new THREE.Color(0x30f3c8),
+  redAccent: new THREE.Color(0xff3a53)
+}
+
 export class ThreeScene {
   private renderer: THREE.WebGLRenderer
   private scene: THREE.Scene
@@ -49,7 +59,7 @@ export class ThreeScene {
     })
     this.renderer.setSize(width, height, false)
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-    this.renderer.setClearColor(0x0a0a1a, 1)
+    this.renderer.setClearColor(ANALOGOUS_PALETTE.abyss.getHex(), 1)
 
     // Scene
     this.scene = new THREE.Scene()
@@ -64,16 +74,16 @@ export class ThreeScene {
     )
 
     // Lighting - brighter for better visibility
-    const ambientLight = new THREE.AmbientLight(0xffffff, 1.0)
+    const ambientLight = new THREE.AmbientLight(ANALOGOUS_PALETTE.cyanGlow, 0.4)
     this.scene.add(ambientLight)
 
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 1.0)
+    const directionalLight = new THREE.DirectionalLight(ANALOGOUS_PALETTE.mintHighlight, 1.15)
     directionalLight.position.set(10, 10, 10)
     this.scene.add(directionalLight)
-    
+
     // Add a point light near the car for better visibility
-    const pointLight = new THREE.PointLight(0x00ffff, 1, 100)
-    pointLight.position.set(0, 5, 0)
+    const pointLight = new THREE.PointLight(ANALOGOUS_PALETTE.redAccent, 1.5, 120)
+    pointLight.position.set(0, 5, 2)
     this.scene.add(pointLight)
 
     // Create synthwave background
@@ -114,9 +124,9 @@ export class ThreeScene {
       side: THREE.BackSide,
       depthWrite: false,
       uniforms: {
-        topColor: { value: new THREE.Color(0x0a0324) },
-        midColor: { value: new THREE.Color(0x1a0a4a) },
-        horizonColor: { value: new THREE.Color(0xff55d3) },
+        topColor: { value: ANALOGOUS_PALETTE.abyss.clone() },
+        midColor: { value: ANALOGOUS_PALETTE.midnight.clone() },
+        horizonColor: { value: ANALOGOUS_PALETTE.cyanGlow.clone() },
         glowIntensity: { value: 1.0 }
       },
       vertexShader: `
@@ -139,7 +149,7 @@ export class ThreeScene {
           float horizonGlow = pow(clamp(1.0 - h, 0.0, 1.0), 2.0) * glowIntensity;
           vec3 gradient = mix(horizonColor, midColor, smoothstep(0.05, 0.35, h));
           gradient = mix(gradient, topColor, smoothstep(0.35, 1.0, h));
-          gradient += vec3(1.0, 0.35, 0.6) * horizonGlow * 0.35;
+          gradient += vec3(1.0, 0.23, 0.33) * horizonGlow * 0.48;
           gl_FragColor = vec4(gradient, 1.0);
         }
       `
@@ -165,11 +175,11 @@ export class ThreeScene {
     }
     starGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3))
     const starMaterial = new THREE.PointsMaterial({
-      color: 0xffffff,
+      color: ANALOGOUS_PALETTE.cyanGlow,
       size: 8,
       sizeAttenuation: true,
       transparent: true,
-      opacity: 0.8,
+      opacity: 0.9,
       blending: THREE.AdditiveBlending,
       depthWrite: false
     })
@@ -183,8 +193,8 @@ export class ThreeScene {
       depthWrite: false,
       blending: THREE.AdditiveBlending,
       uniforms: {
-        innerColor: { value: new THREE.Color(0xffe066) },
-        rimColor: { value: new THREE.Color(0xff4fd8) }
+        innerColor: { value: ANALOGOUS_PALETTE.cyanGlow.clone() },
+        rimColor: { value: ANALOGOUS_PALETTE.redAccent.clone() }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -216,21 +226,26 @@ export class ThreeScene {
     this.scene.add(this.sunMesh)
 
     // Add fog for depth effect aligned to new palette
-    this.scene.fog = new THREE.Fog(0x0a0324, 150, 2000)
+    this.scene.fog = new THREE.Fog(ANALOGOUS_PALETTE.midnight.getHex(), 150, 2000)
 
     // Create neon grid plane - make it more visible
     const gridSize = 200
     const gridDivisions = 50
-    const gridHelper = new THREE.GridHelper(gridSize, gridDivisions, 0xff00ff, 0x00ffff)
+    const gridHelper = new THREE.GridHelper(
+      gridSize,
+      gridDivisions,
+      ANALOGOUS_PALETTE.redAccent.getHex(),
+      ANALOGOUS_PALETTE.cyanGlow.getHex()
+    )
     gridHelper.position.y = 0
     this.scene.add(gridHelper)
     
     // Add a ground plane for better visibility
     const groundGeometry = new THREE.PlaneGeometry(200, 200)
     const groundMaterial = new THREE.MeshStandardMaterial({
-      color: 0x1a1a2e,
-      emissive: 0x0a0a1a,
-      emissiveIntensity: 0.2
+      color: ANALOGOUS_PALETTE.tealShadow,
+      emissive: ANALOGOUS_PALETTE.abyss,
+      emissiveIntensity: 0.35
     })
     const ground = new THREE.Mesh(groundGeometry, groundMaterial)
     ground.rotation.x = -Math.PI / 2
@@ -303,21 +318,7 @@ export class ThreeScene {
       clone.position.y += baseOffset
     }
 
-    clone.traverse(obj => {
-      if (obj instanceof THREE.Mesh) {
-        obj.castShadow = true
-        obj.receiveShadow = true
-        if (Array.isArray(obj.material)) {
-          obj.material.forEach(mat => {
-            if (mat instanceof THREE.Material) {
-              mat.needsUpdate = true
-            }
-          })
-        } else if (obj.material instanceof THREE.Material) {
-          obj.material.needsUpdate = true
-        }
-      }
-    })
+    this.applyPaletteToModel(clone, true)
 
     target.add(clone)
   }
@@ -325,9 +326,9 @@ export class ThreeScene {
   private buildFallbackCar(carGroup: THREE.Group): void {
     const bodyGeometry = new THREE.BoxGeometry(1.2, 0.4, 2)
     const bodyMaterial = new THREE.MeshStandardMaterial({
-      color: 0xff0066,
-      emissive: 0xff0066,
-      emissiveIntensity: 0.3
+      color: ANALOGOUS_PALETTE.aquaCore,
+      emissive: ANALOGOUS_PALETTE.redAccent,
+      emissiveIntensity: 0.45
     })
     const body = new THREE.Mesh(bodyGeometry, bodyMaterial)
     body.position.y = 0.2
@@ -335,9 +336,9 @@ export class ThreeScene {
 
     const cabinGeometry = new THREE.BoxGeometry(0.9, 0.5, 1.2)
     const cabinMaterial = new THREE.MeshStandardMaterial({
-      color: 0x00ffff,
-      emissive: 0x00ffff,
-      emissiveIntensity: 0.3
+      color: ANALOGOUS_PALETTE.cyanGlow,
+      emissive: ANALOGOUS_PALETTE.mintHighlight,
+      emissiveIntensity: 0.35
     })
     const cabin = new THREE.Mesh(cabinGeometry, cabinMaterial)
     cabin.position.set(0, 0.65, -0.2)
@@ -345,9 +346,9 @@ export class ThreeScene {
 
     const glowGeometry = new THREE.BoxGeometry(1.3, 0.5, 2.1)
     const glowMaterial = new THREE.MeshBasicMaterial({
-      color: 0xff00ff,
+      color: ANALOGOUS_PALETTE.redAccent,
       transparent: true,
-      opacity: 0.2
+      opacity: 0.25
     })
     const glow = new THREE.Mesh(glowGeometry, glowMaterial)
     glow.position.y = 0.25
@@ -366,6 +367,40 @@ export class ThreeScene {
         }
       }
     }
+  }
+
+  private applyPaletteToModel(object: THREE.Object3D, isPlayer = false): void {
+    object.traverse(obj => {
+      if (obj instanceof THREE.Mesh) {
+        obj.castShadow = true
+        obj.receiveShadow = true
+
+        const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
+        for (const material of materials) {
+          if (material instanceof THREE.MeshStandardMaterial || material instanceof THREE.MeshPhysicalMaterial) {
+            const hasTexture = Boolean(material.map)
+            const baseTone = isPlayer ? ANALOGOUS_PALETTE.aquaCore : ANALOGOUS_PALETTE.tealShadow
+
+            if (!hasTexture) {
+              material.color.copy(baseTone)
+            } else {
+              material.color.lerp(baseTone, 0.45)
+            }
+
+            const isLightComponent =
+              /light|lamp|emissive/i.test(obj.name) || (material.emissiveIntensity ?? 0) > 0.2
+            const emissiveTarget = isLightComponent ? ANALOGOUS_PALETTE.redAccent : ANALOGOUS_PALETTE.cyanGlow
+
+            material.emissive.copy(emissiveTarget)
+            material.emissiveIntensity = Math.max(material.emissiveIntensity ?? 0, isLightComponent ? 0.7 : 0.3)
+            material.needsUpdate = true
+          } else if (material instanceof THREE.MeshBasicMaterial) {
+            material.color.copy(isPlayer ? ANALOGOUS_PALETTE.cyanGlow : ANALOGOUS_PALETTE.mintHighlight)
+            material.needsUpdate = true
+          }
+        }
+      }
+    })
   }
 
   setTrack(track: TrackData): void {
@@ -440,10 +475,11 @@ export class ThreeScene {
 
     // Road material with synthwave colors
     const roadMaterial = new THREE.MeshStandardMaterial({
-      color: 0x1a1a2e,
-      emissive: 0x0a0a1a,
-      roughness: 0.8,
-      metalness: 0.2
+      color: ANALOGOUS_PALETTE.tealShadow,
+      emissive: ANALOGOUS_PALETTE.midnight,
+      emissiveIntensity: 0.4,
+      roughness: 0.55,
+      metalness: 0.25
     })
 
     this.roadMesh = new THREE.Mesh(roadGeometry, roadMaterial)
@@ -463,9 +499,9 @@ export class ThreeScene {
   private addLaneMarkers(track: TrackData, roadWidth: number): void {
     const laneMarkerGeometry = new THREE.BoxGeometry(0.1, 0.05, 0.5)
     const laneMarkerMaterial = new THREE.MeshStandardMaterial({
-      color: 0xffff00,
-      emissive: 0xffff00,
-      emissiveIntensity: 0.5
+      color: ANALOGOUS_PALETTE.redAccent,
+      emissive: ANALOGOUS_PALETTE.redAccent,
+      emissiveIntensity: 0.7
     })
 
     const laneWidth = roadWidth / 3
@@ -562,6 +598,8 @@ export class ThreeScene {
   private cloneSwordTemplate(template: THREE.Object3D): THREE.Object3D {
     const clone = template.clone(true)
 
+    this.applyPaletteToModel(clone)
+
     clone.traverse(obj => {
       if (obj instanceof THREE.Mesh) {
         obj.castShadow = true
@@ -575,8 +613,9 @@ export class ThreeScene {
           ) {
             const isBlade = material.color.r > material.color.g * 1.1 && material.color.r > material.color.b
             if (isBlade) {
-              material.emissive = new THREE.Color(0xff0f2f)
-              material.emissiveIntensity = 1.75
+              material.color.copy(ANALOGOUS_PALETTE.redAccent)
+              material.emissive.copy(ANALOGOUS_PALETTE.redAccent)
+              material.emissiveIntensity = 1.8
               material.transparent = true
               material.opacity = Math.max(material.opacity ?? 0.72, 0.72)
               if ('transmission' in material) {

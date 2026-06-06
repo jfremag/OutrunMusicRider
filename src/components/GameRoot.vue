@@ -219,7 +219,7 @@ const handlePause = () => {
 .damage-flash {
   position: absolute;
   inset: 0;
-  background: rgba(255, 0, 0, 0.5);
+  background: rgba(255, 58, 83, 0.4);
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.18s ease;
@@ -238,11 +238,11 @@ const handlePause = () => {
   display: flex;
   flex-direction: column;
   gap: 15px;
-  background: rgba(10, 10, 26, 0.8);
+  background: rgba(4, 18, 38, 0.82);
   padding: 20px;
   border-radius: 8px;
-  border: 1px solid rgba(255, 0, 255, 0.3);
-  box-shadow: 0 0 20px rgba(255, 0, 255, 0.2);
+  border: 1px solid rgba(106, 246, 255, 0.35);
+  box-shadow: 0 0 22px rgba(255, 58, 83, 0.25);
 }
 
 .file-input-container {
@@ -252,7 +252,7 @@ const handlePause = () => {
 }
 
 .file-label {
-  color: #00ffff;
+  color: #30f3c8;
   font-size: 14px;
   font-weight: bold;
   text-transform: uppercase;
@@ -260,16 +260,18 @@ const handlePause = () => {
 }
 
 .file-input {
-  color: #fff;
-  background: rgba(26, 10, 46, 0.6);
-  border: 1px solid rgba(255, 0, 255, 0.5);
+  color: #e5faff;
+  background: rgba(10, 47, 68, 0.7);
+  border: 1px solid rgba(30, 224, 255, 0.65);
   padding: 8px;
   border-radius: 4px;
   cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .file-input:hover {
-  border-color: rgba(255, 0, 255, 0.8);
+  border-color: rgba(255, 58, 83, 0.7);
+  box-shadow: 0 0 12px rgba(255, 58, 83, 0.35);
 }
 
 .playback-controls {
@@ -279,7 +281,7 @@ const handlePause = () => {
 
 .control-button {
   padding: 10px 20px;
-  background: linear-gradient(135deg, #ff0066, #ff00ff);
+  background: linear-gradient(135deg, #0db5d6, #6af6ff);
   border: none;
   border-radius: 4px;
   color: #fff;
@@ -288,12 +290,12 @@ const handlePause = () => {
   text-transform: uppercase;
   letter-spacing: 1px;
   transition: all 0.3s;
-  box-shadow: 0 0 10px rgba(255, 0, 255, 0.3);
+  box-shadow: 0 0 12px rgba(106, 246, 255, 0.45);
 }
 
 .control-button:hover:not(:disabled) {
   transform: translateY(-2px);
-  box-shadow: 0 0 15px rgba(255, 0, 255, 0.5);
+  box-shadow: 0 0 18px rgba(255, 58, 83, 0.45);
 }
 
 .control-button:disabled {
@@ -302,21 +304,21 @@ const handlePause = () => {
 }
 
 .status-message {
-  color: #00ffff;
+  color: #6af6ff;
   font-size: 12px;
   text-align: center;
   padding: 8px;
-  background: rgba(0, 255, 255, 0.1);
+  background: rgba(14, 181, 214, 0.18);
   border-radius: 4px;
 }
 
 .file-name-display {
-  color: #00ff00;
+  color: #30f3c8;
   font-size: 12px;
   margin-top: 8px;
   padding: 6px;
-  background: rgba(0, 255, 0, 0.1);
+  background: rgba(48, 243, 200, 0.15);
   border-radius: 4px;
-  border: 1px solid rgba(0, 255, 0, 0.3);
+  border: 1px solid rgba(48, 243, 200, 0.35);
 }
 </style>
