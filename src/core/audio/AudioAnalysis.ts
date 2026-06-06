@@ -73,17 +73,20 @@ export async function analyzeBuffer(buffer: AudioBuffer): Promise<MusicMap> {
   // Detect beats by finding local maxima in RMS
   const beats: BeatMarker[] = []
   const threshold = calculateRMSThreshold(rmsValues)
-  
+  const maxRMS = rmsValues.reduce((max, v) => Math.max(max, v), 0) || 1
+
   for (let i = 1; i < rmsValues.length - 1; i++) {
     const prevRMS = rmsValues[i - 1]
     const currRMS = rmsValues[i]
     const nextRMS = rmsValues[i + 1]
-    
+
     // Local maximum and above threshold
     if (currRMS > prevRMS && currRMS > nextRMS && currRMS > threshold) {
       beats.push({
         time: energySamples[i].time,
-        strength: currRMS
+        // Normalize to 0..1 so downstream visuals (bloom, FOV punch) get a
+        // predictable intensity regardless of the track's absolute loudness.
+        strength: Math.min(1, currRMS / maxRMS)
       })
     }
   }

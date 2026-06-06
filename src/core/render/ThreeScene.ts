@@ -1,7 +1,23 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { TrackData } from '../track/TrackTypes'
 import { GameState, getLaneOffset } from '../game/GameState'
+
+// Beat-sync envelope tuning. The FOV "punch" zooms out fast on a beat onset then
+// eases back; the bloom pulse spikes and decays. These are evaluated procedurally
+// each frame from (now - lastBeatTime) so they are frame-rate independent and need
+// no tween bookkeeping (matching the codebase's manual-lerp style).
+const BASE_FOV = 75
+const FOV_PUNCH = 9 // extra degrees added at peak of a full-strength beat
+const FOV_ATTACK_MS = 90 // ramp up to peak
+const FOV_DECAY_MS = 420 // ease back to base
+const BLOOM_BASE_STRENGTH = 0.95
+const BLOOM_BEAT_BOOST = 0.85 // added at peak of a full-strength beat
+const BLOOM_DECAY_MS = 260
 
 const ANALOGOUS_PALETTE = {
   abyss: new THREE.Color(0x041226),
@@ -17,6 +33,8 @@ export class ThreeScene {
   private renderer: THREE.WebGLRenderer
   private scene: THREE.Scene
   private camera: THREE.PerspectiveCamera
+  private composer: EffectComposer
+  private bloomPass: UnrealBloomPass
   private roadMesh: THREE.Mesh | null = null
   private carMesh: THREE.Group | null = null
   private trackData: TrackData | null = null
@@ -61,17 +79,42 @@ export class ThreeScene {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.setClearColor(ANALOGOUS_PALETTE.abyss.getHex(), 1)
 
+    // Professional color grading: ACES filmic tone mapping + sRGB output gives the
+    // scene a cinematic, "graded" look instead of flat linear rendering. The final
+    // tone-map / color-space conversion is applied by OutputPass at the end of the
+    // composer chain, but we set it on the renderer so OutputPass picks it up.
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping
+    this.renderer.toneMappingExposure = 1.2
+
     // Scene
     this.scene = new THREE.Scene()
 
     // Camera
     const aspect = width / height || 1
     this.camera = new THREE.PerspectiveCamera(
-      75,
+      BASE_FOV,
       aspect,
       0.1,
       10000
     )
+
+    // Post-processing pipeline: RenderPass -> UnrealBloomPass -> OutputPass.
+    // Bloom makes the neon emissives glow like a premium synthwave promo film.
+    // OutputPass performs the ACES tone-map + sRGB conversion as the final step
+    // (correct placement when rendering through a composer).
+    this.composer = new EffectComposer(this.renderer)
+    this.composer.setSize(width, height)
+    this.composer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    this.composer.addPass(new RenderPass(this.scene, this.camera))
+    this.bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(width, height),
+      BLOOM_BASE_STRENGTH, // strength
+      0.8, // radius
+      0.25 // threshold — bloom bright neon while keeping the car silhouette legible
+    )
+    this.composer.addPass(this.bloomPass)
+    this.composer.addPass(new OutputPass())
 
     // Lighting - brighter for better visibility
     const ambientLight = new THREE.AmbientLight(ANALOGOUS_PALETTE.cyanGlow, 0.4)
@@ -113,8 +156,8 @@ export class ThreeScene {
       })
     }
 
-    // Do initial render
-    this.renderer.render(this.scene, this.camera)
+    // Do initial render through the composer so tone mapping / bloom apply.
+    this.composer.render()
   }
 
   private createBackground(): void {
@@ -214,7 +257,7 @@ export class ThreeScene {
           float alpha = smoothstep(0.5, 0.1, dist);
           float rim = smoothstep(0.35, 0.18, dist);
           vec3 color = mix(rimColor, innerColor, rim);
-          gl_FragColor = vec4(color, alpha * 0.95);
+          gl_FragColor = vec4(color, alpha * 1.0);
         }
       `
     })
@@ -245,7 +288,7 @@ export class ThreeScene {
     const groundMaterial = new THREE.MeshStandardMaterial({
       color: ANALOGOUS_PALETTE.tealShadow,
       emissive: ANALOGOUS_PALETTE.abyss,
-      emissiveIntensity: 0.35
+      emissiveIntensity: 0.5
     })
     const ground = new THREE.Mesh(groundGeometry, groundMaterial)
     ground.rotation.x = -Math.PI / 2
@@ -477,7 +520,7 @@ export class ThreeScene {
     const roadMaterial = new THREE.MeshStandardMaterial({
       color: ANALOGOUS_PALETTE.tealShadow,
       emissive: ANALOGOUS_PALETTE.midnight,
-      emissiveIntensity: 0.4,
+      emissiveIntensity: 0.55,
       roughness: 0.55,
       metalness: 0.25
     })
@@ -501,7 +544,7 @@ export class ThreeScene {
     const laneMarkerMaterial = new THREE.MeshStandardMaterial({
       color: ANALOGOUS_PALETTE.redAccent,
       emissive: ANALOGOUS_PALETTE.redAccent,
-      emissiveIntensity: 0.7
+      emissiveIntensity: 0.85
     })
 
     const laneWidth = roadWidth / 3
@@ -655,6 +698,8 @@ export class ThreeScene {
     this.camera.aspect = width / height
     this.camera.updateProjectionMatrix()
     this.renderer.setSize(width, height)
+    this.composer.setSize(width, height)
+    this.bloomPass.setSize(width, height)
   }
 
   private handleObstacleCollision(carPosition: THREE.Vector3): void {
@@ -686,6 +731,51 @@ export class ThreeScene {
     }
   }
 
+  /**
+   * Evaluates the beat-sync envelopes from the audio clock and applies them to the
+   * camera FOV and bloom strength, then renders the composed (bloom + tone-mapped)
+   * frame. Centralizing the render call here means every early-return path in
+   * renderFrame still gets bloom + tone mapping + beat reactivity for free.
+   */
+  private renderComposite(gameState: GameState): void {
+    // Milliseconds since the last beat onset. lastBeatTime is a performance.now()
+    // timestamp recorded by the controller when the audio clock crosses a beat, so
+    // we can compute the envelope phase without the renderer knowing the audio time.
+    // It starts at -Infinity, so before any beat this is huge and envelopes sit at
+    // baseline.
+    const beatAgeMs = performance.now() - gameState.car.lastBeatTime
+    const strength = gameState.car.beatStrength
+
+    // --- FOV punch: fast attack to a strength-scaled peak, eased decay back to base.
+    let fovOffset = 0
+    if (Number.isFinite(beatAgeMs) && beatAgeMs >= 0) {
+      if (beatAgeMs < FOV_ATTACK_MS) {
+        const a = beatAgeMs / FOV_ATTACK_MS
+        // ease-out-quad on the way up for a snappy kick
+        fovOffset = (1 - (1 - a) * (1 - a)) * FOV_PUNCH * strength
+      } else {
+        const d = Math.min(1, (beatAgeMs - FOV_ATTACK_MS) / FOV_DECAY_MS)
+        // ease-in-quad on the way down for a smooth settle
+        fovOffset = (1 - d * d) * FOV_PUNCH * strength
+      }
+    }
+    const targetFov = BASE_FOV + fovOffset
+    if (Math.abs(this.camera.fov - targetFov) > 0.01) {
+      this.camera.fov = targetFov
+      this.camera.updateProjectionMatrix()
+    }
+
+    // --- Bloom pulse: spike on the beat, exponential-ish decay back to baseline.
+    let bloomBoost = 0
+    if (Number.isFinite(beatAgeMs) && beatAgeMs >= 0 && beatAgeMs < BLOOM_DECAY_MS) {
+      const d = beatAgeMs / BLOOM_DECAY_MS
+      bloomBoost = (1 - d) * (1 - d) * BLOOM_BEAT_BOOST * strength
+    }
+    this.bloomPass.strength = BLOOM_BASE_STRENGTH + bloomBoost
+
+    this.composer.render()
+  }
+
   renderFrame(gameState: GameState): void {
     const now = performance.now()
     const deltaSeconds = this.lastFrameTime
@@ -695,7 +785,7 @@ export class ThreeScene {
 
     if (!this.carMesh) {
       // Car not created yet, just render the scene
-      this.renderer.render(this.scene, this.camera)
+      this.renderComposite(gameState)
       return
     }
 
@@ -712,7 +802,7 @@ export class ThreeScene {
 
       // Render
       this.updateSunPlacement()
-      this.renderer.render(this.scene, this.camera)
+      this.renderComposite(gameState)
       return
     }
 
@@ -917,7 +1007,7 @@ export class ThreeScene {
 
     // Render
     this.updateSunPlacement()
-    this.renderer.render(this.scene, this.camera)
+    this.renderComposite(gameState)
   }
 
   private updateSunPlacement(): void {

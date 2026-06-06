@@ -12,6 +12,8 @@ export class GameController {
   private trackData: TrackData | null = null
   private gameState: GameState
   private lastAutoLaneChange = 0
+  // Cursor into musicMap.beats so we only fire each beat once as the clock passes it.
+  private nextBeatIndex = 0
 
   constructor(canvas: HTMLCanvasElement) {
     this.audioEngine = new AudioEngine()
@@ -35,6 +37,7 @@ export class GameController {
 
       // Reset game state
       this.gameState = initGameState()
+      this.nextBeatIndex = 0
     } catch (error) {
       console.error('Error loading file:', error)
       throw error
@@ -83,6 +86,9 @@ export class GameController {
 
     // Update car distance
     this.gameState.car.distance = Math.min(targetDistance, this.trackData.length)
+
+    // Detect beats crossing the audio clock and record them for the renderer.
+    this.updateBeatSync(audioTime)
 
     // Anticipate treble obstacles and dodge within the lane grid
     this.maybeAutoDodge(audioTime)
@@ -160,6 +166,40 @@ export class GameController {
 
     this.gameState.car.laneOffsetIndex = scoredLanes[0].lane
     this.lastAutoLaneChange = audioTime
+  }
+
+  /**
+   * Walks the beat list against the audio clock and records the most recent beat
+   * onset on the car state. A ±75ms window keeps the trigger tight to the kick/snare
+   * so the renderer's FOV punch + bloom pulse land in sync with the music.
+   */
+  private updateBeatSync(audioTime: number): void {
+    if (!this.musicMap) return
+    const beats = this.musicMap.beats
+    if (beats.length === 0) return
+
+    const windowSec = 0.075
+
+    // Handle rewind / replay: if the clock moved well behind the cursor, rewind it.
+    if (this.nextBeatIndex > 0 && audioTime + windowSec < beats[this.nextBeatIndex - 1].time) {
+      this.nextBeatIndex = 0
+    }
+
+    // Consume every beat the clock has now reached (within the leading window).
+    while (
+      this.nextBeatIndex < beats.length &&
+      beats[this.nextBeatIndex].time <= audioTime + windowSec
+    ) {
+      const beat = beats[this.nextBeatIndex]
+      // Only fire if we're genuinely near the onset (not catching up after a seek).
+      if (Math.abs(beat.time - audioTime) <= windowSec) {
+        // Record a wall-clock timestamp so the renderer can phase the FOV/bloom
+        // envelopes directly against performance.now().
+        this.gameState.car.lastBeatTime = performance.now()
+        this.gameState.car.beatStrength = beat.strength
+      }
+      this.nextBeatIndex++
+    }
   }
 
   setCollisionHandler(handler: (() => void) | null): void {
