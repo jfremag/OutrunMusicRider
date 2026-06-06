@@ -173,6 +173,12 @@ const NEON_BLOOM_THRESHOLD_WARM = 0.52
 // car flares as the cinematic moment lands. Driven per-frame from the drop envelope.
 const NEON_COMPOSITE_STRENGTH_BASE = 0.85
 const NEON_COMPOSITE_STRENGTH_DROP = 1.25
+// Resolution scale for the offscreen neon-isolation pass (polish pass). The selective
+// bloom is inherently low-frequency, so rendering its target + UnrealBloomPass at half
+// linear resolution (a quarter of the pixels) is visually indistinguishable but ~4x
+// cheaper for the scene's SECOND render — the main GPU cost flagged for low-end hardware.
+// The neon composite samples this target with normalized UVs, so it upscales for free.
+const NEON_RESOLUTION_SCALE = 0.5
 
 // Treble shimmer tuning (iteration 7). On each high-frequency transient the hero car
 // sprays a small additive burst that pumps straight into the bloom — the missing
@@ -589,8 +595,8 @@ export class ThreeScene {
     // in a consistent display space and reads cleanly with no banding.
     const dpr = Math.min(window.devicePixelRatio, 2)
     this.neonRenderTarget = new THREE.WebGLRenderTarget(
-      Math.floor(width * dpr),
-      Math.floor(height * dpr),
+      Math.floor(width * dpr * NEON_RESOLUTION_SCALE),
+      Math.floor(height * dpr * NEON_RESOLUTION_SCALE),
       {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
@@ -600,7 +606,7 @@ export class ThreeScene {
       }
     )
     this.neonComposer = new EffectComposer(this.renderer, this.neonRenderTarget)
-    this.neonComposer.setSize(width, height)
+    this.neonComposer.setSize(width * NEON_RESOLUTION_SCALE, height * NEON_RESOLUTION_SCALE)
     this.neonComposer.setPixelRatio(dpr)
     // The neon RenderPass clears to transparent black so non-neon pixels contribute
     // nothing to the additive composite (only the neon heroes + their bloom carry light).
@@ -609,7 +615,7 @@ export class ThreeScene {
     neonRenderPass.clearAlpha = 1
     this.neonComposer.addPass(neonRenderPass)
     this.neonBloomPass = new UnrealBloomPass(
-      new THREE.Vector2(width, height),
+      new THREE.Vector2(width * NEON_RESOLUTION_SCALE, height * NEON_RESOLUTION_SCALE),
       NEON_BLOOM_STRENGTH_BASE, // re-driven per frame from the drop envelope
       NEON_BLOOM_RADIUS,
       NEON_BLOOM_THRESHOLD_COOL // re-driven per frame (mood lerp toward WARM)
@@ -1515,12 +1521,16 @@ export class ThreeScene {
     this.renderer.setSize(width, height)
     this.composer.setSize(width, height)
     this.bloomPass.setSize(width, height)
-    // Keep the neon-isolation pipeline (iteration 9) in lock-step with the primary so the
-    // additive composite samples a matching-resolution texture (no scaling artifacts).
+    // The neon-isolation pipeline (iteration 9) renders at NEON_RESOLUTION_SCALE of the
+    // primary (polish pass): half linear res for the low-frequency hero bloom, ~4x cheaper
+    // on the second render. The additive composite samples it with normalized UVs (upscale).
     const dpr = Math.min(window.devicePixelRatio, 2)
-    this.neonRenderTarget.setSize(Math.floor(width * dpr), Math.floor(height * dpr))
-    this.neonComposer.setSize(width, height)
-    this.neonBloomPass.setSize(width, height)
+    this.neonRenderTarget.setSize(
+      Math.floor(width * dpr * NEON_RESOLUTION_SCALE),
+      Math.floor(height * dpr * NEON_RESOLUTION_SCALE)
+    )
+    this.neonComposer.setSize(width * NEON_RESOLUTION_SCALE, height * NEON_RESOLUTION_SCALE)
+    this.neonBloomPass.setSize(width * NEON_RESOLUTION_SCALE, height * NEON_RESOLUTION_SCALE)
   }
 
   private handleObstacleCollision(carPosition: THREE.Vector3, gameState: GameState): void {
