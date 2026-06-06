@@ -14,6 +14,15 @@ import { ThreeScene } from '../render/ThreeScene'
 // aesthetic) instead of a generic visualizer that twitches on every transient.
 const BEAT_STRENGTH_THRESHOLD = 0.5
 
+// Treble-transient gate (iteration 7). A detected treble peak only "fires" the particle
+// shimmer when its NORMALIZED strength (0..1, scaled against the track's loudest treble
+// peak in loadFile) is at or above this value, so the hero car sparks on the prominent
+// hi-hat/cymbal/snare-sizzle transients rather than on every faint high-frequency wiggle.
+// Treble peaks are already gated upstream to local maxima above a mean+0.5·std threshold,
+// so this is a light secondary cull tuned for "premium restraint" — a steady stream of
+// shimmer on busy treble passages, near-silence on sparse/warm ones.
+const TREBLE_STRENGTH_THRESHOLD = 0.25
+
 export class GameController {
   private audioEngine: AudioEngine
   private threeScene: ThreeScene
@@ -23,6 +32,12 @@ export class GameController {
   private lastAutoLaneChange = 0
   // Cursor into musicMap.beats so we only fire each beat once as the clock passes it.
   private nextBeatIndex = 0
+  // Cursor into musicMap.treblePeaks (iteration 7), mirroring nextBeatIndex: we fire each
+  // treble transient's particle shimmer exactly once as the audio clock crosses it.
+  private nextTrebleIndex = 0
+  // Track-wide loudest treble peak, captured in loadFile, used to normalize each peak's
+  // raw derivative-RMS strength into a predictable 0..1 the shimmer + gate can reason about.
+  private maxTrebleStrength = 1
   // Wall-clock (performance.now) timestamp of the most recent drop-region entry,
   // and that drop's strength. The renderer-facing dropIntensity is a decay
   // envelope phased off this so it spikes on entry and eases back to 0.
@@ -58,6 +73,12 @@ export class GameController {
       // Reset game state
       this.gameState = initGameState()
       this.nextBeatIndex = 0
+      this.nextTrebleIndex = 0
+      // Capture the track's loudest treble peak so trebleStrength normalizes to 0..1.
+      this.maxTrebleStrength = this.musicMap.treblePeaks.reduce(
+        (max, peak) => Math.max(max, peak.strength),
+        1e-6
+      )
       this.lastDropTime = -Infinity
       this.lastDropStrength = 0
       this.activeDropIndex = -1
@@ -114,6 +135,9 @@ export class GameController {
 
     // Detect beats crossing the audio clock and record them for the renderer.
     this.updateBeatSync(audioTime)
+
+    // Detect treble transients crossing the clock and fire the one-frame shimmer pulse.
+    this.updateTrebleSync(audioTime)
 
     // Sample spectral mood + drop envelope and write them onto the car state so
     // the renderer can drive sky/grid/bloom/FOV from a single mood north-star.
@@ -233,6 +257,56 @@ export class GameController {
         this.gameState.car.beatFires = beat.strength >= BEAT_STRENGTH_THRESHOLD
       }
       this.nextBeatIndex++
+    }
+  }
+
+  /**
+   * Walks the treble-peak list against the audio clock (iteration 7), mirroring
+   * updateBeatSync but for high-frequency transients. Fires a one-frame `trebleFires`
+   * pulse (with the peak's normalized 0..1 `trebleStrength`) the instant the clock
+   * crosses a peak, so the renderer can spray a tiny cyan/magenta shimmer off the hero
+   * car on hi-hats/cymbals/snare sizzle. A ±75ms window keeps the trigger tight; a
+   * cursor advances monotonically so each peak fires once, and a rewind resets it on
+   * replay/seek. `trebleFires` is reset to false every frame this runs (and again by the
+   * renderer after it emits), making it a true single-shot event with no double-emit.
+   */
+  private updateTrebleSync(audioTime: number): void {
+    // One-frame pulse: clear first, set only if a peak is crossed this frame.
+    this.gameState.car.trebleFires = false
+    if (!this.musicMap) return
+    const peaks = this.musicMap.treblePeaks
+    if (peaks.length === 0) return
+
+    const windowSec = 0.075
+
+    // Handle rewind / replay: if the clock moved well behind the cursor, rewind it.
+    if (this.nextTrebleIndex > 0 && audioTime + windowSec < peaks[this.nextTrebleIndex - 1].time) {
+      this.nextTrebleIndex = 0
+    }
+
+    // Consume every treble peak the clock has now reached (within the leading window).
+    // Track the strongest peak crossed this frame so a dense cluster still fires one
+    // proportional burst rather than spamming the pool.
+    let firedStrength = 0
+    let fired = false
+    while (
+      this.nextTrebleIndex < peaks.length &&
+      peaks[this.nextTrebleIndex].time <= audioTime + windowSec
+    ) {
+      const peak = peaks[this.nextTrebleIndex]
+      if (Math.abs(peak.time - audioTime) <= windowSec) {
+        const norm = Math.min(1, peak.strength / this.maxTrebleStrength)
+        if (norm >= TREBLE_STRENGTH_THRESHOLD && norm > firedStrength) {
+          firedStrength = norm
+          fired = true
+        }
+      }
+      this.nextTrebleIndex++
+    }
+
+    if (fired) {
+      this.gameState.car.trebleFires = true
+      this.gameState.car.trebleStrength = firedStrength
     }
   }
 

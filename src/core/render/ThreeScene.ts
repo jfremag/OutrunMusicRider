@@ -108,6 +108,35 @@ const CHROMATIC_FLUX_SPIKE_MAX = 0.5 // extra CA added across the post-threshold
 const CAR_EMISSIVE_CENTROID_BASE = 0.3 // floor multiplier on calm/dark sections
 const CAR_EMISSIVE_CENTROID_RANGE = 0.5 // -> up to 0.8× at peak perceived brightness
 
+// Focal-hierarchy layers (iteration 7). The neon/emissive "hero" objects live on
+// NEON_LAYER (car, particles, obstacles, sky, sun, starfield, beat indicator, rim glow)
+// and the sharp, non-glowing geometry (road, grid, ground, lane markers) stays on the
+// default LAYER_DEFAULT. This is organizational scaffolding for the focal read: the
+// actual bloom selectivity is delivered by the disciplined UnrealBloomPass threshold
+// (the dim road/grid sit below it; the bright neon heroes sit above it) in ONE clean
+// pass, which is the correct single-render mechanism here — wrapping the lone composer
+// render in camera.layers.set(NEON_LAYER) would erase the road/grid from the frame, so
+// the camera keeps layers.enableAll() and sees everything. Keeping the layer split in
+// place future-proofs a true two-target selective-bloom upgrade with zero refactor.
+const LAYER_DEFAULT = 0
+const NEON_LAYER = 1
+
+// Mood-scaled bloom base strength (iteration 7). The overall glow now BREATHES with the
+// emotional arc: cool/dim intros sit tight at COOL, bright drops blow out toward HOT.
+// This replaces the single hardcoded base; the per-beat pulse + drop expansion still
+// STACK on top so rhythm punch and emotional peaks remain visible and distinct.
+const BLOOM_STRENGTH_COOL = 0.9 // base glow on cool/dim sections (low centroid)
+const BLOOM_STRENGTH_HOT = 1.6 // base glow on bright/hot sections (high centroid)
+
+// Treble shimmer tuning (iteration 7). On each high-frequency transient the hero car
+// sprays a small additive burst that pumps straight into the bloom — the missing
+// music-FREQUENCY signal. Cool moods spark cyan, hot moods magenta (matching the sky
+// sweep). Kept tiny + short so it reads as a fast sparkle, orthogonal to the beat punch.
+const TREBLE_BURST_COUNT_MIN = 6 // particles at threshold strength
+const TREBLE_BURST_COUNT_MAX = 8 // particles at full-strength transient
+const TREBLE_BURST_SPEED = 6 // outward fling speed (slower/tighter than drop bursts)
+const TREBLE_BURST_LIFETIME = 0.25 // seconds — a quick sparkle, not a lingering plume
+
 const ANALOGOUS_PALETTE = {
   abyss: new THREE.Color(0x041226),
   midnight: new THREE.Color(0x0a2f44),
@@ -437,6 +466,11 @@ export class ThreeScene {
       0.1,
       10000
     )
+    // See ALL layers (iteration 7). The neon/non-neon layer split (NEON_LAYER vs
+    // LAYER_DEFAULT) is a focal-hierarchy organization; the single composer render must
+    // still draw the whole world, so the camera observes every layer. Bloom selectivity
+    // is achieved via the disciplined threshold, not by masking the lone render pass.
+    this.camera.layers.enableAll()
 
     // Post-processing pipeline (iteration 4):
     //   RenderPass -> UnrealBloomPass -> OutputPass -> ChromaticAberration -> Vignette -> FilmGrain
@@ -452,9 +486,13 @@ export class ThreeScene {
     this.composer.addPass(new RenderPass(this.scene, this.camera))
     this.bloomPass = new UnrealBloomPass(
       new THREE.Vector2(width, height),
-      BLOOM_BASE_STRENGTH, // strength
+      BLOOM_BASE_STRENGTH, // strength (re-driven per frame from mood + beat in renderComposite)
       0.8, // radius
-      0.25 // threshold — bloom bright neon while keeping the car silhouette legible
+      // Threshold raised 0.25 -> 0.35 (iteration 7) for a more disciplined, selective
+      // bloom so dim geometry (road/grid) stays sharp while neon heroes glow. The
+      // runtime mood lerp in renderComposite still drives the live threshold even higher
+      // on cool sections and eases it down on hot ones; this is just the initial value.
+      0.35
     )
     this.composer.addPass(this.bloomPass)
     this.composer.addPass(new OutputPass())
@@ -487,6 +525,7 @@ export class ThreeScene {
     // GPU particle pool for beat-drop + collision bursts. Added to the scene once;
     // emits are stamped into pre-allocated buffers so there is no per-frame GC.
     this.particlePool = new ParticlePool(280)
+    this.particlePool.points.layers.set(NEON_LAYER) // emissive hero (iteration 7)
     this.scene.add(this.particlePool.points)
 
     // Create the immersion-preserving beat indicator (a glowing sprite, not HUD text)
@@ -601,6 +640,7 @@ export class ThreeScene {
 
     this.skyMaterial = skyMaterial
     this.skyMesh = new THREE.Mesh(skyGeometry, skyMaterial)
+    this.skyMesh.layers.set(NEON_LAYER) // glowing hero (iteration 7)
     this.scene.add(this.skyMesh)
 
     // Add star field to keep the sky lively without a texture
@@ -629,6 +669,7 @@ export class ThreeScene {
       depthWrite: false
     })
     this.starField = new THREE.Points(starGeometry, starMaterial)
+    this.starField.layers.set(NEON_LAYER) // glowing hero (iteration 7)
     this.scene.add(this.starField)
 
     // Add retro sun disc hovering on the horizon
@@ -668,6 +709,7 @@ export class ThreeScene {
     this.sunMesh.lookAt(new THREE.Vector3(0, 15, 1000))
     this.sunMesh.renderOrder = 10
     this.sunMesh.frustumCulled = false
+    this.sunMesh.layers.set(NEON_LAYER) // glowing hero (iteration 7)
     this.scene.add(this.sunMesh)
 
     // Add fog for depth effect aligned to new palette
@@ -690,6 +732,9 @@ export class ThreeScene {
     const gridMaterial = gridHelper.material as THREE.LineBasicMaterial
     gridMaterial.toneMapped = false
     gridMaterial.transparent = true
+    // Sharp, non-neon geometry stays on the default layer (iteration 7): the focal
+    // hierarchy keeps the grid crisp and below the bloom threshold so it doesn't smear.
+    gridHelper.layers.set(LAYER_DEFAULT)
     this.gridHelper = gridHelper
     this.scene.add(gridHelper)
     
@@ -703,6 +748,7 @@ export class ThreeScene {
     const ground = new THREE.Mesh(groundGeometry, groundMaterial)
     ground.rotation.x = -Math.PI / 2
     ground.position.y = 0
+    ground.layers.set(LAYER_DEFAULT) // sharp non-neon geometry (iteration 7)
     this.scene.add(ground)
   }
 
@@ -759,6 +805,7 @@ export class ThreeScene {
     sprite.scale.set(0.12, 0.12, 0.12)
     sprite.renderOrder = 999
     sprite.frustumCulled = false
+    sprite.layers.set(NEON_LAYER) // glowing hero HUD element (iteration 7)
 
     this.beatIndicator = sprite
     this.beatIndicatorMaterial = material
@@ -802,15 +849,29 @@ export class ThreeScene {
 
     // Build a quick neon fallback while the glTF loads (or if it fails)
     this.buildFallbackCar(carGroup)
+    // Hero car -> neon layer (iteration 7), incl. the freshly built fallback children.
+    ThreeScene.setLayerRecursive(carGroup, NEON_LAYER)
 
     try {
       const template = await this.loadCarTemplate()
       if (template) {
         this.replaceCarWithTemplate(carGroup, template)
+        // Re-tag the swapped-in GLB (and rim glow) onto the neon layer.
+        ThreeScene.setLayerRecursive(carGroup, NEON_LAYER)
       }
     } catch (error) {
       console.warn('Falling back to procedural car because the GLB failed to load', error)
     }
+  }
+
+  /**
+   * Sets `layer` on `root` and every descendant (iteration 7). Three.js tests each
+   * object's own `layers` mask against the camera independently — children do NOT
+   * inherit a parent's layer — so the hero car / obstacle groups must tag the whole
+   * subtree. Used to place all neon/emissive heroes on NEON_LAYER for the focal split.
+   */
+  private static setLayerRecursive(root: THREE.Object3D, layer: number): void {
+    root.traverse(obj => obj.layers.set(layer))
   }
 
   private loadCarTemplate(): Promise<THREE.Object3D | null> {
@@ -1076,6 +1137,7 @@ export class ThreeScene {
     })
 
     this.roadMesh = new THREE.Mesh(roadGeometry, roadMaterial)
+    this.roadMesh.layers.set(LAYER_DEFAULT) // sharp non-neon geometry (iteration 7)
     this.scene.add(this.roadMesh)
 
     // Add lane markers
@@ -1108,6 +1170,36 @@ export class ThreeScene {
     const origin = this.smoothedCarPosition.clone()
     origin.y += 0.6
     this.particlePool.emitBurst(count, origin, 11, color, PARTICLE_LIFETIME_DROP)
+  }
+
+  /**
+   * Fires a tiny treble-transient shimmer off the hero car (iteration 7) — the missing
+   * music-FREQUENCY signal. The controller crosses a detected treble peak and supplies
+   * its normalized 0..1 `strength`; the renderer owns the pool, the car transform, and
+   * the palette (cyan when cool, magenta when hot, matching the sky/rim sweep). Only
+   * 6-8 fast, short-lived particles spawn from the car + a small random offset (so they
+   * never cluster with the larger drop/collision bursts), reading as a quick sparkle
+   * on hi-hats/cymbals/snare sizzle that pumps straight into the bloom — orthogonal to
+   * the beat punch (FOV/bloom pulse) and the slow mood swell.
+   */
+  emitTrebleBurst(strength: number, spectralCentroid: number): void {
+    const s = THREE.MathUtils.clamp(strength, 0, 1)
+    const count = Math.round(
+      TREBLE_BURST_COUNT_MIN + (TREBLE_BURST_COUNT_MAX - TREBLE_BURST_COUNT_MIN) * s
+    )
+    if (count <= 0) return
+
+    // Cool moods spark cyan, hot moods magenta (same blend window as the drop burst).
+    const t = THREE.MathUtils.clamp((spectralCentroid - 0.4) / 0.2, 0, 1)
+    const color = BURST_COLOR_COOL.clone().lerp(BURST_COLOR_HOT, t)
+
+    // Emit from the car body with a small random offset so successive sparkles scatter
+    // around the hero rather than stacking on one point or on the collision/drop origin.
+    const origin = this.smoothedCarPosition.clone()
+    origin.x += (Math.random() - 0.5) * 0.8
+    origin.y += 0.55 + Math.random() * 0.4
+    origin.z += (Math.random() - 0.5) * 0.8
+    this.particlePool.emitBurst(count, origin, TREBLE_BURST_SPEED, color, TREBLE_BURST_LIFETIME)
   }
 
   private addLaneMarkers(track: TrackData, roadWidth: number): void {
@@ -1179,6 +1271,8 @@ export class ThreeScene {
           hazardGroup.add(sword)
         }
 
+        // Obstacles are emissive neon heroes -> neon layer (iteration 7).
+        ThreeScene.setLayerRecursive(hazardGroup, NEON_LAYER)
         this.scene.add(hazardGroup)
         this.trebleMeshes.push(hazardGroup)
       }
@@ -1369,8 +1463,13 @@ export class ThreeScene {
       const d = beatAgeMs / BLOOM_DECAY_MS
       bloomBoost = (1 - d) * (1 - d) * BLOOM_BEAT_BOOST * strength
     }
-    // Drops also widen the overall glow for a blown-out, euphoric peak.
-    this.bloomPass.strength = BLOOM_BASE_STRENGTH + bloomBoost + dropIntensity * 0.5
+    // Mood-scaled base glow (iteration 7): the resting bloom strength now BREATHES with
+    // the emotional arc — tight (COOL) on cool/dim intros, blown-out (HOT) on bright
+    // drops — driven by the same smoothed spectral centroid that warms the sky/grid. The
+    // per-beat pulse + drop expansion STACK on top, so rhythm punch and emotional peaks
+    // stay visible and distinct from the slow mood swell.
+    const bloomBase = THREE.MathUtils.lerp(BLOOM_STRENGTH_COOL, BLOOM_STRENGTH_HOT, centroid)
+    this.bloomPass.strength = bloomBase + bloomBoost + dropIntensity * 0.5
     // Bloom threshold tracks mood: tight/controlled on cool sections, looser (more
     // of the frame glows) as the music brightens or drops. Drives the "wider glow
     // on hot moods" feel without touching the beat-sync strength envelope.
@@ -1432,7 +1531,16 @@ export class ThreeScene {
       }
     }
 
-    // --- Advance the GPU particle simulation (drop + collision bursts).
+    // --- Treble shimmer (iteration 7): the controller sets a one-frame trebleFires
+    // pulse the instant the audio clock crosses a high-frequency transient. Emit the
+    // sparkle here (centrally, so every render path consumes it exactly once) and clear
+    // the flag so a paused/early-return frame can't re-emit a stale pulse.
+    if (gameState.car.trebleFires) {
+      this.emitTrebleBurst(gameState.car.trebleStrength, centroid)
+      gameState.car.trebleFires = false
+    }
+
+    // --- Advance the GPU particle simulation (drop + collision + treble bursts).
     this.particlePool.update(this.lastFrameDelta)
 
     // --- Camera shake: a transient world-space offset added to the camera right

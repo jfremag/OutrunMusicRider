@@ -35,6 +35,16 @@ export interface CarState {
   // non-destructive position offset so beats punch and chaos jitters the view.
   cameraShakeAmplitude: number
   lastShakeTime: number
+  // Treble-transient shimmer gate (iteration 7). The missing music-FREQUENCY signal:
+  // beats drive the low/mid punch (FOV, bloom, shake) and centroid drives the slow
+  // mood, but the fast high-frequency transients (hi-hats, cymbals, snare sizzle) had
+  // no dedicated visual. `trebleFires` is set true for exactly one frame when the audio
+  // clock crosses a detected treble peak; `trebleStrength` (0..1) is that peak's
+  // normalized intensity. The renderer reads these to spray a tiny cyan/magenta
+  // particle shimmer off the hero car — a direct, additive, beat-orthogonal gesture.
+  // Set by the controller, read-only in the renderer, zero impact on physics/gameplay.
+  trebleFires: boolean
+  trebleStrength: number
 }
 
 export interface GameState {
@@ -57,7 +67,9 @@ export function initGameState(): GameState {
       spectralFlux: 0,
       dropIntensity: 0,
       cameraShakeAmplitude: 0,
-      lastShakeTime: -Infinity
+      lastShakeTime: -Infinity,
+      trebleFires: false,
+      trebleStrength: 0
     }
   }
 }
