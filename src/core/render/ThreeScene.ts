@@ -24,6 +24,28 @@ const BLOOM_BASE_STRENGTH = 0.95
 const BLOOM_BEAT_BOOST = 0.85 // added at peak of a full-strength beat
 const BLOOM_DECAY_MS = 260
 
+// Beat selectivity + anticipatory camera tuning (iteration 6).
+//
+// Beat selectivity: strong beats (kicks, snares) punch FOV/bloom/shake and glow the
+// beat indicator; weak beats (hi-hats, transients) sustain the baseline mood without
+// transient spikes. This "professional restraint" reads as premium (Wipeout, Nintendo,
+// Tesla-promo aesthetic) rather than a generic visualizer that reacts to every tick.
+// The strength gate itself (BEAT_STRENGTH_THRESHOLD = 0.5) lives in the controller,
+// which sets car.beatFires; the renderer simply reads that flag to gate its transient
+// gestures (FOV/bloom/shake/indicator) below.
+// Anticipatory look-ahead: the camera aims this far down the track ahead of the car so
+// it reads upcoming terrain *before* the car visually commits — a "smart autopilot"
+// feel. Scales up with speed (whichever is larger).
+const LOOK_AHEAD_DISTANCE = 15 // metres ahead the camera looks (min; grows with speed)
+// Anticipatory banking: when the upcoming centerline curves, the camera leans into the
+// turn (rolls about its forward axis) by up to this many degrees, like a skilled driver.
+const CAMERA_BANKING_ANGLE_MAX = 12 // max camera roll (degrees) into a hard upcoming curve
+const CAMERA_BANKING_ANGLE_DEADZONE = 4 // below this much upcoming turn (deg) we don't bank
+const CAMERA_BANKING_LERP = 0.08 // per-frame lerp toward the target roll (smooth, never snaps)
+// Shared local-forward axis for the camera roll (view-space -Z). Reused each frame to
+// keep the banking math allocation-free.
+const ROLL_AXIS = new THREE.Vector3(0, 0, -1)
+
 // Mood-driven tuning (iteration 2). These layer on TOP of the beat-sync envelopes
 // so the world reacts to both rhythm (fast, per-beat) and mood (slow, per-section).
 // Cool intros sit at low centroid -> tight bloom + cyan sky; bright drops push high
@@ -346,6 +368,9 @@ export class ThreeScene {
   private swordTemplatePromise: Promise<THREE.Object3D | null> | null = null
   private startTime = performance.now()
   private cameraOrbitAngle = 0
+  // Smoothed camera bank/roll (radians, iteration 6). Lerped toward a target derived
+  // from the curvature of the upcoming track centerline so the camera leans into turns.
+  private cameraRoll = 0
   private smoothedCarPosition = new THREE.Vector3()
   private smoothedCarForward = new THREE.Vector3(0, 0, 1)
   private carOrientation = new THREE.Quaternion()
@@ -754,8 +779,11 @@ export class ThreeScene {
     const strength = gameState.car.beatStrength
     const PULSE_MS = 320
 
+    // Beat selectivity (iteration 6): the indicator glows ONLY on strong beats, turning
+    // it into a visual metronome that confirms the system is rhythm-locked to the
+    // important moments (kicks/snares) and not flickering on every hi-hat.
     let pulse = 0
-    if (Number.isFinite(beatAgeMs) && beatAgeMs >= 0 && beatAgeMs < PULSE_MS) {
+    if (gameState.car.beatFires && Number.isFinite(beatAgeMs) && beatAgeMs >= 0 && beatAgeMs < PULSE_MS) {
       const d = beatAgeMs / PULSE_MS
       pulse = (1 - d) * (1 - d) * strength
     }
@@ -1311,8 +1339,12 @@ export class ThreeScene {
     // --- FOV punch: fast attack to a strength-scaled peak, eased decay back to base.
     // Iteration 2 adds a drop-driven expansion ON TOP so the camera reacts to both
     // rhythm (beat) and the music's emotional peaks (drops).
+    // Beat selectivity (iteration 6): the FOV punch only FIRES on strong beats
+    // (car.beatFires). Its amplitude still scales by strength, so a 0.9 kick punches
+    // harder than a 0.6 snare, but weak beats produce zero FOV delta. The drop-driven
+    // expansion below is unaffected and keeps reacting to emotional peaks.
     let fovOffset = 0
-    if (Number.isFinite(beatAgeMs) && beatAgeMs >= 0) {
+    if (gameState.car.beatFires && Number.isFinite(beatAgeMs) && beatAgeMs >= 0) {
       if (beatAgeMs < FOV_ATTACK_MS) {
         const a = beatAgeMs / FOV_ATTACK_MS
         // ease-out-quad on the way up for a snappy kick
@@ -1330,8 +1362,10 @@ export class ThreeScene {
     }
 
     // --- Bloom pulse: spike on the beat, exponential-ish decay back to baseline.
+    // Beat selectivity (iteration 6): gated to strong beats only, so weak beats do not
+    // pump the glow. The drop-driven bloom widening below is unaffected.
     let bloomBoost = 0
-    if (Number.isFinite(beatAgeMs) && beatAgeMs >= 0 && beatAgeMs < BLOOM_DECAY_MS) {
+    if (gameState.car.beatFires && Number.isFinite(beatAgeMs) && beatAgeMs >= 0 && beatAgeMs < BLOOM_DECAY_MS) {
       const d = beatAgeMs / BLOOM_DECAY_MS
       bloomBoost = (1 - d) * (1 - d) * BLOOM_BEAT_BOOST * strength
     }
@@ -1708,9 +1742,18 @@ export class ThreeScene {
     const cameraPosition = visualCarPosition.clone().add(baseCameraOffset)
     this.camera.position.lerp(cameraPosition, 0.2)
 
+    // Anticipatory look-ahead (iteration 6): aim further down the track than the old
+    // fixed 5m so the camera reacts to upcoming terrain before the car commits. The
+    // distance grows with speed (constant 50 u/s here -> ~10m) but is floored at
+    // LOOK_AHEAD_DISTANCE for a "smart autopilot" read. We aim along the *upcoming*
+    // centerline forward (sampled ahead) rather than just the current heading, so the
+    // gaze leads into bends.
+    const carSpeed = 50 // matches the GameController/TrackGenerator speed constant
+    const lookAheadDist = Math.max(LOOK_AHEAD_DISTANCE, carSpeed * 0.2)
+    const aheadForward = this.sampleTrackForward(carDistance + lookAheadDist, this.smoothedCarForward)
     const lookTarget = visualCarPosition
       .clone()
-      .add(this.smoothedCarForward.clone().multiplyScalar(5))
+      .add(aheadForward.clone().multiplyScalar(lookAheadDist))
       .add(
         smoothedRight.clone().multiplyScalar(this.cameraOrbitAngle * cameraDistance * 0.45)
       )
@@ -1720,9 +1763,92 @@ export class ThreeScene {
 
     this.camera.quaternion.slerp(targetQuaternion, 0.25)
 
+    // Anticipatory banking (iteration 6): roll the camera into upcoming curves like a
+    // skilled driver leaning through a turn. We measure how much the centerline yaws
+    // across the look-ahead window (signed about the up axis), map it past a deadzone
+    // to a capped roll, and lerp toward it so the bank glides rather than snaps.
+    this.updateCameraBanking(carDistance, currentNode.up)
+
     // Render
     this.updateSunPlacement()
     this.renderComposite(gameState)
+  }
+
+  /**
+   * Samples the track centerline's forward direction at an arbitrary arc-length `s`
+   * by locating the bracketing nodes and lerping their forward vectors. Clamps to the
+   * track ends and falls back to `fallback` if there is no track (so callers can pass
+   * the car's current heading). Allocation-light: returns a fresh normalized vector.
+   */
+  private sampleTrackForward(s: number, fallback: THREE.Vector3): THREE.Vector3 {
+    const nodes = this.trackData?.nodes
+    if (!nodes || nodes.length === 0) return fallback.clone().normalize()
+    if (nodes.length === 1 || s <= nodes[0].s) return nodes[0].forward.clone().normalize()
+
+    const last = nodes[nodes.length - 1]
+    if (s >= last.s) return last.forward.clone().normalize()
+
+    // Walk from the current node forward (cheap: the look-ahead window is short).
+    let i = Math.min(this.lastNodeIndex, nodes.length - 2)
+    while (i > 0 && nodes[i].s > s) i--
+    while (i < nodes.length - 2 && nodes[i + 1].s <= s) i++
+
+    const a = nodes[i]
+    const b = nodes[i + 1]
+    const span = b.s - a.s
+    const f = span > 1e-6 ? THREE.MathUtils.clamp((s - a.s) / span, 0, 1) : 0
+    return new THREE.Vector3().lerpVectors(a.forward, b.forward, f).normalize()
+  }
+
+  /**
+   * Computes and lerps the camera bank (roll) from the curvature of the upcoming
+   * centerline. Samples the forward direction at +5/+10/+15m, measures the signed yaw
+   * (about `up`) of the farthest sample relative to the current heading, maps it past a
+   * small deadzone into a capped roll, and rolls the camera about its own forward axis.
+   */
+  private updateCameraBanking(carDistance: number, up: THREE.Vector3): void {
+    // Sample three points ahead so a short kink reads as little turn while a sustained
+    // S-curve accumulates into a clear lean. The farthest sample sets the magnitude.
+    const f1 = this.sampleTrackForward(carDistance + 5, this.smoothedCarForward)
+    const f3 = this.sampleTrackForward(carDistance + 15, this.smoothedCarForward)
+
+    // Signed turn angle about the up axis: positive = the track bends to the right.
+    const cross = new THREE.Vector3().crossVectors(this.smoothedCarForward, f3)
+    const sinTurn = cross.dot(up) // |a||b|sin(theta), unit vectors -> sin(theta)
+    const cosTurn = THREE.MathUtils.clamp(this.smoothedCarForward.dot(f3), -1, 1)
+    let turnDeg = THREE.MathUtils.radToDeg(Math.atan2(sinTurn, cosTurn))
+
+    // Blend in the nearer sample a little so the onset of a bend is felt slightly
+    // earlier without overshooting on a brief jog.
+    const nearCross = new THREE.Vector3().crossVectors(this.smoothedCarForward, f1)
+    const nearTurnDeg = THREE.MathUtils.radToDeg(
+      Math.atan2(nearCross.dot(up), THREE.MathUtils.clamp(this.smoothedCarForward.dot(f1), -1, 1))
+    )
+    turnDeg = turnDeg * 0.7 + nearTurnDeg * 0.3
+
+    // Past a deadzone, ramp linearly to the cap. Bank INTO the turn like a motorcycle:
+    // rolling about local forward (-Z) by a positive angle dips the right side of the
+    // view, so a right bend (positive turnDeg) maps to a positive roll (lean right).
+    let targetRollDeg = 0
+    const absTurn = Math.abs(turnDeg)
+    if (absTurn > CAMERA_BANKING_ANGLE_DEADZONE) {
+      const ramp = (absTurn - CAMERA_BANKING_ANGLE_DEADZONE) / 25 // ~25deg of turn -> full bank
+      const mag = Math.min(CAMERA_BANKING_ANGLE_MAX, ramp * CAMERA_BANKING_ANGLE_MAX)
+      targetRollDeg = Math.sign(turnDeg) * mag
+    }
+
+    // Smooth toward the target so banking eases in/out (never snaps), then apply it as
+    // a roll about the camera's own forward axis on top of the look-at orientation.
+    this.cameraRoll = THREE.MathUtils.lerp(
+      this.cameraRoll,
+      THREE.MathUtils.degToRad(targetRollDeg),
+      CAMERA_BANKING_LERP
+    )
+    // Roll about the camera's LOCAL forward axis (-Z in view space) so the banking
+    // composes cleanly with the look-at orientation regardless of world heading.
+    if (Math.abs(this.cameraRoll) > 1e-4) {
+      this.camera.rotateOnAxis(ROLL_AXIS, this.cameraRoll)
+    }
   }
 
   private updateSunPlacement(): void {

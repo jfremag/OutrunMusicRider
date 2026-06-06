@@ -10,6 +10,14 @@ export interface CarState {
   // lets the renderer compute the envelope phase without knowing the audio time.
   lastBeatTime: number
   beatStrength: number
+  // Beat selectivity gate (iteration 6). True only when the most recent beat was a
+  // STRONG beat (strength >= BEAT_STRENGTH_THRESHOLD, e.g. kicks/snares). The renderer
+  // reads this to fire the flashy transient gestures (FOV punch, bloom pulse, camera
+  // shake, beat-indicator glow) ONLY on emotionally significant beats, while weak beats
+  // (hi-hats, light percussion) still update lastBeatTime/beatStrength for baseline mood
+  // and particle effects. This is the "professional restraint" gate — set by the
+  // controller, read-only in the renderer, with zero impact on physics/gameplay.
+  beatFires: boolean
   // Mood signals sampled from the MusicMap at the current audio time and smoothed
   // by the controller. `spectralCentroid` (0..1) is perceived brightness and drives
   // the sky hue (cool cyan -> hot magenta), grid emissive, and bloom threshold.
@@ -44,6 +52,7 @@ export function initGameState(): GameState {
       verticalOffset: 0,
       lastBeatTime: -Infinity,
       beatStrength: 0,
+      beatFires: false,
       spectralCentroid: 0,
       spectralFlux: 0,
       dropIntensity: 0,

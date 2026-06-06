@@ -5,6 +5,15 @@ import { generateTrack } from '../track/TrackGenerator'
 import { GameState, initGameState } from './GameState'
 import { ThreeScene } from '../render/ThreeScene'
 
+// Beat selectivity threshold (iteration 6). A detected beat only "fires" the flashy
+// transient gestures (FOV punch, bloom pulse, camera shake, beat-indicator glow) when
+// its normalized strength is at or above this value. Strong beats (kicks, snares) sit
+// in 0.5..1.0; weak beats (hi-hats, light percussion, string pizz) sit in 0.2..0.5 and
+// only sustain the baseline mood. Reserving visual emphasis for the strong beats is the
+// "professional restraint" that reads as premium (Wipeout / Nintendo / Tesla-promo
+// aesthetic) instead of a generic visualizer that twitches on every transient.
+const BEAT_STRENGTH_THRESHOLD = 0.5
+
 export class GameController {
   private audioEngine: AudioEngine
   private threeScene: ThreeScene
@@ -214,9 +223,14 @@ export class GameController {
       // Only fire if we're genuinely near the onset (not catching up after a seek).
       if (Math.abs(beat.time - audioTime) <= windowSec) {
         // Record a wall-clock timestamp so the renderer can phase the FOV/bloom
-        // envelopes directly against performance.now().
+        // envelopes directly against performance.now(). Both weak and strong beats
+        // stamp the timestamp/strength so baseline mood + particle effects still see
+        // every onset...
         this.gameState.car.lastBeatTime = performance.now()
         this.gameState.car.beatStrength = beat.strength
+        // ...but the selectivity gate only opens for STRONG beats, so the renderer
+        // reserves its FOV/bloom/shake/indicator punches for the kicks and snares.
+        this.gameState.car.beatFires = beat.strength >= BEAT_STRENGTH_THRESHOLD
       }
       this.nextBeatIndex++
     }
@@ -267,10 +281,16 @@ export class GameController {
     // beat or a flux surge — rather than every frame, which would freeze the
     // envelope at full and produce a constant rattle. A hard collision spike
     // (handled in the renderer) overrides this softer musical amplitude.
-    const musicalShake = this.gameState.car.beatStrength * 0.7 + this.smoothedFlux * 0.5
+    // Beat selectivity (iteration 6): only STRONG beats contribute their punch to the
+    // shake, so the snappy kick-jolt is reserved for emotionally significant moments.
+    // The flux term (treble texture) is unaffected and keeps busy sections jittering,
+    // and a hard collision spike (handled in the renderer) still overrides this.
+    const beatShake = this.gameState.car.beatFires ? this.gameState.car.beatStrength * 0.7 : 0
+    const musicalShake = beatShake + this.smoothedFlux * 0.5
     const beatAgeMs = performance.now() - this.gameState.car.lastBeatTime
-    const freshBeat = Number.isFinite(beatAgeMs) && beatAgeMs >= 0 && beatAgeMs < 60
-    if (freshBeat || this.smoothedFlux > 0.45) {
+    const freshStrongBeat =
+      this.gameState.car.beatFires && Number.isFinite(beatAgeMs) && beatAgeMs >= 0 && beatAgeMs < 60
+    if (freshStrongBeat || this.smoothedFlux > 0.45) {
       this.gameState.car.cameraShakeAmplitude = Math.min(1, musicalShake)
       this.gameState.car.lastShakeTime = performance.now()
     }
