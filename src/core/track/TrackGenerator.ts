@@ -166,32 +166,70 @@ function createTreblePulses(
     }
   }
 
+  // Fair, dodgeable placement (distance units; the car travels at 50 u/s). The course must
+  // ALWAYS leave at least one escape lane so a smart driver can clear it, while still getting
+  // denser through drops. We thin obstacles to a minimum spacing, never let all three lanes
+  // be blocked within a short window (an impossible "wall"), and spread lanes so the field
+  // stays readable. The PathPlanner then solves the actual smooth racing line through whatever
+  // survives — this just guarantees a fair, non-degenerate layout for it to work with.
+  const WALL_WINDOW = 8        // all 3 lanes blocked within ±this distance = impossible wall
+  const MIN_GAP_BASE = 13      // min distance between ANY two obstacles in calm passages (~0.26s)
+  const MIN_GAP_DROP = 8       // tighter spacing tolerated inside drops (denser, still fair)
+  const MIN_SAME_LANE_GAP = 15 // min distance between two obstacles sharing a lane
+
+  // Candidate obstacles in distance order, tagged with drop density + a music-cycling lane.
+  const candidates = treblePeaks
+    .map((peak, index) => {
+      const normalizedTime = Math.max(0, Math.min(1, peak.time / duration))
+      const nodeIndex = Math.min(nodes.length - 1, Math.round(normalizedTime * (nodes.length - 1)))
+      return {
+        peak,
+        dist: nodes[nodeIndex].pos.z,
+        density: dropDensityAt(peak.time, dropRegions),
+        natural: lanePattern[index % lanePattern.length]
+      }
+    })
+    .sort((a, b) => a.dist - b.dist)
+
   const pulses: TreblePulse[] = []
+  // Indexed by lane+1 (so lanes -1,0,1 map to 0,1,2): last accepted distance per lane.
+  const lastByLane = [-Infinity, -Infinity, -Infinity]
+  let lastAny = -Infinity
+  const lanes: Array<-1 | 0 | 1> = [-1, 0, 1]
 
-  treblePeaks.forEach((peak, index) => {
-    const laneIndex = lanePattern[index % lanePattern.length]
-    // How "deep" into a drop this peak sits (0 outside, up to region strength inside).
-    const dropEnvelope = dropDensityAt(peak.time, dropRegions)
+  for (const cand of candidates) {
+    const minGap = MIN_GAP_BASE + (MIN_GAP_DROP - MIN_GAP_BASE) * Math.min(1, cand.density)
+    // Global thinning: skip obstacles packed tighter than the (drop-aware) minimum spacing.
+    if (cand.dist - lastAny < minGap) continue
 
-    pulses.push(buildPulse(peak, laneIndex, dropEnvelope))
+    // Which lanes are already blocked within the wall window (scan back while in range)?
+    const blocked = [false, false, false]
+    for (let k = pulses.length - 1; k >= 0; k--) {
+      if (cand.dist - pulses[k].pos.z > WALL_WINDOW) break // sorted; everything older is behind
+      blocked[pulses[k].laneIndex + 1] = true
+    }
 
-    // Drop-aware clustering: during confirmed drops we raise obstacle density to
-    // ~1.3x by occasionally spawning a flanking obstacle in an adjacent lane. The
-    // chance scales with the drop envelope so the increase ramps smoothly across
-    // the region boundary (sparse at the edges, densest at the peak) rather than
-    // snapping on. The flank lane is offset from the primary so a clear lane
-    // always remains for the auto-dodge to escape into.
-    if (dropEnvelope > 0) {
-      // Deterministic per-index gate that, integrated over a region, yields ~0.3
-      // extra obstacles per peak at full strength (the 1.3x baseline target).
-      const clusterChance = dropEnvelope * 0.3
-      const gate = pseudoRandom(index * 2654435761) // stable hash, no Math.random in gen
-      if (gate < clusterChance) {
-        const flankLane = (laneIndex === -1 ? 0 : laneIndex === 1 ? 0 : 1) as -1 | 0 | 1
-        pulses.push(buildPulse(peak, flankLane, dropEnvelope))
+    // Choose the most-rested lane that is free in-window, honors the same-lane gap, and does
+    // NOT seal the last open lane (which would be an unavoidable wall). The music-cycling
+    // natural lane gets a tie-break nudge so the layout still tracks the song.
+    let chosen: -1 | 0 | 1 | null = null
+    let bestScore = -Infinity
+    for (const lane of lanes) {
+      if (blocked[lane + 1]) continue
+      if (cand.dist - lastByLane[lane + 1] < MIN_SAME_LANE_GAP) continue
+      if (lanes.every(l => l === lane || blocked[l + 1])) continue // would wall off all 3 lanes
+      const score = cand.dist - lastByLane[lane + 1] + (lane === cand.natural ? 6 : 0)
+      if (score > bestScore) {
+        bestScore = score
+        chosen = lane
       }
     }
-  })
+    if (chosen === null) continue // no fair lane -> drop this obstacle to keep the course clean
+
+    pulses.push(buildPulse(cand.peak, chosen, cand.density))
+    lastByLane[chosen + 1] = cand.dist
+    lastAny = cand.dist
+  }
 
   return pulses
 }
@@ -214,14 +252,5 @@ function dropDensityAt(time: number, dropRegions: DropRegion[]): number {
     if (value > best) best = value
   }
   return best
-}
-
-/**
- * Deterministic 0..1 hash so generation stays reproducible for a given track
- * (no Math.random, which would make obstacle layout flicker between reloads).
- */
-function pseudoRandom(seed: number): number {
-  const x = Math.sin(seed) * 43758.5453
-  return x - Math.floor(x)
 }
 
