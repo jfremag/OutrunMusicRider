@@ -234,22 +234,28 @@ export class HudOverlay {
       // from either parent. Boosted slightly so it occupies a comparable visual range.
       targetMid = Math.min(1, Math.sqrt(targetBass * targetTreble) * 1.25)
 
-      // Rolling BPM from a wide window of recent beats (median + octave-fold inside).
-      const bIdx = latestIndexAtOrBefore(musicMap.beats, audioTime)
-      if (bIdx >= 0) {
-        const from = Math.max(0, bIdx - (BPM_WINDOW_BEATS - 1))
-        beatTimes = musicMap.beats.slice(from, bIdx + 1).map((b: BeatMarker) => b.time)
-        targetBpm = this.computeRecentBPM(beatTimes)
+      // Tempo + beat phase. Prefer the LOCKED global tempo computed offline in
+      // AudioAnalysis (a single steady value with no octave rattle) and phase the ring off
+      // its grid (beat k at beatPhase + k·interval). Only fall back to the rolling
+      // recent-onset estimate when the track has no detectable global pulse (sparse/ambient).
+      if (musicMap.bpm > 0) {
+        targetBpm = musicMap.bpm
+        const interval = 60 / musicMap.bpm
+        phase = ((((audioTime - musicMap.beatPhase) / interval) % 1) + 1) % 1
+      } else {
+        const bIdx = latestIndexAtOrBefore(musicMap.beats, audioTime)
+        if (bIdx >= 0) {
+          const from = Math.max(0, bIdx - (BPM_WINDOW_BEATS - 1))
+          beatTimes = musicMap.beats.slice(from, bIdx + 1).map((b: BeatMarker) => b.time)
+          targetBpm = this.computeRecentBPM(beatTimes)
 
-        // Beat phase: fraction of the (folded) beat interval elapsed since the last onset.
-        // Phasing against the displayed/folded tempo makes the ring sweep on the musical
-        // pulse (quarter notes) in lockstep with the BPM number, rather than twitching on
-        // every dense sub-beat onset. Wraps cleanly so it can exceed one onset gap.
-        const lastBeat = musicMap.beats[bIdx].time
-        const interval = targetBpm > 0 ? 60 / targetBpm : 0
-        if (interval > 0) {
-          phase = ((audioTime - lastBeat) / interval) % 1
-          if (phase < 0) phase += 1
+          // Beat phase: fraction of the (folded) beat interval elapsed since the last onset.
+          const lastBeat = musicMap.beats[bIdx].time
+          const interval = targetBpm > 0 ? 60 / targetBpm : 0
+          if (interval > 0) {
+            phase = ((audioTime - lastBeat) / interval) % 1
+            if (phase < 0) phase += 1
+          }
         }
       }
     }

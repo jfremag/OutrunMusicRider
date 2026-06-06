@@ -48,6 +48,12 @@ export interface MusicMap {
   treblePeaks: BeatMarker[]
   spectralSamples: SpectralSample[]
   dropRegions: DropRegion[]
+  // Global tempo locked ONCE offline (onset-envelope autocorrelation), so the HUD shows a
+  // steady BPM and consumers can phase a clean beat grid instead of a real-time estimate
+  // that rattles between tempo octaves. 0 when undetectable (sparse/ambient material).
+  // `beatPhase` (seconds) is the grid offset of the first beat: beat k = beatPhase + k·60/bpm.
+  bpm: number
+  beatPhase: number
 }
 
 export async function analyzeBuffer(buffer: AudioBuffer): Promise<MusicMap> {
@@ -161,16 +167,43 @@ export async function analyzeBuffer(buffer: AudioBuffer): Promise<MusicMap> {
     }
   }
 
-  // Detect treble spikes using derivative-based RMS
+  // Detect treble spikes (hi-hats / cymbals / snare sizzle) as local maxima of the
+  // derivative-RMS envelope, using a LOCAL adaptive threshold (moving mean + k·std over a
+  // ~3s window) instead of one global threshold. This spreads detections EVENLY across the
+  // whole song: a loud, busy intro no longer hogs all the peaks (its high local mean culls
+  // the weak ones) and a calmer later passage still yields peaks relative to its own level
+  // — fixing the old "a ridiculous amount of swords up front, then almost none" problem. A
+  // global floor still suppresses detections in genuine near-silence so obstacles never
+  // spawn where there is no treble content at all.
   const treblePeaks: BeatMarker[] = []
-  const trebleThreshold = calculateRMSThreshold(trebleRmsValues)
+  const trebleN = trebleRmsValues.length
+  const trebleGlobalMean =
+    trebleN > 0 ? trebleRmsValues.reduce((a, b) => a + b, 0) / trebleN : 0
+  const LOCAL_HALF = 40 // ~3s half-window at the 75ms hop
+  const LOCAL_K = 0.6 // sensitivity: a peak must exceed localMean + K·localStd
 
-  for (let i = 1; i < trebleRmsValues.length - 1; i++) {
+  for (let i = 1; i < trebleN - 1; i++) {
     const prev = trebleRmsValues[i - 1]
     const current = trebleRmsValues[i]
     const next = trebleRmsValues[i + 1]
+    if (!(current > prev && current > next)) continue
 
-    if (current > prev && current > next && current > trebleThreshold) {
+    // Local window statistics (clamped at the track edges).
+    const lo = Math.max(0, i - LOCAL_HALF)
+    const hi = Math.min(trebleN - 1, i + LOCAL_HALF)
+    const count = hi - lo + 1
+    let sum = 0
+    for (let k = lo; k <= hi; k++) sum += trebleRmsValues[k]
+    const localMean = sum / count
+    let varSum = 0
+    for (let k = lo; k <= hi; k++) {
+      const d = trebleRmsValues[k] - localMean
+      varSum += d * d
+    }
+    const localStd = Math.sqrt(varSum / count)
+    const localThreshold = localMean + LOCAL_K * localStd
+
+    if (current > localThreshold && current > trebleGlobalMean * 0.6) {
       treblePeaks.push({
         time: trebleSamples[i].time,
         strength: current
@@ -184,6 +217,9 @@ export async function analyzeBuffer(buffer: AudioBuffer): Promise<MusicMap> {
   // --- Drop regions: sustained high-energy passages confirmed over several frames.
   const dropRegions = detectDropRegions(rmsValues, spectralSamples, sampleTimes)
 
+  // --- Global tempo + grid phase, locked once offline (steady BPM, no octave rattle).
+  const tempo = detectTempo(channelData, sampleRate)
+
   return {
     duration,
     beats,
@@ -191,7 +227,9 @@ export async function analyzeBuffer(buffer: AudioBuffer): Promise<MusicMap> {
     trebleSamples,
     treblePeaks,
     spectralSamples,
-    dropRegions
+    dropRegions,
+    bpm: tempo.bpm,
+    beatPhase: tempo.beatPhase
   }
 }
 
@@ -383,5 +421,108 @@ function calculateRMSThreshold(rmsValues: number[]): number {
   
   // Threshold is mean + 0.5 * stdDev
   return mean + 0.5 * stdDev
+}
+
+/**
+ * Estimates a single, STABLE global tempo (BPM) and beat-grid phase from the raw PCM,
+ * computed once offline at load. Method: build a half-wave-rectified onset-strength
+ * envelope (the positive frame-to-frame rise of short-window energy), autocorrelate it
+ * across the lag range for ~70-180 BPM, and pick the strongest periodicity. The
+ * autocorrelation is normalized by overlap length (so it doesn't bias toward short lags)
+ * and shaped by a gentle log-normal tempo prior around 120 BPM to resolve the half/double
+ * octave ambiguity. A parabolic fit around the peak gives sub-bin precision, and a comb
+ * search recovers the grid phase (offset of the first beat, in seconds). Returns {0,0}
+ * when the track is too short or has no detectable pulse, so the HUD can fall back to its
+ * rolling estimate. This is what stops the BPM readout from "jumping like a rattled animal".
+ */
+function detectTempo(channelData: Float32Array, sampleRate: number): { bpm: number; beatPhase: number } {
+  const hop = 512
+  const numFrames = Math.floor(channelData.length / hop)
+  if (numFrames < 32) return { bpm: 0, beatPhase: 0 }
+  const fsEnv = sampleRate / hop // onset-envelope sample rate (Hz)
+
+  // 1. Short-window energy envelope (RMS per non-overlapping hop).
+  const env = new Float32Array(numFrames)
+  for (let f = 0; f < numFrames; f++) {
+    let sum = 0
+    const start = f * hop
+    for (let i = 0; i < hop; i++) {
+      const s = channelData[start + i]
+      sum += s * s
+    }
+    env[f] = Math.sqrt(sum / hop)
+  }
+
+  // 2. Onset strength = half-wave-rectified first difference, then mean-subtracted and
+  // re-rectified so only above-average accents drive the autocorrelation.
+  const onset = new Float32Array(numFrames)
+  let onsetMean = 0
+  for (let f = 1; f < numFrames; f++) {
+    const d = env[f] - env[f - 1]
+    onset[f] = d > 0 ? d : 0
+    onsetMean += onset[f]
+  }
+  onsetMean /= numFrames
+  for (let f = 0; f < numFrames; f++) {
+    const v = onset[f] - onsetMean
+    onset[f] = v > 0 ? v : 0
+  }
+
+  // 3. Normalized autocorrelation across the tempo lag range, shaped by a tempo prior.
+  const MIN_BPM = 70
+  const MAX_BPM = 180
+  const PREFERRED_BPM = 120
+  const minLag = Math.max(2, Math.floor((fsEnv * 60) / MAX_BPM))
+  const maxLag = Math.min(numFrames - 2, Math.ceil((fsEnv * 60) / MIN_BPM))
+  const acAt = (lag: number): number => {
+    let s = 0
+    for (let f = lag; f < numFrames; f++) s += onset[f] * onset[f - lag]
+    return s / (numFrames - lag) // normalize by overlap so different lags compare fairly
+  }
+  let bestLag = -1
+  let bestScore = -Infinity
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    const bpm = (60 * fsEnv) / lag
+    const ln = Math.log(bpm / PREFERRED_BPM) / 0.65
+    const prior = Math.exp(-0.5 * ln * ln)
+    const score = acAt(lag) * (0.7 + 0.3 * prior)
+    if (score > bestScore) {
+      bestScore = score
+      bestLag = lag
+    }
+  }
+  if (bestLag < 0 || bestScore <= 0) return { bpm: 0, beatPhase: 0 }
+
+  // 4. Parabolic interpolation around the peak for sub-bin lag precision.
+  let refinedLag = bestLag
+  if (bestLag > minLag && bestLag < maxLag) {
+    const y0 = acAt(bestLag - 1)
+    const y1 = acAt(bestLag)
+    const y2 = acAt(bestLag + 1)
+    const denom = y0 - 2 * y1 + y2
+    if (Math.abs(denom) > 1e-12) {
+      const delta = (0.5 * (y0 - y2)) / denom
+      if (delta > -1 && delta < 1) refinedLag = bestLag + delta
+    }
+  }
+
+  // 5. Comb-filter phase search: the grid offset (frames) whose beat comb best aligns with
+  // the onset accents. Converted to seconds for a clean beat clock downstream.
+  const period = refinedLag
+  const searchEnd = Math.min(numFrames, Math.ceil(period))
+  let bestOffset = 0
+  let bestComb = -Infinity
+  for (let off = 0; off < searchEnd; off++) {
+    let comb = 0
+    for (let p = off; p < numFrames; p += period) comb += onset[Math.round(p)]
+    if (comb > bestComb) {
+      bestComb = comb
+      bestOffset = off
+    }
+  }
+
+  const bpm = Math.round(((60 * fsEnv) / refinedLag) * 10) / 10
+  const beatPhase = bestOffset / fsEnv
+  return { bpm, beatPhase }
 }
 
