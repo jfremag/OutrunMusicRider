@@ -2,6 +2,7 @@ import { AudioEngine } from '../audio/AudioEngine'
 import { analyzeBuffer, MusicMap } from '../audio/AudioAnalysis'
 import { TrackData } from '../track/TrackTypes'
 import { generateTrack } from '../track/TrackGenerator'
+import { planRacingLine, RacingLine } from './PathPlanner'
 import { GameState, initGameState } from './GameState'
 import { ThreeScene } from '../render/ThreeScene'
 
@@ -50,7 +51,10 @@ export class GameController {
   private musicMap: MusicMap | null = null
   private trackData: TrackData | null = null
   private gameState: GameState
-  private lastAutoLaneChange = 0
+  // Precomputed self-driving racing line (PathPlanner), solved once per track load. The car
+  // follows this globally-optimal lane schedule instead of reacting frame-to-frame, which is
+  // what makes it look like a smart driver who can see the whole course ahead.
+  private racingLine: RacingLine | null = null
   // Cursor into musicMap.beats so we only fire each beat once as the clock passes it.
   private nextBeatIndex = 0
   // Cursor into musicMap.treblePeaks (iteration 7), mirroring nextBeatIndex: we fire each
@@ -113,6 +117,12 @@ export class GameController {
       // Generate track
       onStatus?.('Detecting beats & tempo...')
       this.trackData = generateTrack(this.musicMap)
+
+      // Precompute the self-driving racing line (global DP over the obstacle + jump grid) so
+      // the car drives like it can see the whole course: anticipatory, cluster-aware, and
+      // never steering mid-air.
+      onStatus?.('Planning the racing line...')
+      this.racingLine = planRacingLine(this.trackData)
 
       // Set track in scene
       onStatus?.('Generating track geometry...')
@@ -228,8 +238,8 @@ export class GameController {
     // Detect treble transients crossing the clock and fire the one-frame shimmer pulse.
     this.updateTrebleSync(audioTime)
 
-    // Anticipate treble obstacles and dodge within the lane grid
-    this.maybeAutoDodge(audioTime)
+    // Follow the precomputed self-driving racing line (anticipatory, cluster-aware).
+    this.followRacingLine()
 
     // Render frame
     this.threeScene.renderFrame(this.gameState)
@@ -262,67 +272,19 @@ export class GameController {
     return this.gameState
   }
 
-  private maybeAutoDodge(audioTime: number): void {
+  /**
+   * Steers the car along the precomputed racing line (PathPlanner). Because the line is
+   * solved offline over the whole obstacle + jump grid, the car behaves like a smart driver
+   * who can see far ahead: it vacates a threatened lane EARLY (the planner bakes in a lead),
+   * commits through clusters by choosing the lane that stays clear longest, and never tries to
+   * change lanes mid-air (the planner forbids transitions across jump spans, and we also gate
+   * on canSteer so a change only ever commits while grounded). The renderer's smooth lane
+   * interpolation turns each planned target into a fluid, deliberate move.
+   */
+  private followRacingLine(): void {
+    if (!this.racingLine || !this.trackData) return
     if (!this.canSteer()) return
-
-    if (!this.trackData) return
-
-    const carDistance = this.gameState.car.distance
-    const lookAhead = 25
-    const conflictRange = 8
-    const cooldown = 0.4
-
-    if (audioTime - this.lastAutoLaneChange < cooldown) {
-      return
-    }
-
-    const upcomingPulses = this.trackData.treblePulses.filter(pulse => {
-      const delta = pulse.pos.z - carDistance
-      return delta > 0 && delta < lookAhead
-    })
-
-    const blockingPulse = upcomingPulses.find(pulse =>
-      pulse.laneIndex === this.gameState.car.laneOffsetIndex &&
-      pulse.pos.z - carDistance < conflictRange
-    )
-
-    if (!blockingPulse) return
-
-    const candidateLanes: Array<-1 | 0 | 1> = [-1, 0, 1]
-    const safeLanes = candidateLanes.filter(lane =>
-      lane !== blockingPulse.laneIndex &&
-      !upcomingPulses.some(pulse =>
-        pulse.laneIndex === lane &&
-        pulse.pos.z - carDistance < conflictRange
-      )
-    )
-
-    if (safeLanes.length === 0) return
-
-    const scoredLanes = safeLanes.map(lane => {
-      const lanePulses = upcomingPulses.filter(pulse => pulse.laneIndex === lane)
-      const nearestObstacle = lanePulses.reduce((nearest, pulse) => {
-        const delta = pulse.pos.z - carDistance
-        return delta > 0 ? Math.min(nearest, delta) : nearest
-      }, lookAhead)
-
-      const obstaclePressure = lanePulses.reduce((pressure, pulse) => {
-        const delta = pulse.pos.z - carDistance
-        return pressure + (delta > 0 ? 1 / Math.max(1, delta) : 0)
-      }, 0)
-
-      const laneChangeCost = Math.abs(lane - this.gameState.car.laneOffsetIndex) * 0.35
-      const randomness = Math.random() * 0.15
-
-      const safetyScore = nearestObstacle - obstaclePressure - laneChangeCost + randomness
-
-      return { lane, safetyScore }
-    })
-
-    scoredLanes.sort((a, b) => b.safetyScore - a.safetyScore)
-
-    this.gameState.car.laneOffsetIndex = scoredLanes[0].lane
-    this.lastAutoLaneChange = audioTime
+    this.gameState.car.laneOffsetIndex = this.racingLine.laneAt(this.gameState.car.distance)
   }
 
   /**
