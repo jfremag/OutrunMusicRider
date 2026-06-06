@@ -23,6 +23,27 @@ const BEAT_STRENGTH_THRESHOLD = 0.5
 // shimmer on busy treble passages, near-silence on sparse/warm ones.
 const TREBLE_STRENGTH_THRESHOLD = 0.25
 
+// Base forward speed in track units per second of audio (matches the value baked into
+// TrackGenerator.generateTrack so the car traverses the whole track over the song). The
+// car's effective speed is BASE_SPEED_U_PER_SEC × car.speedMultiplier, integrated from
+// the audio-time delta each frame so the cinematic acceleration never teleports the car.
+const BASE_SPEED_U_PER_SEC = 50
+
+// Cinematic acceleration + camera-choreography tuning (iteration 9). On drop entry the
+// car "hits the throttle" (speedMultiplier ramps toward DROP_SPEED_MULTIPLIER) and the
+// chase camera pulls back (cameraDepthScale ramps toward DROP_DEPTH_SCALE), then both
+// decay to their resting 1.0 on drop exit. Rising-edge entry is detected when the
+// drop-intensity envelope first crosses DROP_ENTER_THRESHOLD; exit is detected when it
+// falls below DROP_EXIT_THRESHOLD (a hysteresis band that prevents jitter from brief
+// dips inside a sustained drop). The ramps use frame-rate-independent 1-pole smoothing
+// whose rate is tuned so entry resolves in ~200-250ms and decay in ~400ms.
+const DROP_ENTER_THRESHOLD = 0.3   // rising-edge: dropIntensity above this -> focus on
+const DROP_EXIT_THRESHOLD = 0.15   // falling-edge: dropIntensity below this -> focus off
+const DROP_SPEED_MULTIPLIER = 1.3  // peak forward-speed multiplier during a drop
+const DROP_DEPTH_SCALE = 1.15      // peak camera pull-back multiplier during a drop
+const SPEED_RAMP_TAU_S = 0.07      // 1-pole time constant for the speed/depth attack (~200ms to settle)
+const SPEED_DECAY_TAU_S = 0.18     // slower time constant for the decay back to rest (~400ms)
+
 export class GameController {
   private audioEngine: AudioEngine
   private threeScene: ThreeScene
@@ -49,6 +70,22 @@ export class GameController {
   // Smoothed spectral centroid (rolling 1-pole filter) for calm mood transitions.
   private smoothedCentroid = 0
   private smoothedFlux = 0
+  // Last audio-clock timestamp seen in update(), used to integrate car distance from the
+  // per-frame audio-time delta so the cinematic speedMultiplier modulates forward motion
+  // continuously (never teleports the car, never desyncs overall progress from audio).
+  private lastAudioTime = -1
+  // Accumulated forward distance (units), integrated as Σ(Δaudio × BASE_SPEED × mult).
+  // Kept separate from gameState.car.distance (which is the clamped, render-facing value)
+  // so a track-length clamp can't corrupt the running integral.
+  private accumulatedDistance = 0
+  // Drop-focus state machine (iteration 9). `dropFocusActive` mirrors
+  // gameState.isFocusedOnDrop; tracked here too so the rising/falling-edge transitions are
+  // computed from a controller-owned value (the renderer never writes game state).
+  private dropFocusActive = false
+  // Wall-clock (performance.now) timestamp of the previous updateMood call, used to make
+  // the speed/depth ramps frame-rate-independent (the smoothing rate is derived from the
+  // real elapsed time, not assumed 60fps). -1 until the first mood update.
+  private lastMoodTime = -1
 
   constructor(canvas: HTMLCanvasElement) {
     this.audioEngine = new AudioEngine()
@@ -95,6 +132,10 @@ export class GameController {
       this.activeDropIndex = -1
       this.smoothedCentroid = 0
       this.smoothedFlux = 0
+      this.lastAudioTime = -1
+      this.accumulatedDistance = 0
+      this.dropFocusActive = false
+      this.lastMoodTime = -1
 
       // Signal completion so the loading overlay can fade out.
       onStatus?.(null)
@@ -139,23 +180,47 @@ export class GameController {
     // Get current audio time
     const audioTime = this.audioEngine.getCurrentTime()
 
-    // Map audio time to car distance
-    // Assuming constant speed of 50 units/sec
-    const speed = 50
-    const targetDistance = audioTime * speed
+    // Sample spectral mood + drop envelope and the cinematic acceleration/camera scalars
+    // FIRST, so this frame's car.speedMultiplier reflects the current drop phase before we
+    // integrate forward motion with it.
+    this.updateMood(audioTime)
 
-    // Update car distance
-    this.gameState.car.distance = Math.min(targetDistance, this.trackData.length)
+    // Map audio time to car distance by INTEGRATING the audio-time delta scaled by the
+    // drop-driven speed multiplier (iteration 9): distance += Δaudio × BASE_SPEED × mult.
+    // Integrating (rather than the old absolute `audioTime × speed`) lets the cinematic
+    // acceleration accelerate/decelerate the car continuously without teleporting it, while
+    // keeping overall progress locked to the audio timeline (mult averages ~1 over a song,
+    // and the drop ramps are brief). On the first frame after a (re)load or a seek/rewind we
+    // re-baseline the integral to the absolute position so it never drifts after scrubbing.
+    const speed = BASE_SPEED_U_PER_SEC
+    const dt = audioTime - this.lastAudioTime
+    if (this.lastAudioTime < 0 || dt < 0 || dt > 0.5) {
+      // First frame, rewind, or a large jump (tab-throttle / seek): re-anchor to absolute.
+      this.accumulatedDistance = audioTime * speed
+    } else {
+      this.accumulatedDistance += dt * speed * this.gameState.car.speedMultiplier
+      // Anti-drift self-heal: a drop's elevated speed makes the car run slightly AHEAD of
+      // the absolute audio position. When back at rest (multiplier ≈ 1, i.e. not focused on
+      // a drop) we gently relax the integral toward the absolute position so the small lead
+      // dissolves over a few seconds and the car never desyncs from the music's BPM grid
+      // over a long song. The pull is tiny (≈2%/frame, frame-rate-scaled) so it is invisible
+      // and never fights the active drop acceleration.
+      if (!this.gameState.isFocusedOnDrop) {
+        const absolute = audioTime * speed
+        this.accumulatedDistance += (absolute - this.accumulatedDistance) * Math.min(1, dt * 1.2)
+      }
+    }
+    this.lastAudioTime = audioTime
+
+    // Update car distance (clamped to the track for rendering; the running integral above
+    // is kept separate so the clamp can't corrupt continued integration near the end).
+    this.gameState.car.distance = Math.min(this.accumulatedDistance, this.trackData.length)
 
     // Detect beats crossing the audio clock and record them for the renderer.
     this.updateBeatSync(audioTime)
 
     // Detect treble transients crossing the clock and fire the one-frame shimmer pulse.
     this.updateTrebleSync(audioTime)
-
-    // Sample spectral mood + drop envelope and write them onto the car state so
-    // the renderer can drive sky/grid/bloom/FOV from a single mood north-star.
-    this.updateMood(audioTime)
 
     // Anticipate treble obstacles and dodge within the lane grid
     this.maybeAutoDodge(audioTime)
@@ -417,6 +482,62 @@ export class GameController {
       dropIntensity = Math.max(dropIntensity, this.lastDropStrength * 0.55)
     }
     this.gameState.car.dropIntensity = dropIntensity
+
+    // --- Cinematic acceleration + camera choreography (iteration 9).
+    this.updateCinematicDrive(dropIntensity)
+  }
+
+  /**
+   * Drives the iteration-9 "drop moment" gesture: a hysteresis state machine on the
+   * drop-intensity envelope that, on entry, ramps the car's forward speed UP (so the car
+   * visibly hits the throttle into the emotional peak) and the chase camera's pull-back
+   * distance OUT (so it frames the car against the vista), then decays both back to rest
+   * on exit. Rising edge fires when dropIntensity first exceeds DROP_ENTER_THRESHOLD;
+   * falling edge fires when it drops below DROP_EXIT_THRESHOLD — the gap between the two
+   * is the hysteresis band that holds the focus flag stable through brief dips inside a
+   * sustained drop. The ramps are frame-rate-independent 1-pole filters (attack vs decay
+   * time constants) so the gesture lands smoothly at any frame rate. Writes only the three
+   * additive cinematic scalars on game state; never touches physics/lane/beat logic.
+   */
+  private updateCinematicDrive(dropIntensity: number): void {
+    const now = performance.now()
+    let dt = this.lastMoodTime < 0 ? 1 / 60 : (now - this.lastMoodTime) / 1000
+    this.lastMoodTime = now
+    // Guard against tab-throttle / first-frame spikes so the lerp can't overshoot.
+    dt = Math.max(0, Math.min(dt, 0.1))
+
+    // Hysteresis state machine: enter on a rising edge above ENTER, exit on a falling
+    // edge below EXIT. Between the two thresholds the flag holds its current value, so a
+    // momentary dip inside a long drop doesn't flicker the focus off and snap the camera.
+    if (!this.dropFocusActive && dropIntensity >= DROP_ENTER_THRESHOLD) {
+      this.dropFocusActive = true
+      this.gameState.dropTransitionProgress = 0
+    } else if (this.dropFocusActive && dropIntensity < DROP_EXIT_THRESHOLD) {
+      this.dropFocusActive = false
+      this.gameState.dropTransitionProgress = 0
+    }
+    this.gameState.isFocusedOnDrop = this.dropFocusActive
+
+    // Targets: elevated while focused, resting (1.0) otherwise. The attack uses the fast
+    // time constant on the way up and the slower one on the way down for a punchy "throttle
+    // hit" followed by a graceful settle — the language of an automotive promo cut.
+    const speedTarget = this.dropFocusActive ? DROP_SPEED_MULTIPLIER : 1
+    const depthTarget = this.dropFocusActive ? DROP_DEPTH_SCALE : 1
+    const tau = this.dropFocusActive ? SPEED_RAMP_TAU_S : SPEED_DECAY_TAU_S
+    // Frame-rate-independent 1-pole coefficient: alpha = 1 - e^(-dt/tau).
+    const alpha = tau > 1e-4 ? 1 - Math.exp(-dt / tau) : 1
+
+    const car = this.gameState.car
+    car.speedMultiplier += (speedTarget - car.speedMultiplier) * alpha
+    this.gameState.cameraDepthScale += (depthTarget - this.gameState.cameraDepthScale) * alpha
+
+    // Clamp to the documented safe ranges so no downstream consumer (distance integral,
+    // camera distance) can ever be driven out of bounds by accumulated float error.
+    car.speedMultiplier = Math.max(0.8, Math.min(1.3, car.speedMultiplier))
+    this.gameState.cameraDepthScale = Math.max(0.9, Math.min(1.2, this.gameState.cameraDepthScale))
+
+    // Advance the transition progress timer (informational; renderer phases its own).
+    this.gameState.dropTransitionProgress = Math.min(1, this.gameState.dropTransitionProgress + dt * 4)
   }
 
   setCollisionHandler(handler: (() => void) | null): void {

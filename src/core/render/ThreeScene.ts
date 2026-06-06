@@ -8,6 +8,7 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { createFilmGrainPass } from './FilmGrainPass'
 import { createVignettePass } from './VignettePass'
 import { createChromaticAberrationPass } from './ChromaticAberrationPass'
+import { createNeonCompositePass } from './NeonCompositePass'
 import { RimGlowShell } from './RimGlowShell'
 import { TrackData } from '../track/TrackTypes'
 import { GameState, getLaneOffset } from '../game/GameState'
@@ -55,6 +56,18 @@ const BLOOM_THRESHOLD_WARM = 0.62 // looser, blown-out glow on bright/hot moods
 const FOV_DROP_PUNCH = 6 // extra degrees at full drop intensity (cinematic expand)
 const GRID_EMISSIVE_MIN = 0.3 // dim grid in calm passages
 const GRID_EMISSIVE_RANGE = 0.4 // -> up to 0.7 at peak brightness
+
+// Cinematic drop-moment choreography (iteration 9). When the controller's drop-focus
+// state machine engages (gameState.isFocusedOnDrop), the chase camera pulls back and the
+// FOV widens together as one gesture, framing the accelerating car against the vista like
+// an automotive promo cut. The camera pull-back is driven by gameState.cameraDepthScale
+// (the controller-smoothed 0.9..1.2 multiplier) applied to the base chase distance; the
+// extra FOV is a complementary widening bound to the SAME normalized depth excess, so the
+// two always move in concert. On the rising edge of the focus flag the camera orbit angle
+// is snapped square (one frame) so the car is framed head-on during the moment.
+const BASE_CAMERA_DISTANCE = 8 // resting chase distance behind the car (units)
+const FOV_DROP_BOOST_MAX = 7 // extra degrees of FOV at full camera pull-back (6-8° band)
+const CAMERA_DEPTH_LERP = 0.12 // per-frame ease of the applied depth toward cameraDepthScale
 
 // Camera-shake + particle tuning (iteration 3). The shake is a transient,
 // non-destructive world-space offset added to the camera each frame and reverted
@@ -120,6 +133,15 @@ const CAR_EMISSIVE_CENTROID_RANGE = 0.5 // -> up to 0.8× at peak perceived brig
 // place future-proofs a true two-target selective-bloom upgrade with zero refactor.
 const LAYER_DEFAULT = 0
 const NEON_LAYER = 1
+// Hero-isolation layer (iteration 9). The SELECTIVE-bloom isolation render (a second
+// composer, additively composited on top) must draw ONLY the foreground hero objects —
+// the car + rim glow, drop/treble/collision particles, the beat indicator, and the sword
+// obstacles — and explicitly EXCLUDE the background neon (sky dome, sun disc, starfield),
+// because the sky fills the whole frame and re-adding it additively would wash the image
+// and erase the road's legibility. Hero objects are tagged onto this layer IN ADDITION to
+// NEON_LAYER (via layers.enable, not set), so they still render normally in the all-layers
+// primary pass while also appearing in the hero-only isolation pass.
+const HERO_LAYER = 2
 
 // Mood-scaled bloom base strength (iteration 7). The overall glow now BREATHES with the
 // emotional arc: cool/dim intros sit tight at COOL, bright drops blow out toward HOT.
@@ -127,6 +149,30 @@ const NEON_LAYER = 1
 // STACK on top so rhythm punch and emotional peaks remain visible and distinct.
 const BLOOM_STRENGTH_COOL = 0.9 // base glow on cool/dim sections (low centroid)
 const BLOOM_STRENGTH_HOT = 1.6 // base glow on bright/hot sections (high centroid)
+
+// Selective-bloom isolation tuning (iteration 9). A SECOND EffectComposer renders only
+// the NEON_LAYER geometry through an exaggerated bloom into an offscreen target, which is
+// then additively composited on top of the primary (full-scene) render. This delivers the
+// premium focal hierarchy the mission calls for: the hero car's rim glow + drop-burst
+// particles bloom dramatically while the road/grid (only present in the primary render,
+// with its disciplined threshold) stay razor-sharp. The neon bloom uses a LOW threshold so
+// the car's emissive/rim edges catch the glow aggressively, and its strength swells on
+// drops (driven per-frame in renderComposite from the same mood/drop signals as the
+// primary bloom). The composite is pure-additive so it is stable and flicker-free.
+const NEON_BLOOM_STRENGTH_BASE = 1.1 // resting neon-glow strength (calm sections)
+const NEON_BLOOM_STRENGTH_DROP = 2.0 // peak neon-glow strength at full drop intensity
+const NEON_BLOOM_RADIUS = 0.85 // slightly wider than the primary for a softer hero halo
+// Two-threshold split (iteration 9): the neon composer's threshold tracks mood DOWNWARD
+// (cool 0.75 -> warm 0.52) so the hero car's emissive + rim edges catch bloom ever more
+// aggressively as the music brightens, while the PRIMARY composer keeps its conservative
+// threshold (0.35-floor mood lerp, unchanged) so the road/grid never smear.
+const NEON_BLOOM_THRESHOLD_COOL = 0.75
+const NEON_BLOOM_THRESHOLD_WARM = 0.52
+// Composite contribution at rest vs. during a drop. Kept modest at rest so the neon glow
+// reads as a tasteful focal light rather than a constant wash; lifts on drops so the hero
+// car flares as the cinematic moment lands. Driven per-frame from the drop envelope.
+const NEON_COMPOSITE_STRENGTH_BASE = 0.85
+const NEON_COMPOSITE_STRENGTH_DROP = 1.25
 
 // Treble shimmer tuning (iteration 7). On each high-frequency transient the hero car
 // sprays a small additive burst that pumps straight into the bloom — the missing
@@ -369,6 +415,14 @@ export class ThreeScene {
   private camera: THREE.PerspectiveCamera
   private composer: EffectComposer
   private bloomPass: UnrealBloomPass
+  // Selective-bloom isolation pipeline (iteration 9). The neon composer renders ONLY the
+  // NEON_LAYER geometry through an exaggerated bloom into `neonRenderTarget`; the result is
+  // additively composited onto the primary render by `neonCompositePass` (the final pass of
+  // the primary chain). See the NEON_BLOOM_* constants for the design rationale.
+  private neonRenderTarget: THREE.WebGLRenderTarget
+  private neonComposer: EffectComposer
+  private neonBloomPass: UnrealBloomPass
+  private neonCompositePass: ShaderPass
   // Cinematic post passes (iteration 4). CA intensity is driven per-frame from the
   // collision envelope; grain advances its time uniform each frame; vignette is static.
   private chromaticPass: ShaderPass
@@ -408,6 +462,14 @@ export class ThreeScene {
   private swordTemplatePromise: Promise<THREE.Object3D | null> | null = null
   private startTime = performance.now()
   private cameraOrbitAngle = 0
+  // Cinematic drop-moment state (iteration 9). `appliedDepthScale` eases toward the
+  // controller's gameState.cameraDepthScale so the camera pull-back glides; `prevFocused`
+  // tracks the focus flag to detect its rising edge (snap orbit square on drop entry); and
+  // `bloomFocusEnvelope` is a 0..1 sustain envelope that ramps up while focused and decays
+  // on exit, holding the bloom elevated through the whole drop rather than per-beat-decaying.
+  private appliedDepthScale = 1
+  private prevFocused = false
+  private bloomFocusEnvelope = 0
   // Smoothed camera bank/roll (radians, iteration 6). Lerped toward a target derived
   // from the curvature of the upcoming track centerline so the camera leans into turns.
   private cameraRoll = 0
@@ -477,10 +539,11 @@ export class ThreeScene {
       0.1,
       10000
     )
-    // See ALL layers (iteration 7). The neon/non-neon layer split (NEON_LAYER vs
-    // LAYER_DEFAULT) is a focal-hierarchy organization; the single composer render must
-    // still draw the whole world, so the camera observes every layer. Bloom selectivity
-    // is achieved via the disciplined threshold, not by masking the lone render pass.
+    // The PRIMARY render sees ALL layers (iteration 7): it draws the whole world (road,
+    // grid, neon heroes) with a disciplined bloom threshold so the road/grid stay sharp.
+    // Iteration 9 adds a SEPARATE hero-only render (camera.layers temporarily masked to
+    // HERO_LAYER) that is additively composited on top for an exaggerated hero glow; that
+    // masking is applied transiently per-frame in renderComposite, then restored here.
     this.camera.layers.enableAll()
 
     // Post-processing pipeline (iteration 4):
@@ -517,6 +580,53 @@ export class ThreeScene {
     this.filmGrainPass = createFilmGrainPass(FILM_GRAIN_INTENSITY)
     this.composer.addPass(this.filmGrainPass)
 
+    // --- Selective-bloom isolation (iteration 9). A second, offscreen composer renders
+    // ONLY the NEON_LAYER geometry through an exaggerated bloom + tone-map into
+    // `neonRenderTarget`. Its result is additively composited onto the primary, fully-graded
+    // image by `neonCompositePass`, which we append as the FINAL pass of the primary chain
+    // (so it renders to screen, adding the neon glow on top of the road/grid that stay sharp
+    // in the primary render). Both composers tone-map to sRGB so the additive blend happens
+    // in a consistent display space and reads cleanly with no banding.
+    const dpr = Math.min(window.devicePixelRatio, 2)
+    this.neonRenderTarget = new THREE.WebGLRenderTarget(
+      Math.floor(width * dpr),
+      Math.floor(height * dpr),
+      {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        // sRGB so the neon target matches the primary's OutputPass display space.
+        colorSpace: THREE.SRGBColorSpace,
+        depthBuffer: true
+      }
+    )
+    this.neonComposer = new EffectComposer(this.renderer, this.neonRenderTarget)
+    this.neonComposer.setSize(width, height)
+    this.neonComposer.setPixelRatio(dpr)
+    // The neon RenderPass clears to transparent black so non-neon pixels contribute
+    // nothing to the additive composite (only the neon heroes + their bloom carry light).
+    const neonRenderPass = new RenderPass(this.scene, this.camera)
+    neonRenderPass.clearColor = new THREE.Color(0x000000)
+    neonRenderPass.clearAlpha = 1
+    this.neonComposer.addPass(neonRenderPass)
+    this.neonBloomPass = new UnrealBloomPass(
+      new THREE.Vector2(width, height),
+      NEON_BLOOM_STRENGTH_BASE, // re-driven per frame from the drop envelope
+      NEON_BLOOM_RADIUS,
+      NEON_BLOOM_THRESHOLD_COOL // re-driven per frame (mood lerp toward WARM)
+    )
+    this.neonComposer.addPass(this.neonBloomPass)
+    this.neonComposer.addPass(new OutputPass())
+    // The neon composer renders to its target (never to screen), so its final pass must
+    // NOT auto-blit to the canvas. EffectComposer sets renderToScreen on the last pass; we
+    // force it off here because this composer's "output" is the offscreen texture.
+    this.neonComposer.renderToScreen = false
+
+    // Composite pass: samples the neon target and adds it over the primary graded image.
+    // Appended LAST so it becomes the primary composer's renderToScreen pass.
+    this.neonCompositePass = createNeonCompositePass(NEON_COMPOSITE_STRENGTH_BASE)
+    this.neonCompositePass.uniforms.tNeon.value = this.neonRenderTarget.texture
+    this.composer.addPass(this.neonCompositePass)
+
     // Lighting - brighter for better visibility
     const ambientLight = new THREE.AmbientLight(ANALOGOUS_PALETTE.cyanGlow, 0.4)
     this.scene.add(ambientLight)
@@ -537,6 +647,7 @@ export class ThreeScene {
     // emits are stamped into pre-allocated buffers so there is no per-frame GC.
     this.particlePool = new ParticlePool(280)
     this.particlePool.points.layers.set(NEON_LAYER) // emissive hero (iteration 7)
+    this.particlePool.points.layers.enable(HERO_LAYER) // hero-isolation bloom (iteration 9)
     this.scene.add(this.particlePool.points)
 
     // Create the immersion-preserving beat indicator (a glowing sprite, not HUD text)
@@ -817,6 +928,7 @@ export class ThreeScene {
     sprite.renderOrder = 999
     sprite.frustumCulled = false
     sprite.layers.set(NEON_LAYER) // glowing hero HUD element (iteration 7)
+    sprite.layers.enable(HERO_LAYER) // also in the hero-isolation bloom (iteration 9)
 
     this.beatIndicator = sprite
     this.beatIndicatorMaterial = material
@@ -862,13 +974,16 @@ export class ThreeScene {
     this.buildFallbackCar(carGroup)
     // Hero car -> neon layer (iteration 7), incl. the freshly built fallback children.
     ThreeScene.setLayerRecursive(carGroup, NEON_LAYER)
+    // ...and onto the hero-isolation layer (iteration 9) so it gets the exaggerated glow.
+    ThreeScene.enableLayerRecursive(carGroup, HERO_LAYER)
 
     try {
       const template = await this.loadCarTemplate()
       if (template) {
         this.replaceCarWithTemplate(carGroup, template)
-        // Re-tag the swapped-in GLB (and rim glow) onto the neon layer.
+        // Re-tag the swapped-in GLB (and rim glow) onto the neon + hero layers.
         ThreeScene.setLayerRecursive(carGroup, NEON_LAYER)
+        ThreeScene.enableLayerRecursive(carGroup, HERO_LAYER)
       }
     } catch (error) {
       console.warn('Falling back to procedural car because the GLB failed to load', error)
@@ -883,6 +998,16 @@ export class ThreeScene {
    */
   private static setLayerRecursive(root: THREE.Object3D, layer: number): void {
     root.traverse(obj => obj.layers.set(layer))
+  }
+
+  /**
+   * Enables `layer` on `root` and every descendant ADDITIVELY (iteration 9), preserving
+   * each object's existing layer membership (unlike setLayerRecursive, which replaces it).
+   * Used to tag the foreground hero objects onto HERO_LAYER in addition to NEON_LAYER so
+   * they appear in BOTH the all-layers primary render and the hero-only isolation render.
+   */
+  private static enableLayerRecursive(root: THREE.Object3D, layer: number): void {
+    root.traverse(obj => obj.layers.enable(layer))
   }
 
   private loadCarTemplate(): Promise<THREE.Object3D | null> {
@@ -1078,6 +1203,9 @@ export class ThreeScene {
     this.lastFrameTime = null
     this.lastNodeIndex = 0
     this.shakeResidual.set(0, 0, 0)
+    this.appliedDepthScale = 1
+    this.prevFocused = false
+    this.bloomFocusEnvelope = 0
     this.particlePool.reset()
 
     this.clearTrebleMeshes()
@@ -1291,8 +1419,10 @@ export class ThreeScene {
           hazardGroup.add(sword)
         }
 
-        // Obstacles are emissive neon heroes -> neon layer (iteration 7).
+        // Obstacles are emissive neon heroes -> neon layer (iteration 7) + the
+        // hero-isolation layer (iteration 9) so their blades flare in the focal bloom.
         ThreeScene.setLayerRecursive(hazardGroup, NEON_LAYER)
+        ThreeScene.enableLayerRecursive(hazardGroup, HERO_LAYER)
         this.scene.add(hazardGroup)
         this.trebleMeshes.push(hazardGroup)
       }
@@ -1385,6 +1515,12 @@ export class ThreeScene {
     this.renderer.setSize(width, height)
     this.composer.setSize(width, height)
     this.bloomPass.setSize(width, height)
+    // Keep the neon-isolation pipeline (iteration 9) in lock-step with the primary so the
+    // additive composite samples a matching-resolution texture (no scaling artifacts).
+    const dpr = Math.min(window.devicePixelRatio, 2)
+    this.neonRenderTarget.setSize(Math.floor(width * dpr), Math.floor(height * dpr))
+    this.neonComposer.setSize(width, height)
+    this.neonBloomPass.setSize(width, height)
   }
 
   private handleObstacleCollision(carPosition: THREE.Vector3, gameState: GameState): void {
@@ -1469,7 +1605,15 @@ export class ThreeScene {
         fovOffset = (1 - d * d) * FOV_PUNCH * strength
       }
     }
-    const targetFov = BASE_FOV + fovOffset + dropIntensity * FOV_DROP_PUNCH
+    // Cinematic FOV widening paired with the camera pull-back (iteration 9). The depth
+    // scale sits at 1.0 at rest and rises to ~1.15 during a drop; we map that excess over
+    // the controller's [1.0, DROP_DEPTH_SCALE=1.15] band to a 0..1 factor and scale
+    // FOV_DROP_BOOST_MAX (≈7°) by it, so the lens widens in lock-step with the camera
+    // easing back — a single complementary "open up into the vista" gesture. Read directly
+    // off the same eased depth the camera uses (this.appliedDepthScale) so FOV and distance
+    // never desync. Clamped to [0,1] so it contributes nothing at rest.
+    const depthExcess = THREE.MathUtils.clamp((this.appliedDepthScale - 1) / 0.15, 0, 1)
+    const targetFov = BASE_FOV + fovOffset + dropIntensity * FOV_DROP_PUNCH + depthExcess * FOV_DROP_BOOST_MAX
     if (Math.abs(this.camera.fov - targetFov) > 0.01) {
       this.camera.fov = targetFov
       this.camera.updateProjectionMatrix()
@@ -1489,7 +1633,22 @@ export class ThreeScene {
     // per-beat pulse + drop expansion STACK on top, so rhythm punch and emotional peaks
     // stay visible and distinct from the slow mood swell.
     const bloomBase = THREE.MathUtils.lerp(BLOOM_STRENGTH_COOL, BLOOM_STRENGTH_HOT, centroid)
-    this.bloomPass.strength = bloomBase + bloomBoost + dropIntensity * 0.5
+
+    // Cinematic bloom SUSTAIN (iteration 9). Ease a 0..1 focus envelope toward 1 while the
+    // controller's drop-focus flag is held and toward 0 on exit, with a fast attack
+    // (~150ms) and a slower release (~400ms). This LIFTS the bloom base toward HOT (1.6)
+    // for the WHOLE drop — not just the entry beat — so the glow holds through the moment
+    // and eases out cleanly afterward, reinforcing the cinematic "hold" of the peak. It
+    // composes additively with the centroid-driven base via lerp-to-HOT, so on already-hot
+    // sections it is a gentle confirm rather than a double-count.
+    const focusAttack = this.lastFrameDelta > 0 ? 1 - Math.exp(-this.lastFrameDelta / 0.15) : 0.18
+    const focusRelease = this.lastFrameDelta > 0 ? 1 - Math.exp(-this.lastFrameDelta / 0.4) : 0.08
+    const focusTarget = gameState.isFocusedOnDrop ? 1 : 0
+    const focusRate = gameState.isFocusedOnDrop ? focusAttack : focusRelease
+    this.bloomFocusEnvelope += (focusTarget - this.bloomFocusEnvelope) * focusRate
+    const sustainedBase = THREE.MathUtils.lerp(bloomBase, BLOOM_STRENGTH_HOT, this.bloomFocusEnvelope)
+
+    this.bloomPass.strength = sustainedBase + bloomBoost + dropIntensity * 0.5
     // Bloom threshold tracks mood: tight/controlled on cool sections, looser (more
     // of the frame glows) as the music brightens or drops. Drives the "wider glow
     // on hot moods" feel without touching the beat-sync strength envelope.
@@ -1498,6 +1657,30 @@ export class ThreeScene {
       BLOOM_THRESHOLD_COOL,
       BLOOM_THRESHOLD_WARM,
       warmth
+    )
+
+    // --- Neon-isolation bloom drive (iteration 9). The dedicated neon composer's bloom
+    // swells with the drop envelope so the hero car + particles flare on emotional peaks,
+    // and its threshold tracks mood DOWNWARD (cool->warm) so the car's emissive/rim edges
+    // catch the glow ever more aggressively as the music brightens — a focal hierarchy
+    // distinct from the primary road/grid bloom. The additive composite strength likewise
+    // lifts on drops so the flare lands as part of the unified cinematic moment, then eases
+    // back to a tasteful resting glow. All driven from the same mood/drop signals so the
+    // two bloom layers (full-scene + neon-isolated) stay perceptually synchronized.
+    this.neonBloomPass.strength = THREE.MathUtils.lerp(
+      NEON_BLOOM_STRENGTH_BASE,
+      NEON_BLOOM_STRENGTH_DROP,
+      dropIntensity
+    )
+    this.neonBloomPass.threshold = THREE.MathUtils.lerp(
+      NEON_BLOOM_THRESHOLD_COOL,
+      NEON_BLOOM_THRESHOLD_WARM,
+      warmth
+    )
+    this.neonCompositePass.uniforms.strength.value = THREE.MathUtils.lerp(
+      NEON_COMPOSITE_STRENGTH_BASE,
+      NEON_COMPOSITE_STRENGTH_DROP,
+      dropIntensity
     )
 
     // --- Sky + grid mood binding.
@@ -1565,10 +1748,30 @@ export class ThreeScene {
 
     // --- Camera shake: a transient world-space offset added to the camera right
     // before rendering, then reverted, so it never accumulates into the lerp-driven
-    // chase position on the next frame (clean settle, no residual drift).
+    // chase position on the next frame (clean settle, no residual drift). Applied once
+    // here so BOTH the neon-isolation render and the primary render share the exact same
+    // shaken camera transform (they must stay pixel-aligned for the additive composite).
     this.applyCameraShake(gameState)
+    this.renderNeonIsolation()
     this.composer.render()
     this.camera.position.sub(this.shakeOffset)
+  }
+
+  /**
+   * Renders the HERO_LAYER-only pass into `neonRenderTarget` (iteration 9). Temporarily
+   * masks the camera to HERO_LAYER so only the FOREGROUND heroes draw (car + rim glow,
+   * particles, beat indicator, sword obstacles) — explicitly NOT the sky/sun/starfield,
+   * which would otherwise fill the frame and wash the additive composite — runs them
+   * through the exaggerated neon bloom, then restores the camera to all-layers so the
+   * subsequent primary render draws the full world. The resulting texture is wired into
+   * `neonCompositePass` (set once at construction; the target's texture handle is stable)
+   * and additively blended onto the primary image as the final primary pass. Allocation-
+   * free and flicker-free: the same shaken camera transform is shared with both renders.
+   */
+  private renderNeonIsolation(): void {
+    this.camera.layers.set(HERO_LAYER)
+    this.neonComposer.render()
+    this.camera.layers.enableAll()
   }
 
   /**
@@ -1734,6 +1937,16 @@ export class ThreeScene {
       laneLerpSpeed
     )
 
+    // Cinematic drop-moment orbit snap (iteration 9): on the RISING edge of the
+    // controller's drop-focus flag, snap the camera orbit angle square (to 0) for one
+    // frame so the car is framed head-on as the moment lands, instead of being viewed at
+    // the sideways lane-change angle. Subsequent frames resume the normal lane-following
+    // orbit lerp, so the snap reads as a deliberate "settle behind the car" cut.
+    if (gameState.isFocusedOnDrop && !this.prevFocused) {
+      this.cameraOrbitAngle = 0
+    }
+    this.prevFocused = gameState.isFocusedOnDrop
+
     const laneWidth = Math.max(1, Math.abs(getLaneOffset(1)))
     const targetOrbitAngle = (gameState.car.laneOffset / laneWidth) * 0.3
     this.cameraOrbitAngle = THREE.MathUtils.lerp(
@@ -1857,8 +2070,18 @@ export class ThreeScene {
       .crossVectors(this.smoothedCarForward, currentNode.up)
       .normalize()
 
-    // Position camera behind and slightly above car with orbiting glide during lane changes
-    const cameraDistance = 8
+    // Position camera behind and slightly above car with orbiting glide during lane changes.
+    // Cinematic pull-back (iteration 9): ease the applied depth scale toward the controller's
+    // gameState.cameraDepthScale (1.0 at rest, up to ~1.15 during a drop) and apply it to the
+    // chase distance so the camera smoothly pulls back ~1m on drop entry — widening the
+    // look-ahead vista — and eases back on exit. Eased here too (on top of the controller's
+    // own smoothing) so the framing never snaps even if the upstream scalar moves quickly.
+    this.appliedDepthScale = THREE.MathUtils.lerp(
+      this.appliedDepthScale,
+      gameState.cameraDepthScale,
+      CAMERA_DEPTH_LERP
+    )
+    const cameraDistance = BASE_CAMERA_DISTANCE * this.appliedDepthScale
     const cameraHeight = 3
     const baseCameraOffset = this.smoothedCarForward
       .clone()

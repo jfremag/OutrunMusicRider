@@ -45,10 +45,34 @@ export interface CarState {
   // Set by the controller, read-only in the renderer, zero impact on physics/gameplay.
   trebleFires: boolean
   trebleStrength: number
+  // Cinematic acceleration scalar (iteration 9). A smoothed multiplier on the car's
+  // forward speed, ramped UP on drop entry (the car "hits the throttle" into the
+  // emotional peak) and decayed back to 1.0 on exit. The controller binds the car's
+  // targetDistance to `audioTime * BASE_SPEED * speedMultiplier`, so a drop visibly
+  // accelerates the car down the track. Default 1.0; clamped to ~[0.8, 1.3]. NOTE:
+  // because car distance is the integral of speed, a raw multiplier on `audioTime *
+  // speed` would TELEPORT the car when the multiplier changes; the controller instead
+  // integrates distance incrementally (see GameController.update) so speed changes are
+  // continuous and never desync the car from the audio timeline's overall progress.
+  speedMultiplier: number
 }
 
 export interface GameState {
   car: CarState
+  // Camera choreography depth scalar (iteration 9). A smoothed multiplier on the chase
+  // camera's pull-back distance, ramped UP on drop entry (camera pulls back ~1m and the
+  // look-ahead widens, framing the car against the scenic vista) and decayed to 1.0 on
+  // exit. Default 1.0; clamped to ~[0.9, 1.2]. Read-only in the renderer.
+  cameraDepthScale: number
+  // Drop-focus state machine flag (iteration 9). True while the cinematic "drop moment"
+  // is active (between rising-edge entry and hysteresis-gated exit). The renderer reads
+  // the rising edge of this flag to snap camera orbit square and begin the pull-back, and
+  // sustains elevated bloom/FOV while it is held. Owned by the controller.
+  isFocusedOnDrop: boolean
+  // Drop transition lerp timer (iteration 9), 0..1. Advances on drop entry to drive the
+  // eased camera-depth / FOV ramp, and is reused on exit for the decay. Owned by the
+  // controller; informational for the renderer (the renderer phases its own envelopes).
+  dropTransitionProgress: number
 }
 
 export const LANE_WIDTH = 2.5
@@ -69,8 +93,12 @@ export function initGameState(): GameState {
       cameraShakeAmplitude: 0,
       lastShakeTime: -Infinity,
       trebleFires: false,
-      trebleStrength: 0
-    }
+      trebleStrength: 0,
+      speedMultiplier: 1
+    },
+    cameraDepthScale: 1,
+    isFocusedOnDrop: false,
+    dropTransitionProgress: 0
   }
 }
 
