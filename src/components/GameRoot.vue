@@ -36,6 +36,10 @@
       </div>
     </div>
     <canvas ref="canvasEl" class="game-canvas"></canvas>
+    <!-- Iteration 10: neon audio-sync HUD (live BPM, beat-phase ring, 3-band meters).
+         A separate 2D canvas floating top-right; pointer-events:none lets clicks pass
+         through to the game canvas. Its backing-store resolution is set in HudOverlay. -->
+    <canvas ref="hudCanvasEl" id="hud-overlay" class="hud-overlay"></canvas>
     <div class="damage-flash" :class="{ 'is-visible': showDamageFlash }"></div>
   </div>
 </template>
@@ -43,10 +47,15 @@
 <script setup lang="ts">
 import { ref, shallowRef, markRaw, onMounted, onUnmounted } from 'vue'
 import { GameController } from '../core/game/GameController'
+import { HudOverlay } from '../core/render/HudOverlay'
 import LoadingOverlay from './LoadingOverlay.vue'
 
 const canvasEl = ref<HTMLCanvasElement | null>(null)
+const hudCanvasEl = ref<HTMLCanvasElement | null>(null)
 const gameController = shallowRef<GameController | null>(null)
+// HudOverlay is stateless w.r.t. game state and must NOT enter Vue's reactivity system
+// (it caches a 2D canvas context). Hold it in a plain module-scoped variable.
+let hudOverlay: HudOverlay | null = null
 const isReady = ref(false)
 const isPlaying = ref(false)
 const loadedFileName = ref<string>('')
@@ -100,6 +109,12 @@ onMounted(async () => {
   // Create game controller - this will initialize Three.js
   gameController.value = markRaw(new GameController(canvasEl.value))
 
+  // Create the neon audio-sync HUD overlay (iteration 10) on its own 2D canvas. It reads
+  // only from the controller's MusicMap + GameState each frame and never mutates them.
+  if (hudCanvasEl.value) {
+    hudOverlay = new HudOverlay(hudCanvasEl.value)
+  }
+
   // Dev-only debug handle so the running scene can be inspected from the console /
   // automated checks (e.g. confirming the road elevation morph). Guarded by the Vite
   // DEV flag so it is dead-code-eliminated from production builds.
@@ -122,6 +137,10 @@ onMounted(async () => {
   const animate = () => {
     if (gameController.value) {
       gameController.value.update()
+      // Paint the audio-sync HUD AFTER the game update so it samples the freshly
+      // mirrored audio clock (gameState.audioTime) and reads the same frame the
+      // renderer just drew — keeping BPM / phase / band meters perfectly in sync.
+      hudOverlay?.render(gameController.value.getMusicMap(), gameController.value.getState())
     }
 
     animationFrameId = requestAnimationFrame(animate)
@@ -249,6 +268,21 @@ const handlePause = () => {
   top: 0;
   left: 0;
   z-index: 1;
+}
+
+.hud-overlay {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  width: 220px;
+  height: 128px;
+  /* Above the game canvas (z-index 1) but below the controls (z-index 10). The HUD sits
+     top-right and the controls top-left, so they never overlap regardless. */
+  z-index: 5;
+  /* Let every click/drag fall through to the game canvas underneath. */
+  pointer-events: none;
+  /* Reinforce the neon aesthetic with a soft outer glow on the whole panel. */
+  filter: drop-shadow(0 0 6px rgba(106, 246, 255, 0.35));
 }
 
 .damage-flash {

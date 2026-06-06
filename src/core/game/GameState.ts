@@ -73,6 +73,12 @@ export interface GameState {
   // eased camera-depth / FOV ramp, and is reused on exit for the decay. Owned by the
   // controller; informational for the renderer (the renderer phases its own envelopes).
   dropTransitionProgress: number
+  // Live audio-playback clock in SECONDS (iteration 10), mirrored onto game state by
+  // GameController.update each frame so read-only consumers (the HUD overlay) can sample
+  // the MusicMap (beats, energy/treble bands) against the exact same clock the renderer
+  // uses, without reaching into the AudioEngine. -1 until the first frame with audio.
+  // Owned by the controller; read-only everywhere else (the HUD never mutates state).
+  audioTime: number
 }
 
 export const LANE_WIDTH = 2.5
@@ -98,7 +104,8 @@ export function initGameState(): GameState {
     },
     cameraDepthScale: 1,
     isFocusedOnDrop: false,
-    dropTransitionProgress: 0
+    dropTransitionProgress: 0,
+    audioTime: -1
   }
 }
 

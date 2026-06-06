@@ -170,6 +170,12 @@ export class GameController {
   }
 
   update(): void {
+    // Mirror the audio clock onto game state every frame (iteration 10) so the read-only
+    // HUD overlay can sample the MusicMap against the exact clock the renderer uses. This
+    // runs on BOTH paths (playing and paused/no-track) so the HUD stays correct while the
+    // song is paused at a position or before a track exists (-> 0).
+    this.gameState.audioTime = this.audioEngine.getCurrentTime()
+
     // Always render, regardless of track or playback state
     if (!this.trackData || !this.audioEngine.isAudioPlaying()) {
       // Still render even if not playing
@@ -178,7 +184,7 @@ export class GameController {
     }
 
     // Get current audio time
-    const audioTime = this.audioEngine.getCurrentTime()
+    const audioTime = this.gameState.audioTime
 
     // Sample spectral mood + drop envelope and the cinematic acceleration/camera scalars
     // FIRST, so this frame's car.speedMultiplier reflects the current drop phase before we
@@ -235,6 +241,25 @@ export class GameController {
 
   isReady(): boolean {
     return this.trackData !== null
+  }
+
+  /**
+   * Read-only access to the analyzed MusicMap for the HUD overlay (iteration 10). The
+   * HUD samples beats (for rolling BPM + beat phase) and the energy/treble bands (for the
+   * 3-band meters) against the audio clock. Returns null until a file has been analyzed.
+   * Encapsulation is preserved — the HUD only reads; it never mutates the map or state.
+   */
+  getMusicMap(): MusicMap | null {
+    return this.musicMap
+  }
+
+  /**
+   * Read-only access to the live game state for the HUD overlay (iteration 10). The HUD
+   * reads gameState.audioTime (the mirrored audio clock) for BPM/phase/band sampling. The
+   * caller must treat the returned object as immutable; the HUD never writes to it.
+   */
+  getState(): GameState {
+    return this.gameState
   }
 
   private maybeAutoDodge(audioTime: number): void {
