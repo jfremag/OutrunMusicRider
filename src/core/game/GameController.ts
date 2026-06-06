@@ -56,18 +56,29 @@ export class GameController {
     this.gameState = initGameState()
   }
 
-  async loadFile(file: File): Promise<void> {
+  /**
+   * Loads, decodes, analyzes, and builds a track from an audio file. The optional
+   * `onStatus` callback (iteration 8) is invoked at each pipeline milestone with a
+   * human-readable status string, and finally with `null` to signal completion, so the
+   * UI can show a premium loading overlay during the 2-3s analysis gap. Passing the
+   * callback is purely additive — existing callers that omit it are unaffected.
+   */
+  async loadFile(file: File, onStatus?: (status: string | null) => void): Promise<void> {
     try {
       // Decode audio
+      onStatus?.('Decoding audio...')
       const buffer = await this.audioEngine.loadFile(file)
 
       // Analyze audio
+      onStatus?.('Analyzing waveform...')
       this.musicMap = await analyzeBuffer(buffer)
 
       // Generate track
+      onStatus?.('Detecting beats & tempo...')
       this.trackData = generateTrack(this.musicMap)
 
       // Set track in scene
+      onStatus?.('Generating track geometry...')
       this.threeScene.setTrack(this.trackData)
 
       // Reset game state
@@ -84,6 +95,9 @@ export class GameController {
       this.activeDropIndex = -1
       this.smoothedCentroid = 0
       this.smoothedFlux = 0
+
+      // Signal completion so the loading overlay can fade out.
+      onStatus?.(null)
     } catch (error) {
       console.error('Error loading file:', error)
       throw error

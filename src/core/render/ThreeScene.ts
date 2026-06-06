@@ -383,6 +383,17 @@ export class ThreeScene {
   // materials (e.g. when the GLB swaps in over the procedural fallback).
   private carEmissiveMaterials: { material: THREE.Material & { emissiveIntensity: number }; base: number }[] = []
   private roadMesh: THREE.Mesh | null = null
+  // Cached, immutable base vertex positions of the road, captured once at setTrack
+  // (iteration 8). The per-frame spectral elevation morph reads from these so it always
+  // displaces relative to the original authored terrain shape rather than accumulating
+  // drift frame-to-frame. Layout is the flat [x,y,z, x,y,z, ...] BufferAttribute array.
+  private baseRoadPositions: Float32Array | null = null
+  // Smoothed spectral-energy elevation amplitude (iteration 8). Lerped toward a target
+  // derived from spectral centroid (brightness) + flux (volatility) each frame so the
+  // road's musical undulation swells/settles fluidly instead of snapping. Read-only-ish
+  // mood input; never mutates game state. Phase of the travelling wave is `roadMorphPhase`.
+  private roadMorphAmplitude = 0
+  private roadMorphPhase = 0
   private carMesh: THREE.Group | null = null
   private trackData: TrackData | null = null
   private skyMesh: THREE.Mesh | null = null
@@ -1140,6 +1151,15 @@ export class ThreeScene {
     this.roadMesh.layers.set(LAYER_DEFAULT) // sharp non-neon geometry (iteration 7)
     this.scene.add(this.roadMesh)
 
+    // Cache the immutable base vertex positions for per-frame spectral elevation
+    // morphing (iteration 8). We copy the whole [x,y,z,...] buffer so the morph can
+    // always displace relative to the authored terrain rather than drifting. Resetting
+    // the morph state here keeps each newly loaded track starting from a calm baseline.
+    const basePosAttr = roadGeometry.getAttribute('position') as THREE.BufferAttribute
+    this.baseRoadPositions = new Float32Array(basePosAttr.array as Float32Array)
+    this.roadMorphAmplitude = 0
+    this.roadMorphPhase = 0
+
     // Add lane markers
     this.addLaneMarkers(track, roadWidth)
 
@@ -1877,9 +1897,92 @@ export class ThreeScene {
     // to a capped roll, and lerp toward it so the bank glides rather than snaps.
     this.updateCameraBanking(carDistance, currentNode.up)
 
+    // Spectral-energy road morphing (iteration 8): the track surface becomes a third
+    // axis of music reactivity, undulating in real time with the music's emotional mood
+    // (spectral centroid drives swell, flux drives shimmer). Decoupled from beat/drop
+    // systems and from all game state — purely a read of the mood signals the controller
+    // sampled this frame.
+    this.morphRoadToMusic(gameState, deltaSeconds)
+
     // Render
     this.updateSunPlacement()
     this.renderComposite(gameState)
+  }
+
+  /**
+   * Spectral-energy road elevation morph (iteration 8). Displaces every road vertex's
+   * Y from its cached, immutable base position by a travelling sinusoidal wave whose
+   * amplitude is driven by the music's emotional mood: spectral centroid (brightness)
+   * sets the baseline swell, spectral flux (volatility) adds a shimmer boost, and the
+   * one-shot drop envelope gives a brief extra heave on emotional peaks.
+   *
+   * Design notes:
+   *  - We ADD a wave on top of the base shape rather than scaling the absolute Y. The
+   *    authored terrain frequently sits at y≈0 (flat passages), where a multiplicative
+   *    scale would be invisible; an additive wave keeps the road legibly breathing
+   *    everywhere, which is the whole point ("the world dances with the music").
+   *  - The wave phase uses each vertex's base Z (its arc-length down the track) so the
+   *    crests travel along the road, and an animated `roadMorphPhase` scrolls them past
+   *    the camera over time for a living, flowing read.
+   *  - The amplitude target is smoothed with a frame-rate-independent lerp and clamped
+   *    so the morph swells/settles fluidly with no jarring snaps and no geometric
+   *    pathologies. On silence the amplitude relaxes to ~0 and the road idles flat-to-base.
+   *  - Pure visual: zero game-state mutation, fully decoupled from the beat FOV punch
+   *    and drop bursts (it reads mood, not their event timing). O(n) over the vertices
+   *    with a single buffer upload + normals recompute — negligible at our vertex counts.
+   */
+  private morphRoadToMusic(gameState: GameState, deltaSeconds: number): void {
+    if (!this.baseRoadPositions || !this.roadMesh) return
+
+    const car = gameState.car
+    // Mood -> target amplitude (world units). Centroid 0..1 gives the baseline swell;
+    // flux adds shimmer on volatile/bright passages; the drop envelope heaves briefly on
+    // emotional peaks. Tuned conservatively so the road reads as "alive" without ever
+    // launching the car or fighting the authored bumps.
+    const centroidSwell = car.spectralCentroid * 0.9      // 0 .. 0.9
+    const fluxShimmer = car.spectralFlux * 0.7            // 0 .. 0.7
+    const dropHeave = car.dropIntensity * 0.6             // 0 .. 0.6
+    const targetAmplitude = THREE.MathUtils.clamp(
+      centroidSwell + fluxShimmer + dropHeave,
+      0,
+      1.6
+    )
+
+    // Frame-rate-independent smoothing (~0.15 @ 60fps) toward the mood target so the
+    // morph glides. Falls back to a fixed factor on the first/paused frames (delta 0).
+    const lerpFactor = deltaSeconds > 0 ? 1 - Math.exp(-deltaSeconds * 9) : 0.15
+    this.roadMorphAmplitude += (targetAmplitude - this.roadMorphAmplitude) * lerpFactor
+
+    // Scroll the travelling wave. Speed rises a touch on bright/volatile passages so the
+    // ripples quicken with energy, but it always advances so the road is never frozen.
+    const scrollSpeed = 1.6 + car.spectralCentroid * 2.2 + car.spectralFlux * 2.0
+    this.roadMorphPhase += (deltaSeconds > 0 ? deltaSeconds : 1 / 60) * scrollSpeed
+
+    const geometry = this.roadMesh.geometry
+    const posAttr = geometry.getAttribute('position') as THREE.BufferAttribute
+    const positions = posAttr.array as Float32Array
+    const base = this.baseRoadPositions
+    const amp = this.roadMorphAmplitude
+
+    // Spatial frequencies for the layered wave (per world unit along Z). Two octaves give
+    // a richer, less mechanical undulation than a single sine.
+    const k1 = 0.06
+    const k2 = 0.17
+    const phase = this.roadMorphPhase
+
+    for (let i = 0; i < positions.length; i += 3) {
+      const bz = base[i + 2] // base Z = arc-length phase coordinate
+      // Layered travelling wave, normalized to ~[-1,1], scaled by the mood amplitude.
+      const wave =
+        Math.sin(bz * k1 + phase) * 0.65 +
+        Math.sin(bz * k2 - phase * 1.7) * 0.35
+      positions[i] = base[i]                 // x unchanged
+      positions[i + 1] = base[i + 1] + wave * amp // y displaced by mood wave
+      positions[i + 2] = base[i + 2]         // z unchanged
+    }
+
+    posAttr.needsUpdate = true
+    geometry.computeVertexNormals()
   }
 
   /**

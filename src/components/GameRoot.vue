@@ -1,5 +1,6 @@
 <template>
   <div class="game-root">
+    <LoadingOverlay :is-loading="isLoading" :status-text="loadingStatus" />
     <div class="controls">
       <div class="file-input-container">
         <label for="audio-file" class="file-label"> Choose Audio File </label>
@@ -42,6 +43,7 @@
 <script setup lang="ts">
 import { ref, shallowRef, markRaw, onMounted, onUnmounted } from 'vue'
 import { GameController } from '../core/game/GameController'
+import LoadingOverlay from './LoadingOverlay.vue'
 
 const canvasEl = ref<HTMLCanvasElement | null>(null)
 const gameController = shallowRef<GameController | null>(null)
@@ -49,6 +51,11 @@ const isReady = ref(false)
 const isPlaying = ref(false)
 const loadedFileName = ref<string>('')
 const showDamageFlash = ref(false)
+// Loading overlay state (iteration 8): premium feedback during the audio decode +
+// analysis + track-generation pipeline, which takes ~2-3s. The GameController drives
+// these via its onStatus callback (status strings, then null on completion).
+const isLoading = ref(false)
+const loadingStatus = ref('')
 let animationFrameId: number | null = null
 let flashTimeoutId: number | null = null
 
@@ -93,6 +100,13 @@ onMounted(async () => {
   // Create game controller - this will initialize Three.js
   gameController.value = markRaw(new GameController(canvasEl.value))
 
+  // Dev-only debug handle so the running scene can be inspected from the console /
+  // automated checks (e.g. confirming the road elevation morph). Guarded by the Vite
+  // DEV flag so it is dead-code-eliminated from production builds.
+  if (import.meta.env.DEV) {
+    ;(window as unknown as { __game?: GameController }).__game = gameController.value
+  }
+
   gameController.value.setCollisionHandler(() => {
     showDamageFlash.value = true
     if (flashTimeoutId !== null) {
@@ -134,7 +148,9 @@ onMounted(async () => {
       const blob = await response.blob()
       const file = new File([blob], '06 boxing day.mp3', { type: 'audio/mpeg' })
       console.log('Audio file loaded, analyzing...')
-      await gameController.value.loadFile(file)
+      isLoading.value = true
+      loadingStatus.value = 'Decoding audio...'
+      await gameController.value.loadFile(file, onLoadStatus)
       isReady.value = true
       loadedFileName.value = '06 boxing day.mp3'
       console.log('Audio file loaded and analyzed successfully')
@@ -148,6 +164,10 @@ onMounted(async () => {
   } catch (error) {
     console.error('Failed to load default audio file:', error)
     // Continue without preloaded file - user can still upload one
+  } finally {
+    // Always dismiss the loading overlay, even if the default song was missing or
+    // failed to decode (the user can still upload a file manually).
+    isLoading.value = false
   }
 })
 
@@ -166,6 +186,16 @@ onUnmounted(() => {
   }
 })
 
+// Bridges the GameController's loadFile pipeline milestones to the loading overlay.
+// A status string updates the overlay text; a null signals completion -> fade out.
+const onLoadStatus = (status: string | null) => {
+  if (status === null) {
+    isLoading.value = false
+  } else {
+    loadingStatus.value = status
+  }
+}
+
 const handleFileSelect = async (e: Event) => {
   const target = e.target as HTMLInputElement
   const file = target.files?.[0]
@@ -174,12 +204,17 @@ const handleFileSelect = async (e: Event) => {
   try {
     isReady.value = false
     loadedFileName.value = ''
-    await gameController.value.loadFile(file)
+    isLoading.value = true
+    loadingStatus.value = 'Decoding audio...'
+    await gameController.value.loadFile(file, onLoadStatus)
     isReady.value = true
     loadedFileName.value = file.name
   } catch (error) {
     console.error('Failed to load file:', error)
     alert('Failed to load audio file. Please try another file.')
+  } finally {
+    // Guarantee the overlay is dismissed even on error or if completion never fired.
+    isLoading.value = false
   }
 }
 
