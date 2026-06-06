@@ -2,44 +2,63 @@ import type { MusicMap, EnergySample, BeatMarker } from '../audio/AudioAnalysis'
 import type { GameState } from '../game/GameState'
 
 /**
- * HudOverlay (iteration 10) — a premium, neon "sync transparency" readout painted on a
- * dedicated 2D canvas that floats over the WebGL scene. Each frame it shows, in perfect
- * lock with the audio clock:
+ * HudOverlay ("Watercolour Speed" restyle) — the sync readout repainted as quiet
+ * ink/gouache MARGINALIA in the corner of the same cold-press paper the scene sits on.
  *
- *   • live rolling BPM (median of the last few detected beat intervals),
- *   • a circular beat-phase indicator that completes one rotation per beat interval
- *     (a sweeping arc + travelling dot, so a viewer instantly sees the visualizer is
- *     tracking beat timing in real time), and
- *   • three vertical frequency meters — bass (cyan), mid (mint), treble (magenta) —
- *     sampled from the MusicMap's energy/treble bands at the current audio time.
+ * It still shows, in perfect lock with the audio clock:
  *
- * Design contract:
- *   • Pure Canvas 2D API — no Three.js, no Vue, no shaders.
- *   • Reads ONLY from its render() parameters (MusicMap + GameState). It never mutates
- *     game state, never touches the audio engine, and has zero impact on physics, the
- *     car, the track, or collisions.
- *   • Frame-rate-independent reads (everything is sampled against gameState.audioTime),
- *     but it keeps a tiny bit of PRIVATE visual state — 1-pole low-pass filters on the
- *     band heights + BPM, and per-track band normalization references — so the meters
- *     read smoothly instead of jittering frame-to-frame. None of that state is shared.
+ *   • the offline-locked global BPM (steady; falls back to a rolling recent-onset median
+ *     only when the track has no detectable global pulse),
+ *   • a hand-inked calligraphic beat-phase ARC that sweeps once per beat interval — but it
+ *     DARKENS toward the warm near-black ink on the beat instead of glowing, and
+ *   • three slender frequency washes — bass / mid / treble — drawn as brushed columns,
+ *     plus a single obstacle-red hazard tick that flicks in on treble transients (the same
+ *     signal that seeds the sword obstacles), so a hazard reads as one signal-red mark.
  *
- * The palette is the established synthwave scheme (cyan / mint / magenta) so the HUD
- * reads as an integrated part of the world, not a grafted-on debug overlay.
+ * STYLE CONTRACT ("Watercolour Speed", STYLE_SPEC §2/§5 HUD):
+ *   • LOCKED palette only. Desaturated tinted-gray strokes (steel-violet #A7A3B1 /
+ *     rose-gray #CEB9B9), ONE dusty-rose #A96276 active-beat accent, ONE obstacle-red
+ *     #D6443B hazard tick. Type in warm near-black #1E1B22 at LOW contrast.
+ *   • NO glow, NO bloom-adjacent styling, NO cyan/magenta. `shadowBlur` is never used —
+ *     painted marks, not neon. The beat ring's stroke darkens toward #20211C on the beat;
+ *     it must never brighten/glow.
+ *   • Brush-like IRREGULAR weight with soft (LOST) ends — strokes taper to nothing at the
+ *     tips via deterministic per-mark jitter (seeded, so marks don't "boil" frame-to-frame)
+ *     and an alpha falloff toward the ends — not crisp vector lines.
+ *   • Sits on the warm-cream paper as a faint wash, OFF TO ONE SIDE (right), respecting the
+ *     off-centre composition. No dark panel, no hard border.
+ *
+ * READ-ONLY CONTRACT (unchanged):
+ *   • Pure Canvas 2D — no Three.js, no Vue, no shaders.
+ *   • Reads ONLY from its render() parameters (MusicMap + GameState). Never mutates game
+ *     state, never touches the audio engine, zero impact on physics/car/track/collisions.
+ *   • Frame-rate-independent reads (sampled against gameState.audioTime). Keeps only a tiny
+ *     bit of PRIVATE visual state — 1-pole low-pass filters on the band heights + BPM, a
+ *     decaying hazard-flash scalar, and per-track band normalization references — so the
+ *     marks read smoothly. None of that state is shared, and none of it is game state.
  */
 
-// --- Neon palette, matched to the sky/grid/car emissive scheme used across the project.
-const COL_BASS = '#6af6ff' // cyan   — low / kick energy
-const COL_MID = '#7fffcc' // mint   — body / full-spectrum content (snare, vocal)
-const COL_TREBLE = '#ff5acd' // magenta — highs (hi-hats, cymbals, sizzle)
-const COL_DIM = 'rgba(120, 200, 230, 0.22)' // unfilled meter track / faint guides
-const COL_TEXT = '#9af7ff'
-const COL_TEXT_DIM = 'rgba(154, 247, 255, 0.55)'
+// --- LOCKED palette (pixel-measured from the Sienkiewicz target; see STYLE_SPEC §2).
+// Tinted grays — never neutral RGB-equal. Colour is a scarce resource here.
+const INK_WARM = '#1E1B22' // warm tinted near-black — type + warm-side found accents
+const INK_COOL = '#20211C' // cool tinted near-black — the beat-ring "darken" target
+const STEEL_VIOLET = '#A7A3B1' // dominant neutral stroke (sky-field tint, hue ~259 S~8%)
+const ROSE_GRAY = '#CEB9B9' // warm desaturated stroke / ground glaze (hue ~1 S~10%)
+const ROSE_ACCENT = '#A96276' // THE dusty-rose active-beat accent (hue ~343 S~42%)
+const SIGNAL_RED = '#D6443B' // THE one obstacle-red hazard tick (the only >45% S mark)
+const PAPER_CREAM = '#EDE7D8' // warm-cream sheet the marginalia sits on (faint wash only)
 
 // --- Band height smoothing. A 1-pole low-pass per frame: out += (in - out) * alpha.
 // alpha ≈ 0.18 gives ~3-4 frame (~60ms) response — responsive to kicks/hats but free of
 // single-frame jitter. BPM is smoothed harder (it should read as a stable number).
 const BAND_SMOOTH_ALPHA = 0.18
 const BPM_SMOOTH_ALPHA = 0.1
+
+// --- Hazard tick decay. The obstacle-red mark flicks to full when a treble transient fires
+// (the same signal that seeds sword obstacles) and eases out over ~12 frames. Per-frame
+// multiplicative decay so it is framerate-independent enough for a quick flick and never
+// lingers; purely private visual state, NOT game state.
+const HAZARD_DECAY = 0.86
 
 // --- BPM estimation + sanity bounds. The project's beat detector emits RMS-local-maxima
 // onsets, which are DENSE (sub-beat transients included), so a naive "last-2-beats"
@@ -59,20 +78,38 @@ const BPM_WINDOW_BEATS = 12
 // Beat intervals longer than this (seconds) mean sparse/ambient music -> show "-- BPM".
 const MAX_BEAT_INTERVAL_S = 5
 
+/** Parse a #rrggbb CSS hex into an [r,g,b] byte triple. */
+function hexToRgb(hex: string): [number, number, number] {
+  const p = parseInt(hex.slice(1), 16)
+  return [(p >> 16) & 255, (p >> 8) & 255, p & 255]
+}
+
 /** Linearly interpolate two CSS hex colors (#rrggbb) by t in [0,1]; returns "rgb(...)". */
 function lerpHex(a: string, b: string, t: number): string {
-  const pa = parseInt(a.slice(1), 16)
-  const pb = parseInt(b.slice(1), 16)
-  const ar = (pa >> 16) & 255
-  const ag = (pa >> 8) & 255
-  const ab = pa & 255
-  const br = (pb >> 16) & 255
-  const bg = (pb >> 8) & 255
-  const bb = pb & 255
+  const [ar, ag, ab] = hexToRgb(a)
+  const [br, bg, bb] = hexToRgb(b)
   const r = Math.round(ar + (br - ar) * t)
   const g = Math.round(ag + (bg - ag) * t)
   const bl = Math.round(ab + (bb - ab) * t)
   return `rgb(${r}, ${g}, ${bl})`
+}
+
+/** An "rgba(...)" string for a #rrggbb hex at a given alpha — for translucent washes/inks. */
+function hexA(hex: string, alpha: number): string {
+  const [r, g, b] = hexToRgb(hex)
+  return `rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, alpha)).toFixed(3)})`
+}
+
+/**
+ * Cheap deterministic value-noise in [-1,1] from one seed. Used to give marks an irregular
+ * brush weight and slightly wandering tips WITHOUT randomness — the same seed always yields
+ * the same wobble, so a mark drawn at the same logical position every frame does NOT boil
+ * (the "shower-door" failure the style spec warns about). Hash by sin-fract; quality is
+ * irrelevant, stability and zero allocation are the point.
+ */
+function wobble(seed: number): number {
+  const s = Math.sin(seed * 12.9898) * 43758.5453
+  return (s - Math.floor(s)) * 2 - 1
 }
 
 /**
@@ -128,7 +165,7 @@ export class HudOverlay {
   private ctx: CanvasRenderingContext2D | null
 
   // Logical (CSS-pixel) HUD size; the backing store is scaled by devicePixelRatio for
-  // crisp text/strokes on hi-DPI displays.
+  // crisp text/strokes on hi-DPI displays. Kept compact — marginalia, not a dashboard.
   private readonly width = 220
   private readonly height = 128
   private dpr = 1
@@ -140,6 +177,8 @@ export class HudOverlay {
   private sTreble = 0
   // Smoothed BPM (0 = unknown -> "-- BPM").
   private sBpm = 0
+  // Decaying 0..1 hazard-flash envelope (drives the single obstacle-red tick).
+  private sHazard = 0
   // Per-track band normalization, recomputed when the MusicMap identity changes.
   private bandRefs: BandRefs = { bass: 1, treble: 1 }
   private refsForMap: MusicMap | null = null
@@ -189,22 +228,23 @@ export class HudOverlay {
 
   /**
    * Paints one HUD frame. All reads are from the parameters; the audio clock is taken
-   * from gameState.audioTime so BPM, beat phase, and the band meters are sampled against
+   * from gameState.audioTime so BPM, beat phase, and the band washes are sampled against
    * the exact same clock that drives the renderer (sync transparency). Safe to call every
-   * frame with a null MusicMap (renders the idle shell) and is a no-op without a 2D ctx.
+   * frame with a null MusicMap (renders the idle marginalia) and is a no-op without a 2D ctx.
    */
   render(musicMap: MusicMap | null, gameState: GameState): void {
     const ctx = this.ctx
     if (!ctx) return
 
     const audioTime = gameState.audioTime
-    // Detect a rewind / seek / song change and reset the smoothing so the meters don't
+    // Detect a rewind / seek / song change and reset the smoothing so the marks don't
     // glide across a discontinuity.
     if (audioTime < this.lastAudioTime - 0.25 || musicMap !== this.refsForMap) {
       this.sBass = 0
       this.sMid = 0
       this.sTreble = 0
       this.sBpm = 0
+      this.sHazard = 0
     }
     this.lastAudioTime = audioTime
 
@@ -273,7 +313,25 @@ export class HudOverlay {
       if (this.sBpm < BPM_MIN * 0.9) this.sBpm = 0
     }
 
-    this.paint(this.sBass, this.sMid, this.sTreble, this.sBpm, phase, audioTime >= 0 && !!musicMap)
+    // --- Hazard flash: re-seed to (a fraction of) full on a treble transient — the same
+    // signal that becomes a sword obstacle — then ease out. One read-only signal in, one
+    // private decaying scalar out; never written back to game state.
+    if (gameState.car.trebleFires) {
+      this.sHazard = Math.max(this.sHazard, 0.55 + 0.45 * Math.min(1, gameState.car.trebleStrength))
+    } else {
+      this.sHazard *= HAZARD_DECAY
+      if (this.sHazard < 0.02) this.sHazard = 0
+    }
+
+    this.paint(
+      this.sBass,
+      this.sMid,
+      this.sTreble,
+      this.sBpm,
+      phase,
+      this.sHazard,
+      audioTime >= 0 && !!musicMap
+    )
   }
 
   /** All drawing lives here; operates purely on already-resolved scalar inputs. */
@@ -283,6 +341,7 @@ export class HudOverlay {
     treble: number,
     bpm: number,
     phase: number,
+    hazard: number,
     hasData: boolean
   ): void {
     const ctx = this.ctx
@@ -293,120 +352,151 @@ export class HudOverlay {
     ctx.save()
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
     ctx.clearRect(0, 0, W, H)
+    // Painted marks, never neon: no shadow/glow anywhere in this overlay.
+    ctx.shadowBlur = 0
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
 
-    // --- Panel: dark neon background + 1px cyan border with a soft inner glow.
-    ctx.fillStyle = 'rgba(12, 12, 30, 0.8)'
-    this.roundRect(ctx, 0.5, 0.5, W - 1, H - 1, 10)
+    // --- The "sheet": only a whisper of warm-cream paper so the marginalia reads as ink
+    // ON the same paper as the scene, not a floating panel. No hard border, no dark box —
+    // the negative space stays quiet (STYLE_SPEC: 50–70% of the frame quiet).
+    ctx.fillStyle = hexA(PAPER_CREAM, 0.05)
+    this.roundRect(ctx, 1, 1, W - 2, H - 2, 7)
     ctx.fill()
-    ctx.lineWidth = 1
-    ctx.strokeStyle = 'rgba(106, 246, 255, 0.85)'
-    ctx.shadowColor = 'rgba(106, 246, 255, 0.6)'
-    ctx.shadowBlur = 6
-    this.roundRect(ctx, 0.5, 0.5, W - 1, H - 1, 10)
-    ctx.stroke()
-    ctx.shadowBlur = 0
 
-    // --- Title strip.
-    ctx.font = '600 9px "Segoe UI", system-ui, sans-serif'
+    // Everything is pushed to the RIGHT margin (off-centre composition). A single faint
+    // steel-violet rule down the left edge of the marginalia "ties" the marks to a margin
+    // like a hand-ruled notebook gutter — brushed, irregular, lost at both ends.
+    this.brushStroke(ctx, W - 96, 14, W - 96, H - 14, STEEL_VIOLET, 0.9, 0.18, 911)
+
+    // --- Title: small warm near-black caps, low contrast, set against the gutter.
+    ctx.font = '600 8px "Segoe UI", system-ui, sans-serif'
     ctx.textBaseline = 'alphabetic'
-    ctx.fillStyle = COL_TEXT_DIM
-    ctx.fillText('AUDIO SYNC', 14, 18)
+    ctx.textAlign = 'left'
+    ctx.fillStyle = hexA(INK_WARM, 0.55)
+    ctx.fillText('TEMPO', W - 86, 22)
 
-    // --- Left column: BPM readout.
+    // --- BPM readout: warm near-black ink, low contrast (no glow). The active beat lifts
+    // it a touch toward the dusty-rose accent so the number "breathes" on the beat through
+    // a small HUE/contrast shift — never a flash.
+    const beatLift = hasData ? Math.pow(1 - phase, 2.2) : 0
     const bpmText = hasData && bpm > 0 ? Math.round(bpm).toString() : '--'
-    ctx.fillStyle = COL_TEXT
-    ctx.shadowColor = COL_BASS
-    ctx.shadowBlur = 8
-    ctx.font = '700 28px "Consolas", "SF Mono", monospace'
-    ctx.fillText(bpmText, 12, 56)
-    ctx.shadowBlur = 0
-    ctx.fillStyle = COL_TEXT_DIM
-    ctx.font = '600 10px "Consolas", monospace'
-    const bpmW = ctx.measureText(bpmText).width
-    ctx.fillText('BPM', 16 + Math.max(28, bpmW), 56)
+    ctx.textAlign = 'left'
+    ctx.font = '700 26px "Consolas", "SF Mono", monospace'
+    ctx.fillStyle = lerpHex(INK_WARM, ROSE_ACCENT, beatLift * 0.5)
+    ctx.globalAlpha = 0.78 + beatLift * 0.18
+    ctx.fillText(bpmText, W - 88, 50)
+    ctx.globalAlpha = 1
 
-    // Faint "beat" caption under the BPM that pulses brighter right after a beat fires.
-    const beatPulse = hasData ? Math.pow(1 - phase, 2) : 0
-    ctx.fillStyle = `rgba(255, 90, 205, ${0.3 + beatPulse * 0.6})`
     ctx.font = '600 9px "Consolas", monospace'
-    ctx.fillText('BEAT', 14, 74)
+    ctx.fillStyle = hexA(INK_WARM, 0.45)
+    const bpmW = ctx.measureText(bpmText).width
+    ctx.fillText('BPM', W - 86 + Math.max(34, bpmW + 6), 50)
 
-    // --- Center: circular beat-phase indicator (rotates once per beat interval).
-    const cx = W * 0.5 + 6
-    const cy = H - 38
-    const radius = 18
-    this.drawBeatRing(ctx, cx, cy, radius, phase, hasData)
+    // --- Beat-phase ARC: a hand-inked calligraphic sweep that DARKENS toward the cool ink
+    // on the beat (phase→0) and washes back to a faint steel-violet between beats. Off to
+    // the left of the marginalia, balancing the right-hand washes.
+    const cx = W - 70
+    const cy = H - 30
+    const radius = 17
+    this.drawBeatArc(ctx, cx, cy, radius, phase, hazard, hasData)
 
-    // --- Right column: three vertical frequency meters.
-    const meterTop = H - 70
-    const meterH = 58
-    const barW = 10
-    const gap = 7
-    const x0 = W - 14 - (barW * 3 + gap * 2)
-    this.drawMeter(ctx, x0 + (barW + gap) * 0, meterTop, barW, meterH, bass, COL_BASS, 'LO')
-    this.drawMeter(ctx, x0 + (barW + gap) * 1, meterTop, barW, meterH, mid, COL_MID, 'MID')
-    this.drawMeter(ctx, x0 + (barW + gap) * 2, meterTop, barW, meterH, treble, COL_TREBLE, 'HI')
+    // --- Frequency washes: three slender brushed columns hard against the right margin.
+    // Steel-violet (LO), rose-gray (MID), and a rose-gray->rose column for HI whose label
+    // tick turns obstacle-red when a hazard fires.
+    const colTop = 30
+    const colH = 70
+    const colW = 7
+    const gap = 9
+    const x2 = W - 12 - colW // rightmost column's left edge
+    this.drawWash(ctx, x2 - (colW + gap) * 2, colTop, colW, colH, bass, STEEL_VIOLET, 'LO', 0, hasData)
+    this.drawWash(ctx, x2 - (colW + gap) * 1, colTop, colW, colH, mid, ROSE_GRAY, 'MID', 0, hasData)
+    this.drawWash(ctx, x2, colTop, colW, colH, treble, ROSE_GRAY, 'HI', hazard, hasData)
 
     ctx.restore()
   }
 
-  /** A circular beat-phase indicator: a faint ring, a sweeping cyan→magenta arc, and a
-   *  travelling dot that completes one full rotation per beat interval. */
-  private drawBeatRing(
+  /**
+   * A hand-inked calligraphic beat-phase arc. Unlike the old neon ring it NEVER glows: a
+   * faint steel-violet "ghost" ring underlies a single brushed sweep that runs from 12
+   * o'clock clockwise over `phase` of the beat, and the sweep's colour DARKENS toward the
+   * cool tinted near-black as the beat lands (phase→0) and fades back to steel-violet as it
+   * fills. The arc head carries the one dusty-rose accent. A hazard nudges the head red.
+   */
+  private drawBeatArc(
     ctx: CanvasRenderingContext2D,
     cx: number,
     cy: number,
     r: number,
     phase: number,
+    hazard: number,
     hasData: boolean
   ): void {
-    // Background ring.
-    ctx.lineWidth = 3
-    ctx.strokeStyle = COL_DIM
-    ctx.beginPath()
-    ctx.arc(cx, cy, r, 0, Math.PI * 2)
-    ctx.stroke()
+    // Faint ghost ring — a broken, brushed circle (drawn as short tangential dabs with
+    // wandering weight so it reads as ink, not a printed circle).
+    const DABS = 28
+    for (let i = 0; i < DABS; i++) {
+      const a0 = (i / DABS) * Math.PI * 2
+      const a1 = ((i + 0.62) / DABS) * Math.PI * 2 // leave gaps -> broken, hand-drawn ring
+      const jit = wobble(i * 3.3) * 0.7
+      ctx.lineWidth = 1.1 + Math.abs(wobble(i * 5.1)) * 0.7
+      ctx.strokeStyle = hexA(STEEL_VIOLET, 0.16)
+      ctx.beginPath()
+      ctx.arc(cx, cy, r + jit, a0, a1)
+      ctx.stroke()
+    }
 
     if (!hasData) return
 
-    // Sweep arc from the top (12 o'clock), clockwise, length = phase of the beat.
+    // The sweep. As the beat lands (phase near 0) the freshly-laid ink is darkest (cool
+    // near-black) and at its heaviest weight; it lightens toward steel-violet and thins as
+    // the phase fills — a calligraphic pressure stroke that fades, never a glowing arc.
+    const darken = Math.pow(1 - phase, 1.6) // 1 right on the beat, 0 just before the next
+    const sweepCol = lerpHex(STEEL_VIOLET, INK_COOL, 0.35 + darken * 0.6)
     const start = -Math.PI / 2
-    const end = start + Math.PI * 2 * phase
-    ctx.lineWidth = 3
-    ctx.strokeStyle = lerpHex(COL_BASS, COL_TREBLE, phase)
-    ctx.shadowColor = ctx.strokeStyle
-    ctx.shadowBlur = 8
-    ctx.beginPath()
-    ctx.arc(cx, cy, r, start, end)
-    ctx.stroke()
-    ctx.shadowBlur = 0
+    const end = start + Math.PI * 2 * Math.max(0.0001, phase)
 
-    // Travelling dot at the arc head.
-    const dx = cx + Math.cos(end) * r
-    const dy = cy + Math.sin(end) * r
-    ctx.fillStyle = lerpHex(COL_BASS, COL_TREBLE, phase)
-    ctx.shadowColor = ctx.fillStyle
-    ctx.shadowBlur = 10
-    ctx.beginPath()
-    ctx.arc(dx, dy, 3, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.shadowBlur = 0
-
-    // Center flash: a filled disc that flares right after a beat (phase near 0) and fades.
-    const flash = Math.pow(1 - phase, 3)
-    if (flash > 0.01) {
-      ctx.fillStyle = `rgba(255, 90, 205, ${flash * 0.85})`
-      ctx.shadowColor = COL_TREBLE
-      ctx.shadowBlur = 12 * flash
+    // Draw the sweep as a chain of short segments whose weight wanders and whose ENDS taper
+    // to nothing (soft / lost ends) via per-segment alpha falloff.
+    const SEG = 26
+    const lastSeg = Math.max(1, Math.round(SEG * phase))
+    for (let i = 0; i < lastSeg; i++) {
+      const t0 = i / SEG
+      const t1 = (i + 1.05) / SEG
+      const s0 = start + (end - start) * (t0 / Math.max(1e-3, phase))
+      const s1 = start + (end - start) * Math.min(1, t1 / Math.max(1e-3, phase))
+      // Tip falloff: alpha rises off the tail and eases off near the head -> lost ends.
+      const along = i / Math.max(1, lastSeg - 1)
+      const ends = Math.sin(Math.min(1, Math.max(0, along)) * Math.PI) // 0 at both tips
+      const a = (0.28 + 0.55 * darken) * (0.35 + 0.65 * ends)
+      ctx.lineWidth = (2.0 + darken * 1.4) * (0.55 + 0.45 * Math.abs(wobble(i * 2.7 + 1)))
+      ctx.strokeStyle = hexA(sweepCol, a)
       ctx.beginPath()
-      ctx.arc(cx, cy, r * 0.42 * (0.5 + flash * 0.5), 0, Math.PI * 2)
-      ctx.fill()
-      ctx.shadowBlur = 0
+      ctx.arc(cx, cy, r + wobble(i * 1.9) * 0.6, s0, s1)
+      ctx.stroke()
     }
+
+    // The single accent: a small dusty-rose dab at the arc head (or obstacle-red while a
+    // hazard is active) — the one spot of chroma on the whole readout.
+    const headCol = lerpHex(ROSE_ACCENT, SIGNAL_RED, Math.min(1, hazard))
+    const hx = cx + Math.cos(end) * r
+    const hy = cy + Math.sin(end) * r
+    // Soft round dab (no glow) — slight irregular size.
+    const dab = 2.2 + 0.7 * Math.abs(wobble(Math.round(phase * 97)))
+    ctx.fillStyle = hexA(headCol, 0.85)
+    ctx.beginPath()
+    ctx.arc(hx, hy, dab, 0, Math.PI * 2)
+    ctx.fill()
   }
 
-  /** A single vertical meter: dim track, glowing fill scaled by `value` (0..1), label. */
-  private drawMeter(
+  /**
+   * A single slender frequency WASH: a faint brushed track, a brushed pigment column that
+   * grows from the bottom by `value` (0..1), and a small label below in warm ink. The
+   * column is laid as a translucent gradient (denser at the base, washing out toward the
+   * wet top edge) with a soft (lost) top — gouache, not an LED bar. When `hazard` > 0 the
+   * label gets one obstacle-red tick (the single signal-red mark).
+   */
+  private drawWash(
     ctx: CanvasRenderingContext2D,
     x: number,
     top: number,
@@ -414,39 +504,128 @@ export class HudOverlay {
     h: number,
     value: number,
     color: string,
-    label: string
+    label: string,
+    hazard: number,
+    hasData: boolean
   ): void {
     const v = Math.min(1, Math.max(0, value))
-    const r = w * 0.5
+    const cxLine = x + w / 2
 
-    // Track.
-    ctx.fillStyle = COL_DIM
-    this.roundRect(ctx, x, top, w, h, r)
-    ctx.fill()
-
-    // Fill (grows from the bottom).
-    const fillH = Math.max(v > 0 ? w : 0, v * h)
-    if (fillH > 0) {
-      ctx.save()
-      this.roundRect(ctx, x, top, w, h, r)
-      ctx.clip()
-      const grad = ctx.createLinearGradient(0, top + h, 0, top)
-      grad.addColorStop(0, color)
-      grad.addColorStop(1, lerpHex(color, '#ffffff', 0.35))
-      ctx.fillStyle = grad
-      ctx.shadowColor = color
-      ctx.shadowBlur = 7
-      ctx.fillRect(x, top + h - fillH, w, fillH)
-      ctx.restore()
-      ctx.shadowBlur = 0
+    // Track: a faint dry-brush column (short broken dabs, wandering weight).
+    const TRACK_DABS = 9
+    for (let i = 0; i < TRACK_DABS; i++) {
+      const y0 = top + (h * i) / TRACK_DABS
+      const y1 = top + (h * (i + 0.7)) / TRACK_DABS
+      ctx.lineWidth = w * (0.7 + Math.abs(wobble(i * 4.4 + x)) * 0.25)
+      ctx.strokeStyle = hexA(STEEL_VIOLET, 0.1)
+      ctx.beginPath()
+      ctx.moveTo(cxLine + wobble(i * 2.1 + x) * 0.6, y0)
+      ctx.lineTo(cxLine + wobble(i * 2.1 + x + 9) * 0.6, y1)
+      ctx.stroke()
     }
 
-    // Label beneath.
-    ctx.fillStyle = COL_TEXT_DIM
-    ctx.font = '600 8px "Consolas", monospace'
+    if (hasData && v > 0.001) {
+      const fillH = Math.max(w, v * h)
+      const baseY = top + h
+      const topY = baseY - fillH
+      // Pigment column: a vertical gradient that is densest at the base and washes toward
+      // the wet rising edge. Mixed slightly toward rose-gray at the top so it reads warm
+      // and painted rather than a flat fill.
+      const grad = ctx.createLinearGradient(0, baseY, 0, topY)
+      grad.addColorStop(0, hexA(color, 0.62))
+      grad.addColorStop(0.65, hexA(color, 0.42))
+      grad.addColorStop(1, hexA(lerpHex(color, ROSE_GRAY, 0.4), 0.12))
+      ctx.fillStyle = grad
+      // The column itself is a brushed rectangle with a slightly wandering width.
+      ctx.beginPath()
+      ctx.moveTo(x + wobble(x) * 0.4, baseY)
+      ctx.lineTo(x + w + wobble(x + 5) * 0.4, baseY)
+      ctx.lineTo(x + w + wobble(topY + 3) * 0.5, topY)
+      ctx.lineTo(x + wobble(topY) * 0.5, topY)
+      ctx.closePath()
+      ctx.fill()
+
+      // Wet top edge: a soft brushed cap that loses itself (lost end), darkened a touch
+      // toward the cool ink for the Marangoni "pigment rim" read at the value boundary.
+      this.brushStroke(
+        ctx,
+        x - 0.5,
+        topY,
+        x + w + 0.5,
+        topY,
+        lerpHex(color, INK_COOL, 0.3),
+        0.5,
+        0.6,
+        Math.round(topY * 7 + x)
+      )
+    }
+
+    // Label beneath, warm near-black, low contrast. The HI column's label carries the lone
+    // obstacle-red hazard tick when a treble transient (-> sword) is firing.
     ctx.textAlign = 'center'
-    ctx.fillText(label, x + w / 2, top + h + 9)
+    ctx.font = '600 7px "Consolas", monospace'
+    ctx.fillStyle = hexA(INK_WARM, 0.5)
+    ctx.fillText(label, cxLine, top + h + 9)
+    if (hazard > 0.02) {
+      // One short signal-red tick under the label — the single saturated hazard mark.
+      this.brushStroke(
+        ctx,
+        cxLine - 4,
+        top + h + 13,
+        cxLine + 4,
+        top + h + 13,
+        SIGNAL_RED,
+        0.55 + 0.45 * Math.min(1, hazard),
+        0.4,
+        Math.round(top)
+      )
+    }
     ctx.textAlign = 'left'
+  }
+
+  /**
+   * Draws a single straight BRUSH stroke from (x0,y0) to (x1,y1): a chain of short segments
+   * whose weight wanders (irregular, hand-laid) and whose ENDS taper to nothing via an
+   * alpha bell (soft / LOST ends). `seed` makes the wobble deterministic per logical stroke
+   * so it never boils frame-to-frame. No glow — paint only.
+   */
+  private brushStroke(
+    ctx: CanvasRenderingContext2D,
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    color: string,
+    alpha: number,
+    weight: number,
+    seed: number
+  ): void {
+    const SEG = 12
+    const dx = x1 - x0
+    const dy = y1 - y0
+    // Perpendicular unit for a tiny sideways wander so the stroke isn't ruler-straight.
+    const len = Math.hypot(dx, dy) || 1
+    const px = -dy / len
+    const py = dx / len
+    for (let i = 0; i < SEG; i++) {
+      const t0 = i / SEG
+      const t1 = (i + 1) / SEG
+      const tm = (t0 + t1) * 0.5
+      const wob = wobble(seed + i * 1.7)
+      const off = wob * 0.8 // sideways wander in px
+      const ax = x0 + dx * t0 + px * off
+      const ay = y0 + dy * t0 + py * off
+      const bx = x0 + dx * t1 + px * off
+      const by = y0 + dy * t1 + py * off
+      // Alpha bell -> both ends lost; weight wanders around the requested base weight.
+      const bell = Math.sin(tm * Math.PI)
+      ctx.lineWidth = Math.max(0.4, weight + Math.abs(wobble(seed + i * 3.1)) * weight * 0.8)
+      ctx.strokeStyle = hexA(color, alpha * (0.2 + 0.8 * bell))
+      ctx.beginPath()
+      ctx.moveTo(ax, ay)
+      ctx.lineTo(bx, by)
+      ctx.stroke()
+    }
   }
 
   /** Rounded-rectangle path helper (the path is left current for fill()/stroke()/clip()). */

@@ -2,41 +2,46 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
-import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
-import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js'
-import { createFilmGrainPass } from './FilmGrainPass'
-import { createVignettePass } from './VignettePass'
-import { createColorGradePass } from './ColorGradePass'
-import { createChromaticAberrationPass } from './ChromaticAberrationPass'
-import { createNeonCompositePass } from './NeonCompositePass'
-import { RimGlowShell } from './RimGlowShell'
 import { ParticlePool } from './ParticlePool'
 import { TrackData } from '../track/TrackTypes'
 import { GameState, getLaneOffset } from '../game/GameState'
+// --- Painterly "Watercolour Speed" post stack (Track-A pass modules, wired in B3) -------
+// Each is a ShaderPass factory mirroring the old FilmGrainPass/ColorGradePass shape; they
+// are added to the single composer in the EXACT STYLE_SPEC §3 order. The structure-tensor
+// trio (StructureTensor -> TensorBlur x2) renders into an owned half-res RGBA16F target
+// (a manual side-chain, see buildPainterlyChain) whose texture feeds Kuwahara's `tTensor`
+// and PainterlyEdge's flow field; the rest are straight chain passes.
+import { createPreBlurPass } from './PreBlurPass'
+import { createStructureTensorPass } from './StructureTensorPass'
+import { createTensorBlurPass } from './TensorBlurPass'
+import { createAnisotropicKuwaharaPass } from './AnisotropicKuwaharaPass'
+import { createWatercolourPigmentPass } from './WatercolourPigmentPass'
+import { createPaintGradeLUTPass } from './PaintGradeLUTPass'
+import { buildPaintRamp } from './paintRamp'
+import { createPainterlyEdgePass } from './PainterlyEdgePass'
+import { createVelocitySmearPass } from './VelocitySmearPass'
+import { createSubstratePaperPass } from './SubstratePaperPass'
+import { injectCarSheen, updateCarSheen, CarSheenMaterial } from './CarSheenMaterial'
 
-// Beat-sync envelope tuning. The FOV "punch" zooms out fast on a beat onset then
-// eases back; the bloom pulse spikes and decays. These are evaluated procedurally
-// each frame from (now - lastBeatTime) so they are frame-rate independent and need
-// no tween bookkeeping (matching the codebase's manual-lerp style).
+// Beat-sync envelope tuning. The FOV "punch" zooms out fast on a beat onset then eases
+// back. Evaluated procedurally each frame from (now - lastBeatTime) so it is frame-rate
+// independent and needs no tween bookkeeping (matching the codebase's manual-lerp style).
+// (The bloom pulse this envelope also used to drive was ripped out with the post stack.)
 const BASE_FOV = 75
 const FOV_PUNCH = 9 // extra degrees added at peak of a full-strength beat
 const FOV_ATTACK_MS = 90 // ramp up to peak
 const FOV_DECAY_MS = 420 // ease back to base
-const BLOOM_BASE_STRENGTH = 0.95
-const BLOOM_BEAT_BOOST = 0.85 // added at peak of a full-strength beat
-const BLOOM_DECAY_MS = 260
 
 // Beat selectivity + anticipatory camera tuning (iteration 6).
 //
-// Beat selectivity: strong beats (kicks, snares) punch FOV/bloom/shake and glow the
-// beat indicator; weak beats (hi-hats, transients) sustain the baseline mood without
-// transient spikes. This "professional restraint" reads as premium (Wipeout, Nintendo,
-// Tesla-promo aesthetic) rather than a generic visualizer that reacts to every tick.
-// The strength gate itself (BEAT_STRENGTH_THRESHOLD = 0.5) lives in the controller,
-// which sets car.beatFires; the renderer simply reads that flag to gate its transient
-// gestures (FOV/bloom/shake/indicator) below.
+// Beat selectivity: strong beats (kicks, snares) punch FOV/shake and pulse the beat
+// indicator; weak beats (hi-hats, transients) sustain the baseline without transient
+// spikes. This "professional restraint" reads as premium (Wipeout, Nintendo, Tesla-promo
+// aesthetic) rather than a generic visualizer that reacts to every tick. The strength gate
+// itself (BEAT_STRENGTH_THRESHOLD = 0.5) lives in the controller, which sets car.beatFires;
+// the renderer simply reads that flag to gate its transient gestures (FOV/shake/indicator).
 // Anticipatory look-ahead: the camera aims this far down the track ahead of the car so
 // it reads upcoming terrain *before* the car visually commits — a "smart autopilot"
 // feel. Scales up with speed (whichever is larger).
@@ -50,15 +55,11 @@ const CAMERA_BANKING_LERP = 0.08 // per-frame lerp toward the target roll (smoot
 // keep the banking math allocation-free.
 const ROLL_AXIS = new THREE.Vector3(0, 0, -1)
 
-// Mood-driven tuning (iteration 2). These layer on TOP of the beat-sync envelopes
-// so the world reacts to both rhythm (fast, per-beat) and mood (slow, per-section).
-// Cool intros sit at low centroid -> tight bloom + cyan sky; bright drops push high
-// centroid -> looser glow + magenta sky, with an extra FOV expansion on drop entry.
-const BLOOM_THRESHOLD_COOL = 0.85 // tight, controlled bloom on cool/quiet moods
-const BLOOM_THRESHOLD_WARM = 0.62 // looser, blown-out glow on bright/hot moods
+// Mood-driven camera tuning (iteration 2). The drop-entry FOV expansion layers on TOP
+// of the beat-sync envelope so the camera reacts to both rhythm (fast, per-beat) and the
+// music's emotional peaks (slow, per-section). The old bloom/sky-hue mood bindings were
+// deleted with the synthwave post stack (Watercolour Speed rip-out).
 const FOV_DROP_PUNCH = 6 // extra degrees at full drop intensity (cinematic expand)
-const GRID_EMISSIVE_MIN = 0.3 // dim grid in calm passages
-const GRID_EMISSIVE_RANGE = 0.4 // -> up to 0.7 at peak brightness
 
 // Cinematic drop-moment choreography (iteration 9). When the controller's drop-focus
 // state machine engages (gameState.isFocusedOnDrop), the chase camera pulls back and the
@@ -71,6 +72,40 @@ const GRID_EMISSIVE_RANGE = 0.4 // -> up to 0.7 at peak brightness
 const BASE_CAMERA_DISTANCE = 8 // resting chase distance behind the car (units)
 const FOV_DROP_BOOST_MAX = 7 // extra degrees of FOV at full camera pull-back (6-8° band)
 const CAMERA_DEPTH_LERP = 0.12 // per-frame ease of the applied depth toward cameraDepthScale
+
+// --- Off-centre diagonal composition (Watercolour Speed B5, STYLE_SPEC §6 "Motion &
+// composition" + §5). The block-in's dead-centre one-point stack of sun + sword + vanishing
+// point is the FIRST thing the spec breaks: the frame must read as an OFF-CENTRE moving
+// Sienkiewicz, not a centred one-point racer. We achieve this WITHOUT moving any obstacle
+// (their lanes are the planner's, immutable) — purely by RE-FRAMING the chase camera so the
+// road's vanishing point sits ~30% off the vertical centerline on a raking diagonal:
+//
+//   1) COMPOSE_YAW: a PERSISTENT camera-POSITION orbit yaw added on top of the lane-driven
+//      orbit so the camera views the road/car from a raking 3D angle (we see its side, not a
+//      flat head-on). Folded into the same cameraOrbitAngle machinery the lane lerp uses.
+//   2) COMPOSE_LOOK_YAW: a fixed yaw of the OPTICAL AXIS (the look DIRECTION rotated about the
+//      up axis), which is what actually slides the road's vanishing point off the vertical
+//      centre. The road's parallel edges converge where the camera's forward points relative to
+//      the road's forward; a constant axis yaw moves that convergence a STABLE amount (a
+//      near-target world translation instead saturates/overshoots — the target is only ~15m
+//      out). The obstacles, sitting at lane positions along that road, therefore ENTER THE
+//      FRAME along the same raking diagonal as the road sweeps toward the off-centre VP —
+//      "obstacles on the diagonal" satisfied by framing, not by relocation.
+//   3) COMPOSE_PITCH: a small fixed upward tilt of the same optical axis so the horizon/VP
+//      rides off the vertical centre too (the diagonal RAKES, not just pans), and the sun is
+//      pulled off-axis in updateSunPlacement so it never stacks on the VP.
+//
+// The bias is constant (the composition is a fixed authored stance) and is folded into the
+// SAME cameraOrbitAngle/look-target machinery the lane lerp already uses, so banking and lane
+// glides still read on top of it; the velocity-smear/edge passes consume the resulting shaken
+// transform unchanged. Measured framing (mid-track, FOV 75): the values below put the road's
+// vanishing point ~19% off-centre toward screen-LEFT, the car in the lower-LEFT quadrant
+// (~-36%, safely on-screen through lane changes), the pale sun upper-RIGHT (~+40%, clear of the
+// VP), and ~65-70% quiet negative space on the RIGHT — an off-centre raking diagonal.
+const COMPOSE_YAW = 0.12 // persistent camera-POSITION orbit yaw (rad, ~7°) — a raking 3D viewing angle on the road/car
+const COMPOSE_LOOK_YAW = -0.34 // fixed yaw of the optical AXIS (rad, ~19.5°) — slides the VP ~20-25% off-centre toward screen-LEFT (stable)
+const COMPOSE_PITCH = 0.05 // fixed upward tilt of the optical axis (rad, ~3°) for a raking horizon off the vertical centre
+const COMPOSE_SUN_OFFSET = 0.55 // sun lateral placement off the view centre (fraction of sun depth)
 
 // Camera-shake + particle tuning (iteration 3). The shake is a transient,
 // non-destructive world-space offset added to the camera each frame and reverted
@@ -88,161 +123,172 @@ const PARTICLES_PER_COLLISION = 42 // burst count on an obstacle hit (kept below
 const PARTICLE_LIFETIME_DROP = 0.6 // seconds a drop-burst particle lives
 const PARTICLE_LIFETIME_COLLISION = 0.5 // seconds a collision-burst particle lives
 
-// Mood-burst colors keyed off spectral centroid (perceived brightness): dim/cool
-// sections burst cyan, bright/hot sections burst magenta, matching the sky sweep.
-const BURST_COLOR_COOL = new THREE.Color(0x6af6ff)
-const BURST_COLOR_HOT = new THREE.Color(0xff00ff)
+// Mood-burst warmth keyed off spectral centroid (perceived brightness). The particle
+// pool now renders all bursts as tinted near-black pigment spatter and only reads the
+// passed colour's warmth (r vs b) to pick the warm/cool near-black ink, so these are
+// retinted to the harmony: a cool steel-blue for dim/cool sections, a warm rose for
+// bright/hot sections. They no longer drive any glow — just the ink temperature.
+const BURST_COLOR_COOL = new THREE.Color(0x6a7aa4) // steel-blue accent -> cool ink
+const BURST_COLOR_HOT = new THREE.Color(0xa96276) // rose-magenta accent -> warm ink
 
-// Cinematic post-processing tuning (iteration 4). The film grain + vignette are
-// always-on, subtle, and frame-state-free (the grain only animates via a time
-// uniform). Chromatic aberration sits at 0 at rest and spikes briefly on impact for
-// a Wipeout-style "lens kick" that decays over CHROMATIC_DECAY_MS — driven off the
-// renderer's existing collision timestamp (no new game state needed).
-const FILM_GRAIN_INTENSITY = 0.032 // tiny: reads as film texture, never as snow
-const VIGNETTE_DARKNESS = 0.7 // corner brightness (30% darker) to frame the car
-// Collision is now a punchy spike that STACKS on top of an always-present flux
-// baseline (iteration 5), so it's pulled down from 1.0 -> 0.8: the lens kick still
-// reads as a hard impact but no longer oversaturates against the live baseline.
-const CHROMATIC_COLLISION_PEAK = 0.6 // max CA contribution at the instant of a hit
-const CHROMATIC_DECAY_MS = 220 // ease the lens kick back to 0 over this window
-
-// Spectral-flux -> chromatic-aberration tuning (iteration 5). Flux (treble
-// volatility, 0..1) was computed and smoothed upstream but never made visible.
-// Binding it to a CA *baseline* turns treble transients into a prismatic shimmer:
-// a two-stage envelope sits gently at rest (BASELINE_MIN..MAX as flux climbs to the
-// SPIKE_THRESHOLD) then ramps faster toward SPIKE_MAX on bright, volatile peaks, so
-// the lens fringing breathes with the music instead of only kicking on collisions.
-const CHROMATIC_FLUX_BASELINE_MIN = 0.1 // resting shimmer when flux ≈ 0
-const CHROMATIC_FLUX_BASELINE_MAX = 0.3 // shimmer as flux approaches the spike knee
-const CHROMATIC_FLUX_SPIKE_THRESHOLD = 0.6 // flux above this ramps harder (energy peak)
-const CHROMATIC_FLUX_SPIKE_MAX = 0.5 // extra CA added across the post-threshold range
-// Hero-car emissive isolation (iteration 5). The player body's emissive intensity is
-// scaled each frame by (BASE + RANGE × centroid) so the car glows hotter during bright
-// emotional peaks and settles to a calm floor in quiet passages — a centroid-driven
-// focal "product light" that stacks orthogonally with the beat (FOV/bloom) and flux
-// (CA) gestures. Applied to base intensities captured once at model load.
-const CAR_EMISSIVE_CENTROID_BASE = 0.3 // floor multiplier on calm/dark sections
-const CAR_EMISSIVE_CENTROID_RANGE = 0.5 // -> up to 0.8× at peak perceived brightness
-
-// Focal-hierarchy layers (iteration 7). The neon/emissive "hero" objects live on
-// NEON_LAYER (car, particles, obstacles, sky, sun, starfield, beat indicator, rim glow)
-// and the sharp, non-glowing geometry (road, grid, ground, lane markers) stays on the
-// default LAYER_DEFAULT. This is organizational scaffolding for the focal read: the
-// actual bloom selectivity is delivered by the disciplined UnrealBloomPass threshold
-// (the dim road/grid sit below it; the bright neon heroes sit above it) in ONE clean
-// pass, which is the correct single-render mechanism here — wrapping the lone composer
-// render in camera.layers.set(NEON_LAYER) would erase the road/grid from the frame, so
-// the camera keeps layers.enableAll() and sees everything. Keeping the layer split in
-// place future-proofs a true two-target selective-bloom upgrade with zero refactor.
+// Layers (Watercolour Speed). The synthwave NEON_LAYER (selective-bloom selector) is
+// GONE — there is no bloom to select for. LAYER_DEFAULT (0) carries the whole matte
+// scene. HERO_LAYER (2) is REPURPOSED as the velocity-smear SHARP mask: the hero car (and
+// its sword-adjacent foreground) is tagged onto it so a future VelocitySmearPass can hold
+// the car razor-sharp (the one crisp "found" anchor) while the rest of the world streaks
+// as a wet directional drag. No object is excluded from the primary render by layer here;
+// the camera renders all layers every frame (the mask is consumed by a separate pass).
 const LAYER_DEFAULT = 0
-const NEON_LAYER = 1
-// Hero-isolation layer (iteration 9). The SELECTIVE-bloom isolation render (a second
-// composer, additively composited on top) must draw ONLY the foreground hero objects —
-// the car + rim glow, drop/treble/collision particles, the beat indicator, and the sword
-// obstacles — and explicitly EXCLUDE the background neon (sky dome, sun disc, starfield),
-// because the sky fills the whole frame and re-adding it additively would wash the image
-// and erase the road's legibility. Hero objects are tagged onto this layer IN ADDITION to
-// NEON_LAYER (via layers.enable, not set), so they still render normally in the all-layers
-// primary pass while also appearing in the hero-only isolation pass.
 const HERO_LAYER = 2
 
-// Mood-scaled bloom base strength (iteration 7). The overall glow now BREATHES with the
-// emotional arc: cool/dim intros sit tight at COOL, bright drops blow out toward HOT.
-// This replaces the single hardcoded base; the per-beat pulse + drop expansion still
-// STACK on top so rhythm punch and emotional peaks remain visible and distinct.
-const BLOOM_STRENGTH_COOL = 0.9 // base glow on cool/dim sections (low centroid)
-const BLOOM_STRENGTH_HOT = 1.6 // base glow on bright/hot sections (high centroid)
+// Aux-target depth far (Watercolour Speed B2). The scene camera runs near=0.1 / far=10000
+// for the world geometry, but that range gives a terrible z-distribution that breaks the
+// painterly edge (A6) and velocity-smear (A7) reconstruction. So the dedicated depth +
+// normal G-buffer pre-pass renders with the far plane TIGHTENED to this value, and the
+// edge/smear passes linearise their tDepth sample against the SAME far so the device-depth
+// stored in the DepthTexture and the in-shader linearisation agree. Keep this in lock-step
+// with the cameraFar the A6/A7 passes are constructed with when they are wired in B3/B4.
+const DEPTH_FAR = 2000
 
-// Selective-bloom isolation tuning (iteration 9). A SECOND EffectComposer renders only
-// the NEON_LAYER geometry through an exaggerated bloom into an offscreen target, which is
-// then additively composited on top of the primary (full-scene) render. This delivers the
-// premium focal hierarchy the mission calls for: the hero car's rim glow + drop-burst
-// particles bloom dramatically while the road/grid (only present in the primary render,
-// with its disciplined threshold) stay razor-sharp. The neon bloom uses a LOW threshold so
-// the car's emissive/rim edges catch the glow aggressively, and its strength swells on
-// drops (driven per-frame in renderComposite from the same mood/drop signals as the
-// primary bloom). The composite is pure-additive so it is stable and flicker-free.
-const NEON_BLOOM_STRENGTH_BASE = 1.1 // resting neon-glow strength (calm sections)
-const NEON_BLOOM_STRENGTH_DROP = 2.0 // peak neon-glow strength at full drop intensity
-const NEON_BLOOM_RADIUS = 0.85 // slightly wider than the primary for a softer hero halo
-// Two-threshold split (iteration 9): the neon composer's threshold tracks mood DOWNWARD
-// (cool 0.75 -> warm 0.52) so the hero car's emissive + rim edges catch bloom ever more
-// aggressively as the music brightens, while the PRIMARY composer keeps its conservative
-// threshold (0.35-floor mood lerp, unchanged) so the road/grid never smear.
-const NEON_BLOOM_THRESHOLD_COOL = 0.75
-const NEON_BLOOM_THRESHOLD_WARM = 0.52
-// Composite contribution at rest vs. during a drop. Kept modest at rest so the neon glow
-// reads as a tasteful focal light rather than a constant wash; lifts on drops so the hero
-// car flares as the cinematic moment lands. Driven per-frame from the drop envelope.
-const NEON_COMPOSITE_STRENGTH_BASE = 0.85
-const NEON_COMPOSITE_STRENGTH_DROP = 1.25
-// Resolution scale for the offscreen neon-isolation pass (polish pass). The selective
-// bloom is inherently low-frequency, so rendering its target + UnrealBloomPass at half
-// linear resolution (a quarter of the pixels) is visually indistinguishable but ~4x
-// cheaper for the scene's SECOND render — the main GPU cost flagged for low-end hardware.
-// The neon composite samples this target with normalized UVs, so it upscales for free.
-const NEON_RESOLUTION_SCALE = 0.5
+// --- B4 per-frame music drivers (Watercolour Speed §6 "music through the medium") --------
+// Every painterly driver below expresses the music WITHIN the saturation discipline — a
+// longer wet smear, a breath of sheen, a touch more accent chroma, sharper/looser found
+// gestures — NEVER a brightness flash or a bloom (there is no bloom). All are smoothed/
+// eased so they breathe rather than strobe, matching the codebase's manual-lerp aesthetic.
 
-// Treble shimmer tuning (iteration 7). On each high-frequency transient the hero car
-// sprays a small additive burst that pumps straight into the bloom — the missing
-// music-FREQUENCY signal. Cool moods spark cyan, hot moods magenta (matching the sky
-// sweep). Kept tiny + short so it reads as a fast sparkle, orthogonal to the beat punch.
+// Kuwahara sharpness `q` eases DOWN on drops for a looser, WETTER gouache (spec PASS 4:
+// "q eases DOWN on drops"). At rest q sits at its authored 12; at full drop intensity it
+// relaxes toward ~7 so the strokes broaden and bleed on the emotional peak.
+const KUWAHARA_Q_REST = 12 // authored sharpness (crisp-ish strokes at rest)
+const KUWAHARA_Q_DROP = 7 // looser/wetter strokes at full dropIntensity
+const KUWAHARA_Q_EASE = 0.12 // per-frame lerp toward the drop-driven q target (smooth)
+
+// VelocitySmear "watercolour speed" length (spec PASS 8: smearLen ≈ base*(0.6+0.4*speedMul)
+// + beatKick*0.5). speedMultiplier (drop acceleration) lengthens the wet drag; a beat is a
+// brief "wet drag" pulse (a transient kick on the smear length), never a flash. uMaxSmear is
+// also nudged up a touch on drops so the comet tail can physically reach further.
+const SMEAR_BEAT_KICK_MS = 260 // beat "wet drag" pulse window (ms)
+const SMEAR_BEAT_KICK_MAX = 0.6 // peak uBeatKick added on a full-strength beat
+const SMEAR_MAX_REST = 0.05 // hard |velocity| clamp at rest (UV)
+const SMEAR_MAX_DROP = 0.075 // looser clamp at full drop so the tail reaches further
+const SMEAR_DRIVE_EASE = 0.18 // ease of the smeared uStrength toward its musical target
+// A frame whose clamped car-distance jumps more than this (world units) is a seek / rewind /
+// tab-throttle re-baseline (mirrors the controller's dt>0.5 @ 50 u/s ⇒ >25u jump): ZERO the
+// smear that frame so a stale prev view-projection can't drag the whole screen.
+const SMEAR_RESET_DISTANCE_JUMP = 25
+
+// PainterlyEdge breakup WIDENS on drops (spec PASS 7: drops widen the breakup threshold so
+// MORE found ink appears — the painter pressing harder — never a strength strobe). Mapped
+// straight from dropIntensity into the pass's 0..1 `uMusic` (it does the ±15% threshold
+// nudge internally). Smoothed so the found/lost rhythm crawls rather than blinking.
+const EDGE_MUSIC_EASE = 0.1
+
+// PaintGradeLUT accent-chroma push: on LOUD passages a tiny hue rotation toward rose
+// (spec PASS 6 / §6: "a touch more accent chroma … push rose toward S~45 … never hard-swap").
+// Kept micro (a few degrees) and eased so the whole frame never snaps. Driven by the louder
+// of dropIntensity / a beat envelope so it reads as the accents warming on emphasis.
+const HUE_SHIFT_MAX = 0.012 // peak hue rotation (turns) toward rose on a full loud peak
+const HUE_SHIFT_EASE = 0.1 // ease toward the loudness-driven hue-shift target
+
+// Treble shimmer tuning (iteration 7, Watercolour Speed restyle). On each high-frequency
+// transient the hero car throws a small pigment-spatter burst (the particle pool renders
+// it as tinted near-black ink flecks, not glow). Kept tiny + short so it reads as a fast
+// flick of spatter, orthogonal to the beat. Colour warmth only picks the ink temperature.
 const TREBLE_BURST_COUNT_MIN = 6 // particles at threshold strength
 const TREBLE_BURST_COUNT_MAX = 8 // particles at full-strength transient
 const TREBLE_BURST_SPEED = 6 // outward fling speed (slower/tighter than drop bursts)
-const TREBLE_BURST_LIFETIME = 0.25 // seconds — a quick sparkle, not a lingering plume
+const TREBLE_BURST_LIFETIME = 0.25 // seconds — a quick flick, not a lingering plume
 
-const ANALOGOUS_PALETTE = {
-  abyss: new THREE.Color(0x041226),
-  midnight: new THREE.Color(0x0a2f44),
-  tealShadow: new THREE.Color(0x0f3c56),
-  aquaCore: new THREE.Color(0x1ee0ff),
-  cyanGlow: new THREE.Color(0x6af6ff),
-  mintHighlight: new THREE.Color(0x30f3c8),
-  redAccent: new THREE.Color(0xff3a53),
-  // "Sunny outrun holiday" warm sunset band (live-tuning pass). Synthwave is the
-  // juxtaposition of a WARM sunset sky against COOL neon geometry: these warm tones
-  // drive the sky gradient, the banded retro sun and the horizon haze, while the
-  // cyan/magenta neons above keep driving the grid, car, edges and obstacles.
-  sunGold: new THREE.Color(0xffd86b), // brightest horizon / sun core
-  sunAmber: new THREE.Color(0xff8a3d), // sun mid / horizon glow
-  hotMagenta: new THREE.Color(0xff2e7e), // sky mid band / sun rim
-  deepPurple: new THREE.Color(0x3a1170), // sky upper band
-  skyIndigo: new THREE.Color(0x0a0a2e) // sky zenith (deep indigo, never dead black)
+// "Watercolour Speed" harmony palette (STYLE_SPEC §2, pixel-measured from ref 02). These
+// are the literal driver values for the FLAT MATTE materials, lighting and fog. The grays
+// are TINTED toward the rose/steel axis — never neutral RGB-equal gray — and nothing here
+// exceeds ~45% saturation except the obstacle signal-red. The whole saturated synthwave
+// ANALOGOUS_PALETTE (teal/cyan/magenta sunset) was deleted with the rip-out; every surface,
+// light, fog and accent the camera renders is now drawn from HARMONY.
+const HARMONY = {
+  paperPutty: new THREE.Color(0xd9d6ce),   // #1  lightest value / sun core / highlight cap
+  warmCream: new THREE.Color(0xede7d8),     // #2  cold-press substrate tint
+  steelVioletField: new THREE.Color(0xa7a3b1), // #3 DOMINANT neutral; sky upper, ambient, fog
+  litSteelBlue: new THREE.Color(0xb8bbce),  // #4  cool sky band lower / cool reflected light
+  roseGrayField: new THREE.Color(0xceb9b9), // #5  warm desaturated ground/horizon glaze
+  sandRoad: new THREE.Color(0xc9b49e),      // #6  road surface — the desaturated "sand" bridge
+  bodyVioletGray: new THREE.Color(0x9f939e), // #7 hero car albedo on lit faces
+  bodyShadowViolet: new THREE.Color(0x706675), // #8 shadow side of the car
+  deepBodyNearBlack: new THREE.Color(0x2c2a38), // #9 darkest the car may reach (not black)
+  steelBlueAccent: new THREE.Color(0x6a7aa4), // #11 cool accent / cool rim
+  roseMagentaAccent: new THREE.Color(0xa96276), // #12 primary hot accent
+  warmSienna: new THREE.Color(0xc59076),    // #13 warm bridge / desaturated warm key light
+  petrolTeal: new THREE.Color(0x48677d),    // #14 cool shadow whisper / road-edge in shade
+  signalRed: new THREE.Color(0xd6443b),     // #15 the single saturated obstacle hit
+  inkCool: new THREE.Color(0x20211c),       // #16 found-edge dark accents (cool-lit)
+  inkWarm: new THREE.Color(0x1e1b22)        // #17 found-edge dark accents (warm-side)
 }
 
 export class ThreeScene {
   private renderer: THREE.WebGLRenderer
   private scene: THREE.Scene
   private camera: THREE.PerspectiveCamera
+  // Single matte post chain (Watercolour Speed B1). For now it is just RenderPass ->
+  // OutputPass (ACES tone-map + sRGB); the synthwave two-composer bloom/neon/CA/SMAA/
+  // vignette/grain stack was ripped out. The painterly Kuwahara/pigment/LUT/edge/smear/
+  // paper passes (Track A modules) are wired in a later wave; B1 leaves the scene a flat
+  // matte tinted-gray base ("unfinished paint").
   private composer: EffectComposer
-  private bloomPass: UnrealBloomPass
-  // Selective-bloom isolation pipeline (iteration 9). The neon composer renders ONLY the
-  // NEON_LAYER geometry through an exaggerated bloom into `neonRenderTarget`; the result is
-  // additively composited onto the primary render by `neonCompositePass` (the final pass of
-  // the primary chain). See the NEON_BLOOM_* constants for the design rationale.
-  private neonRenderTarget: THREE.WebGLRenderTarget
-  private neonComposer: EffectComposer
-  private neonBloomPass: UnrealBloomPass
-  private neonCompositePass: ShaderPass
-  // Cinematic post passes (iteration 4). CA intensity is driven per-frame from the
-  // collision envelope; grain advances its time uniform each frame; vignette is static.
-  private chromaticPass: ShaderPass
-  private filmGrainPass: ShaderPass
-  private colorGradePass: ShaderPass
-  // Proper anti-aliasing (SMAA). The composer renders to offscreen targets, which bypasses
-  // the renderer's MSAA, so geometry edges (the road/sword silhouettes against the bright
-  // sky) were aliased; this pass smooths them on the tone-mapped image.
-  private smaaPass: SMAAPass
-  // Beat-locked hero-car rim glow (iteration 4). Built lazily once the car bounds are
-  // known, parented under the car group, and updated each frame from beat + mood.
-  private rimGlow: RimGlowShell | null = null
-  // Player-car body materials + their base emissive intensities, captured when the
-  // palette is applied (iteration 5). Per-frame, each base is scaled by a centroid-
-  // driven multiplier so the hero car glows hotter on bright emotional peaks. Reset
-  // and re-collected whenever the car model is (re)built so it never references stale
-  // materials (e.g. when the GLB swaps in over the procedural fallback).
-  private carEmissiveMaterials: { material: THREE.Material & { emissiveIntensity: number }; base: number }[] = []
+  // --- Aux G-buffers (Watercolour Speed B2) -------------------------------------------
+  // A single dedicated pre-pass (renderAuxTargets) renders the whole scene ONCE per frame
+  // with scene.overrideMaterial = MeshNormalMaterial into this half-float RGBA target,
+  // producing BOTH aux buffers the painterly stack needs from one render:
+  //   - normalTarget.texture  : view-space normals packed n*0.5+0.5 in RGB (AUX A) -> the
+  //                             geometric crease/silhouette half of PainterlyEdge (A6).
+  //   - sceneDepthTexture     : a perspective DepthTexture attached to that same target,
+  //                             captured with the camera far TIGHTENED to DEPTH_FAR so the
+  //                             z-distribution is usable -> tDepth for PainterlyEdge (A6)
+  //                             and VelocitySmear (A7).
+  // Owning a dedicated pre-pass (rather than fishing the depth out of EffectComposer's
+  // ping-ponged renderTarget1/2, whose identity flips with the swapping pass count) makes
+  // tDepth/tNormal DETERMINISTIC and decoupled from the composer's internal buffer swaps,
+  // which is exactly what the A6/A7 modules expect (they take the textures as wired
+  // uniforms). NearestFilter + half-float so normals/depth are read crisp, not bilinearly
+  // smeared. Both are reallocated to the drawing-buffer resolution in resize().
+  private normalTarget: THREE.WebGLRenderTarget
+  private sceneDepthTexture: THREE.DepthTexture
+  // Reused override material for the normal pre-pass (allocation-free per frame). Flat-
+  // shaded view normals; the pass writes depth into the attached DepthTexture for free.
+  private normalMaterial: THREE.MeshNormalMaterial
+  // --- Painterly post stack (Watercolour Speed B3) ------------------------------------
+  // The Track-A passes added to `composer` in STYLE_SPEC §3 order. PreBlur softens the
+  // tone-mapped frame; the structure-tensor trio runs as a MANUAL half-res side-chain
+  // (see buildPainterlyChain) into `tensorTargetA/B` (RGBA16F) so it can target a float
+  // half-res buffer and NOT disturb the main colour buffer Kuwahara samples; Kuwahara
+  // (KEYSTONE) reads the PreBlur colour + the blurred tensor; pigment/LUT/edge/smear/paper
+  // finish the gouache look. Held as fields so resize() can update every resolution/texel/
+  // tensorTexel uniform in drawing-buffer pixels and B4 can drive the music uniforms.
+  // Definite-assignment (`!`): all ten are assigned in buildPainterlyChain(), invoked from
+  // the constructor, which TS's flow analysis can't trace through the method boundary.
+  private preBlurPass!: ShaderPass
+  private structureTensorPass!: ShaderPass
+  private tensorBlurHPass!: ShaderPass
+  private tensorBlurVPass!: ShaderPass
+  private kuwaharaPass!: ShaderPass
+  private pigmentPass!: ShaderPass
+  private paintGradePass!: ShaderPass
+  private painterlyEdgePass!: ShaderPass
+  private velocitySmearPass!: ShaderPass
+  private substratePaperPass!: ShaderPass
+  // Owned HALF-RES RGBA16F float targets for the structure-tensor side-chain. The tensor
+  // packs (Jxx, Jyy, Jxy) which are SQUARED/SIGNED gradients (>1, ±) so an 8-bit target
+  // would band the stroke directions — float storage is mandatory. Two targets ping-pong
+  // the separable blur (StructureTensor->A, blurH A->B, blurV B->A); A's texture is the
+  // final blurred tensor wired into Kuwahara/PainterlyEdge. Half-res because orientation is
+  // low-frequency; bilinear upscale via `tensorTexel` is free. Reallocated in resize().
+  private tensorTargetA: THREE.WebGLRenderTarget
+  private tensorTargetB: THREE.WebGLRenderTarget
+  // 1x1 placeholder for VelocitySmear's hero `tCarMask` until the dedicated hero-isolation
+  // mask render lands (B4). Black (.r = 0) => the smear treats the whole frame as the
+  // streakable world; the smear is independently inert in B3 anyway (its prev/cur view-
+  // projection matrices default to identity -> zero reconstructed velocity), so this only
+  // exists so the sampler is never unbound. B4 swaps in the real HERO_LAYER mask texture.
+  private carMaskPlaceholder: THREE.DataTexture
   private roadMesh: THREE.Mesh | null = null
   // Cached, immutable base vertex positions of the road, captured once at setTrack
   // (iteration 8). The per-frame spectral elevation morph reads from these so it always
@@ -258,16 +304,8 @@ export class ThreeScene {
   private carMesh: THREE.Group | null = null
   private trackData: TrackData | null = null
   private skyMesh: THREE.Mesh | null = null
-  private skyMaterial: THREE.ShaderMaterial | null = null
-  private starField: THREE.Points | null = null
   private sunMesh: THREE.Mesh | null = null
-  private sunMaterial: THREE.ShaderMaterial | null = null
-  private gridHelper: THREE.GridHelper | null = null
   private groundMesh: THREE.Mesh | null = null
-  // Cell size of the neon floor grid. The grid + ground snap-follow the car in
-  // whole-cell steps so the signature synthwave floor scrolls infinitely beneath
-  // the car instead of being left behind at the world origin.
-  private gridCellSize = 10
   private beatIndicator: THREE.Sprite | null = null
   private beatIndicatorMaterial: THREE.SpriteMaterial | null = null
   private trebleMeshes: THREE.Object3D[] = []
@@ -277,12 +315,9 @@ export class ThreeScene {
   private cameraOrbitAngle = 0
   // Cinematic drop-moment state (iteration 9). `appliedDepthScale` eases toward the
   // controller's gameState.cameraDepthScale so the camera pull-back glides; `prevFocused`
-  // tracks the focus flag to detect its rising edge (snap orbit square on drop entry); and
-  // `bloomFocusEnvelope` is a 0..1 sustain envelope that ramps up while focused and decays
-  // on exit, holding the bloom elevated through the whole drop rather than per-beat-decaying.
+  // tracks the focus flag to detect its rising edge (snap orbit square on drop entry).
   private appliedDepthScale = 1
   private prevFocused = false
-  private bloomFocusEnvelope = 0
   // Smoothed camera bank/roll (radians, iteration 6). Lerped toward a target derived
   // from the curvature of the upcoming track centerline so the camera leans into turns.
   private cameraRoll = 0
@@ -313,6 +348,37 @@ export class ThreeScene {
   private shakeUp = new THREE.Vector3()
   private shakeFwd = new THREE.Vector3()
 
+  // --- B4 car-sheen registry + per-frame music-driver state ---------------------------
+  // The hero car's helmet-shine materials (A8 CarSheenMaterial), patched in applyPalette-
+  // ToModel(isPlayer) / buildFallbackCar. This REUSES the freed carEmissiveMaterials slot:
+  // the deleted synthwave emissive-scaling loop is replaced by the per-frame sheen breath
+  // (updateCarSheen drives uSheenStrength ≈ 0.45 + beat*0.5 + centroid*0.25, smoothed). The
+  // list is cleared whenever the car group is rebuilt (createCar / GLB swap) so disposed
+  // fallback materials never linger.
+  private carSheenMaterials: CarSheenMaterial[] = []
+  // Reused view-space sheen direction (allocation-free). Rebuilt each frame from a fixed
+  // up-and-toward-camera base biased by the camera bank/roll so the broad lobe "rolls"
+  // across the body as the car leans (spec §4: the shine rolls on banking).
+  private sheenDir = new THREE.Vector3(0.35, 0.8, 0.45)
+  // Smoothed Kuwahara sharpness q (eased toward KUWAHARA_Q_REST..DROP by dropIntensity).
+  private smoothedKuwaharaQ = KUWAHARA_Q_REST
+  // Smoothed velocity-smear master + edge-breakup music + LUT hue-shift, all eased so the
+  // medium expresses the music as a slow breath, not a strobe.
+  private smoothedSmearStrength = 0
+  private smoothedEdgeMusic = 0
+  private smoothedHueShift = 0
+  // Previous-frame clamped car distance, to detect a seek/rewind/tab-throttle re-baseline
+  // (a large jump) and ZERO the smear that frame. null until the first frame after a track
+  // (re)load — that first frame is always treated as a reset.
+  private prevCarDistance: number | null = null
+  // Cached SHAKEN view-projection of the previous frame, fed to VelocitySmear's uPrevViewProj
+  // (copied AFTER render so it is the exact transform the colour frame was rendered with).
+  // hasPrevViewProj guards the first frame (no valid previous matrix yet → smear reset).
+  private prevViewProj = new THREE.Matrix4()
+  private hasPrevViewProj = false
+  // Scratch view-projection matrices reused each frame (allocation-free).
+  private curViewProj = new THREE.Matrix4()
+
   constructor(canvas: HTMLCanvasElement) {
     // Ensure canvas has dimensions
     if (!canvas.width || !canvas.height) {
@@ -331,12 +397,12 @@ export class ThreeScene {
     })
     this.renderer.setSize(width, height, false)
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-    this.renderer.setClearColor(ANALOGOUS_PALETTE.abyss.getHex(), 1)
+    // Clear to the steel-violet field colour so any gap reads as paper field, not black.
+    this.renderer.setClearColor(HARMONY.steelVioletField.getHex(), 1)
 
-    // Professional color grading: ACES filmic tone mapping + sRGB output gives the
-    // scene a cinematic, "graded" look instead of flat linear rendering. The final
-    // tone-map / color-space conversion is applied by OutputPass at the end of the
-    // composer chain, but we set it on the renderer so OutputPass picks it up.
+    // ACES filmic tone mapping + sRGB output. OutputPass performs the tone-map / colour-
+    // space conversion at the end of the composer chain (the LDR boundary the painterly
+    // passes will sit after); we set it on the renderer so OutputPass picks it up.
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping
     this.renderer.toneMappingExposure = 1.2
@@ -352,135 +418,116 @@ export class ThreeScene {
       0.1,
       10000
     )
-    // The PRIMARY render sees ALL layers (iteration 7): it draws the whole world (road,
-    // grid, neon heroes) with a disciplined bloom threshold so the road/grid stay sharp.
-    // Iteration 9 adds a SEPARATE hero-only render (camera.layers temporarily masked to
-    // HERO_LAYER) that is additively composited on top for an exaggerated hero glow; that
-    // masking is applied transiently per-frame in renderComposite, then restored here.
+    // The camera renders ALL layers every frame (the whole matte world). HERO_LAYER (2)
+    // is now only a SHARP-mask tag consumed by a future velocity-smear pass, not a render
+    // filter, so we never mask the camera here.
     this.camera.layers.enableAll()
 
-    // Post-processing pipeline (iteration 4):
-    //   RenderPass -> UnrealBloomPass -> OutputPass -> SMAA -> ChromaticAberration -> Vignette -> FilmGrain
-    // Bloom makes the neon emissives glow like a premium synthwave promo film, and
-    // OutputPass performs the ACES tone-map + sRGB conversion. The three cinematic
-    // passes run AFTER OutputPass so they operate on the final, display-space graded
-    // image — the correct place for lens/film effects: CA fringing, edge vignette,
-    // and film grain all read as artifacts of the camera/stock, not of the linear
-    // scene, and aren't re-tone-mapped. The last pass auto-renders to screen.
+    // Painterly post pipeline (Watercolour Speed B3). The composer renders, tone-maps
+    // (OutputPass = the LDR boundary), then runs the full Track-A gouache stack:
+    //   RenderPass -> OutputPass -> PreBlur -> [StructureTensor -> TensorBlur x2 (side-chain
+    //   into a half-res RGBA16F tensor target)] -> Kuwahara -> WatercolourPigment ->
+    //   PaintGradeLUT -> PainterlyEdge -> VelocitySmear -> SubstratePaper.
+    // The synthwave bloom/neon-isolation/CA/SMAA/vignette/grain stack (and the second
+    // offscreen composer) were ripped out in B1. pixelRatio is CAPPED at 2 (perf budget).
+    // The painterly passes are wired in buildPainterlyChain() below, AFTER the aux/tensor
+    // targets are allocated (the edge/smear passes consume the depth+normal G-buffers and
+    // Kuwahara consumes the owned tensor target).
+    const cappedDpr = Math.min(window.devicePixelRatio, 2)
     this.composer = new EffectComposer(this.renderer)
     this.composer.setSize(width, height)
-    this.composer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    this.composer.setPixelRatio(cappedDpr)
     this.composer.addPass(new RenderPass(this.scene, this.camera))
-    this.bloomPass = new UnrealBloomPass(
-      new THREE.Vector2(width, height),
-      BLOOM_BASE_STRENGTH, // strength (re-driven per frame from mood + beat in renderComposite)
-      0.8, // radius
-      // Threshold raised 0.25 -> 0.35 (iteration 7) for a more disciplined, selective
-      // bloom so dim geometry (road/grid) stays sharp while neon heroes glow. The
-      // runtime mood lerp in renderComposite still drives the live threshold even higher
-      // on cool sections and eases it down on hot ones; this is just the initial value.
-      0.35
-    )
-    this.composer.addPass(this.bloomPass)
     this.composer.addPass(new OutputPass())
 
-    // Cinematic colour grade (vibrance + teal-orange split-tone + warmth) on the
-    // tone-mapped image — the "professional finish" pass. Applied before AA/lens FX so
-    // it grades the clean image, then SMAA smooths, then the lens effects sit on top.
-    this.colorGradePass = createColorGradePass({
-      saturation: 0.22,
-      splitTone: 0.55,
-      warmth: 0.02,
-      contrast: 0.08
+    // --- Aux G-buffers (Watercolour Speed B2): DepthTexture + normal G-buffer -----------
+    // Allocate at the DRAWING-BUFFER resolution (logical size x capped DPR) so the depth /
+    // normal targets line up 1:1 with the composer's colour target the painterly passes
+    // sample alongside them. A perspective DepthTexture (DepthFormat / UnsignedInt /
+    // NearestFilter by default) is attached to a half-float RGBA normal target so one
+    // override-material pre-pass fills both. The normal target is NearestFilter half-float
+    // (view normals are signed and must not be bilinearly blended at silhouettes).
+    const pixelRatio = Math.min(window.devicePixelRatio, 2)
+    const bufW = Math.floor(width * pixelRatio)
+    const bufH = Math.floor(height * pixelRatio)
+    this.sceneDepthTexture = new THREE.DepthTexture(bufW, bufH)
+    this.sceneDepthTexture.type = THREE.UnsignedIntType
+    this.sceneDepthTexture.minFilter = THREE.NearestFilter
+    this.sceneDepthTexture.magFilter = THREE.NearestFilter
+    this.normalTarget = new THREE.WebGLRenderTarget(bufW, bufH, {
+      type: THREE.HalfFloatType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      depthBuffer: true,
+      stencilBuffer: false,
+      depthTexture: this.sceneDepthTexture
     })
-    this.composer.addPass(this.colorGradePass)
+    this.normalTarget.texture.name = 'ThreeScene.normalGBuffer'
+    // Flat-shaded view normals (n*0.5+0.5 in RGB). Reused every frame as the scene override
+    // material; writes depth into the attached DepthTexture for free.
+    this.normalMaterial = new THREE.MeshNormalMaterial()
 
-    // Anti-aliasing on the tone-mapped (LDR/sRGB) image, right after OutputPass and before
-    // the lens grade, so it smooths the geometry edges without fighting the intentional
-    // chromatic-aberration fringing that follows.
-    this.smaaPass = new SMAAPass(width, height)
-    this.composer.addPass(this.smaaPass)
+    // --- Tensor side-chain targets (Watercolour Speed B3) -------------------------------
+    // HALF the drawing-buffer resolution (orientation is low-frequency) and RGBA16F float
+    // (the tensor's squared/signed gradient components cannot survive an 8-bit round-trip).
+    // LinearFilter so Kuwahara/PainterlyEdge bilinearly upscale the half-res tensor for free.
+    // Two targets ping-pong the separable blur. Floor to >=1 so a tiny window never makes a
+    // 0-sized target.
+    const halfW = Math.max(1, Math.floor(bufW / 2))
+    const halfH = Math.max(1, Math.floor(bufH / 2))
+    const tensorOpts: THREE.RenderTargetOptions = {
+      type: THREE.HalfFloatType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      depthBuffer: false,
+      stencilBuffer: false
+    }
+    this.tensorTargetA = new THREE.WebGLRenderTarget(halfW, halfH, tensorOpts)
+    this.tensorTargetA.texture.name = 'ThreeScene.tensorA'
+    this.tensorTargetB = new THREE.WebGLRenderTarget(halfW, halfH, tensorOpts)
+    this.tensorTargetB.texture.name = 'ThreeScene.tensorB'
 
-    // Chromatic aberration: 0 at rest, spiked on collision (driven in renderComposite).
-    this.chromaticPass = createChromaticAberrationPass(0.0)
-    this.composer.addPass(this.chromaticPass)
-    // Vignette: static radial edge darkening to frame the hero car + road.
-    this.composer.addPass(createVignettePass(VIGNETTE_DARKNESS))
-    // Film grain: always-on subtle animated noise (time uniform advanced per frame).
-    this.filmGrainPass = createFilmGrainPass(FILM_GRAIN_INTENSITY)
-    this.composer.addPass(this.filmGrainPass)
-
-    // --- Selective-bloom isolation (iteration 9). A second, offscreen composer renders
-    // ONLY the NEON_LAYER geometry through an exaggerated bloom + tone-map into
-    // `neonRenderTarget`. Its result is additively composited onto the primary, fully-graded
-    // image by `neonCompositePass`, which we append as the FINAL pass of the primary chain
-    // (so it renders to screen, adding the neon glow on top of the road/grid that stay sharp
-    // in the primary render). Both composers tone-map to sRGB so the additive blend happens
-    // in a consistent display space and reads cleanly with no banding.
-    const dpr = Math.min(window.devicePixelRatio, 2)
-    this.neonRenderTarget = new THREE.WebGLRenderTarget(
-      Math.floor(width * dpr * NEON_RESOLUTION_SCALE),
-      Math.floor(height * dpr * NEON_RESOLUTION_SCALE),
-      {
-        minFilter: THREE.LinearFilter,
-        magFilter: THREE.LinearFilter,
-        // sRGB so the neon target matches the primary's OutputPass display space.
-        colorSpace: THREE.SRGBColorSpace,
-        depthBuffer: true
-      }
+    // 1x1 black placeholder for VelocitySmear's hero mask (see field doc). NoColorSpace so
+    // it is read as a raw .r value, not sRGB-decoded.
+    this.carMaskPlaceholder = new THREE.DataTexture(
+      new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType
     )
-    this.neonComposer = new EffectComposer(this.renderer, this.neonRenderTarget)
-    this.neonComposer.setSize(width * NEON_RESOLUTION_SCALE, height * NEON_RESOLUTION_SCALE)
-    this.neonComposer.setPixelRatio(dpr)
-    // The neon RenderPass clears to transparent black so non-neon pixels contribute
-    // nothing to the additive composite (only the neon heroes + their bloom carry light).
-    const neonRenderPass = new RenderPass(this.scene, this.camera)
-    neonRenderPass.clearColor = new THREE.Color(0x000000)
-    neonRenderPass.clearAlpha = 1
-    this.neonComposer.addPass(neonRenderPass)
-    this.neonBloomPass = new UnrealBloomPass(
-      new THREE.Vector2(width * NEON_RESOLUTION_SCALE, height * NEON_RESOLUTION_SCALE),
-      NEON_BLOOM_STRENGTH_BASE, // re-driven per frame from the drop envelope
-      NEON_BLOOM_RADIUS,
-      NEON_BLOOM_THRESHOLD_COOL // re-driven per frame (mood lerp toward WARM)
-    )
-    this.neonComposer.addPass(this.neonBloomPass)
-    this.neonComposer.addPass(new OutputPass())
-    // The neon composer renders to its target (never to screen), so its final pass must
-    // NOT auto-blit to the canvas. EffectComposer sets renderToScreen on the last pass; we
-    // force it off here because this composer's "output" is the offscreen texture.
-    this.neonComposer.renderToScreen = false
+    this.carMaskPlaceholder.colorSpace = THREE.NoColorSpace
+    this.carMaskPlaceholder.needsUpdate = true
 
-    // Composite pass: samples the neon target and adds it over the primary graded image.
-    // Appended LAST so it becomes the primary composer's renderToScreen pass.
-    this.neonCompositePass = createNeonCompositePass(NEON_COMPOSITE_STRENGTH_BASE)
-    this.neonCompositePass.uniforms.tNeon.value = this.neonRenderTarget.texture
-    this.composer.addPass(this.neonCompositePass)
+    // Build + addPass the painterly Track-A stack now that the colour composer, the depth/
+    // normal G-buffers and the tensor targets all exist. Sets every resolution/texel/
+    // tensorTexel uniform in drawing-buffer pixels and wires the cross-pass textures.
+    this.buildPainterlyChain(bufW, bufH, halfW, halfH)
 
-    // Lighting - brighter for better visibility
-    // Cool teal ambient fill — the shadow side of the natural teal/orange split.
-    const ambientLight = new THREE.AmbientLight(ANALOGOUS_PALETTE.cyanGlow, 0.38)
+    // Lighting (Watercolour Speed §4): form reads through the warm-light / cool-shadow
+    // TEMPERATURE axis, not through saturation. Cool steel-violet ambient fill is the
+    // shadow side; a desaturated warm sienna key is the light side.
+    const ambientLight = new THREE.AmbientLight(HARMONY.steelVioletField, 0.55)
     this.scene.add(ambientLight)
 
-    // Warm golden key, low on the horizon like the setting sun: the highlight side
-    // of the split-tone, so surfaces read teal in shadow and gold where the sun hits.
-    const directionalLight = new THREE.DirectionalLight(ANALOGOUS_PALETTE.sunGold, 1.35)
+    // Desaturated warm sienna key, low on the horizon — the warm light of the split.
+    const directionalLight = new THREE.DirectionalLight(HARMONY.warmSienna, 1.1)
     directionalLight.position.set(-6, 5, 12)
     this.scene.add(directionalLight)
 
-    // Add a point light near the car for better visibility
-    const pointLight = new THREE.PointLight(ANALOGOUS_PALETTE.redAccent, 1.5, 120)
+    // A soft warm fill near the car (rose-gray) so the hero body lifts off the field
+    // without a saturated neon point light.
+    const pointLight = new THREE.PointLight(HARMONY.roseGrayField, 0.6, 120)
     pointLight.position.set(0, 5, 2)
     this.scene.add(pointLight)
 
-    // Create synthwave background
+    // Create the matte painterly background
     this.createBackground()
 
-    // GPU particle pool for beat-drop + collision bursts. Added to the scene once;
-    // emits are stamped into pre-allocated buffers so there is no per-frame GC.
+    // GPU pigment-spatter particle pool. Added to the scene once; emits stamp into
+    // pre-allocated buffers so there is no per-frame GC. Tagged onto HERO_LAYER as part of
+    // the foreground sharp-mask (the future velocity smear holds the spatter crisp with the
+    // car). No NEON_LAYER tag — there is no bloom to select for.
     this.particlePool = new ParticlePool(280)
-    this.particlePool.points.layers.set(NEON_LAYER) // emissive hero (iteration 7)
-    this.particlePool.points.layers.enable(HERO_LAYER) // hero-isolation bloom (iteration 9)
+    this.particlePool.points.layers.enable(HERO_LAYER)
     this.scene.add(this.particlePool.points)
 
     // Create the immersion-preserving beat indicator (a glowing sprite, not HUD text)
@@ -510,30 +557,152 @@ export class ThreeScene {
       })
     }
 
-    // Do initial render through the composer so tone mapping / bloom apply.
+    // Do initial render through the composer so tone mapping applies.
     this.composer.render()
   }
 
+  /**
+   * Constructs the painterly "Watercolour Speed" Track-A post stack and adds it to the
+   * single composer in the EXACT STYLE_SPEC §3 order (after RenderPass + OutputPass):
+   *
+   *   PreBlur -> [StructureTensor -> TensorBlur(H) -> TensorBlur(V)] -> Kuwahara ->
+   *   WatercolourPigment -> PaintGradeLUT -> PainterlyEdge -> VelocitySmear -> SubstratePaper
+   *
+   * The structure-tensor trio is a MANUAL SIDE-CHAIN: its three ShaderPasses sit in the
+   * composer's pass list (so the spec's order + addPass contract holds) but their `render`
+   * is overridden to (a) render into the owned half-res RGBA16F `tensorTargetA/B` instead of
+   * the composer's full-res colour buffer, and (b) set `needsSwap=false` so the main colour
+   * buffer — the PreBlur output in readBuffer — is preserved UNTOUCHED for Kuwahara to read
+   * as `tDiffuse`. The final blurred tensor (tensorTargetA.texture) is wired into Kuwahara's
+   * `tTensor` and PainterlyEdge's flow field. This keeps the tensor float + half-res and the
+   * Kuwahara dual-input (PreBlur colour + tensor) correct, while remaining deterministic and
+   * independent of EffectComposer's ping-pong buffer identity.
+   *
+   * Every resolution/texel/tensorTexel uniform is set here in DRAWING-BUFFER pixels; resize()
+   * updates the same set. Music-reactive uniforms (Kuwahara `sharpness`, smear `uStrength`/
+   * `uBeatKick`, edge `uMusic`, sheen) are left at their static defaults — B4 drives them.
+   *
+   * @param bufW/bufH  full-res drawing-buffer size in px (width*min(dpr,2)).
+   * @param halfW/halfH half-res tensor target size in px.
+   */
+  private buildPainterlyChain(bufW: number, bufH: number, halfW: number, halfH: number): void {
+    const fullTexel: [number, number] = [1 / bufW, 1 / bufH]
+    const halfTexel: [number, number] = [1 / halfW, 1 / halfH]
+
+    // PASS 1 — PreBlur: soften the tone-mapped frame so the structure tensor is stable.
+    this.preBlurPass = createPreBlurPass({ kernel: '5x5', texel: fullTexel })
+
+    // PASS 2 — StructureTensor (half-res RGBA16F). Samples the FULL-RES PreBlur output, so
+    // its Sobel `texel` is the FULL-res texel even though it writes the half-res target.
+    this.structureTensorPass = createStructureTensorPass({ texel: fullTexel })
+
+    // PASS 3 — TensorBlur, two separable 1D axes over the half-res tensor (its `texel` is the
+    // HALF-res tensor texel). H then V compose into a 2D gaussian (sigma ~2.5).
+    this.tensorBlurHPass = createTensorBlurPass({ direction: [1, 0], texel: halfTexel, sigma: 2.5 })
+    this.tensorBlurVPass = createTensorBlurPass({ direction: [0, 1], texel: halfTexel, sigma: 2.5 })
+
+    // Override the trio's render() into the owned half-res float side-chain (see method doc).
+    // StructureTensor: PreBlur colour (readBuffer) -> tensorTargetA.
+    this.structureTensorPass.needsSwap = false
+    this.structureTensorPass.render = (renderer, _writeBuffer, readBuffer) => {
+      this.structureTensorPass.uniforms.tDiffuse.value = readBuffer.texture
+      renderer.setRenderTarget(this.tensorTargetA)
+      this.structureTensorPass.fsQuad.render(renderer)
+    }
+    // TensorBlur H: tensorTargetA -> tensorTargetB.
+    this.tensorBlurHPass.needsSwap = false
+    this.tensorBlurHPass.render = renderer => {
+      this.tensorBlurHPass.uniforms.tDiffuse.value = this.tensorTargetA.texture
+      renderer.setRenderTarget(this.tensorTargetB)
+      this.tensorBlurHPass.fsQuad.render(renderer)
+    }
+    // TensorBlur V: tensorTargetB -> tensorTargetA (final blurred tensor lives in A).
+    this.tensorBlurVPass.needsSwap = false
+    this.tensorBlurVPass.render = renderer => {
+      this.tensorBlurVPass.uniforms.tDiffuse.value = this.tensorTargetB.texture
+      renderer.setRenderTarget(this.tensorTargetA)
+      this.tensorBlurVPass.fsQuad.render(renderer)
+    }
+
+    // PASS 4 — Anisotropic Kuwahara (KEYSTONE), full-res. tDiffuse auto-wires to the PreBlur
+    // colour (untouched in readBuffer by the non-swapping tensor trio); tTensor is the final
+    // blurred half-res tensor. tensorTexel is the half-res texel for the bilinear upscale.
+    this.kuwaharaPass = createAnisotropicKuwaharaPass({
+      texel: fullTexel,
+      tensorTexel: halfTexel,
+      radius: 6,
+      sharpness: 12,
+      eccentricityClamp: 0.6
+    })
+    this.kuwaharaPass.uniforms.tTensor.value = this.tensorTargetA.texture
+
+    // PASS 5 — WatercolourPigment: wobble + edge-darken + granulate + bleed (resolution px).
+    this.pigmentPass = createWatercolourPigmentPass({ resolution: [bufW, bufH] })
+
+    // PASS 6 — PaintGradeLUT (PALETTE LOCK). Explicitly build the gouache ramp via paintRamp
+    // (the factory would default to the same, but constructing it here makes the palette-lock
+    // DataTexture an owned, swappable artefact for the B4 drop cross-fade).
+    this.paintGradePass = createPaintGradeLUTPass({ gradient: buildPaintRamp() })
+
+    // PASS 7 — PainterlyEdge: flow-XDoG ∪ depth/normal edges, gated, MULTIPLY ink. Consumes
+    // the blurred tensor (flow), the depth + normal G-buffers (B2), at drawing-buffer res.
+    // cameraFar TIGHTENED to DEPTH_FAR to match the aux depth capture's linearisation.
+    this.painterlyEdgePass = createPainterlyEdgePass({
+      resolution: [bufW, bufH],
+      texel: fullTexel,
+      tensorTexel: halfTexel,
+      cameraNear: this.camera.near,
+      cameraFar: DEPTH_FAR
+    })
+    this.painterlyEdgePass.uniforms.tTensor.value = this.tensorTargetA.texture
+    this.painterlyEdgePass.uniforms.useTensor.value = 1
+    this.painterlyEdgePass.uniforms.tDepth.value = this.sceneDepthTexture
+    this.painterlyEdgePass.uniforms.useDepth.value = 1
+    this.painterlyEdgePass.uniforms.tNormal.value = this.normalTarget.texture
+    this.painterlyEdgePass.uniforms.useNormal.value = 1
+
+    // PASS 8 — VelocitySmear: depth + prev/cur view-projection -> asymmetric wet drag, car
+    // masked sharp. tDepth from B2; tCarMask is the 1x1 black placeholder until B4 wires the
+    // real hero mask + the prev/cur matrices (inert in B3: identity matrices -> zero velocity).
+    // cameraFar TIGHTENED to DEPTH_FAR to match the depth capture.
+    this.velocitySmearPass = createVelocitySmearPass({
+      cameraNear: this.camera.near,
+      cameraFar: DEPTH_FAR
+    })
+    this.velocitySmearPass.uniforms.uTexelSize.value = new THREE.Vector2(fullTexel[0], fullTexel[1])
+    this.velocitySmearPass.uniforms.tDepth.value = this.sceneDepthTexture
+    this.velocitySmearPass.uniforms.tCarMask.value = this.carMaskPlaceholder
+
+    // PASS 9 — SubstratePaper (FINAL): frame-anchored paper granulation + tooth-light +
+    // micro-distort, Pegtop soft-light, folded dither (drawing-buffer resolution).
+    this.substratePaperPass = createSubstratePaperPass({ resolution: [bufW, bufH] })
+
+    // addPass in the EXACT STYLE_SPEC §3 order.
+    this.composer.addPass(this.preBlurPass)
+    this.composer.addPass(this.structureTensorPass)
+    this.composer.addPass(this.tensorBlurHPass)
+    this.composer.addPass(this.tensorBlurVPass)
+    this.composer.addPass(this.kuwaharaPass)
+    this.composer.addPass(this.pigmentPass)
+    this.composer.addPass(this.paintGradePass)
+    this.composer.addPass(this.painterlyEdgePass)
+    this.composer.addPass(this.velocitySmearPass)
+    this.composer.addPass(this.substratePaperPass)
+  }
+
   private createBackground(): void {
-    // Create gradient sky dome with shader for synthwave hues
-    const skyGeometry = new THREE.SphereGeometry(5000, 64, 64)
+    // FLAT MATTE sky dome (Watercolour Speed §5). A quiet tinted-gray vertical gradient:
+    // steel-violet #A7A3B1 up top easing to lit steel-blue #B8BBCE near the horizon. NO
+    // synthwave 5-band sunset, NO stars, NO emissive glow — just two flat stops lerped by
+    // height. The watercolour granulation + paper tooth land in a later post wave; here it
+    // is deliberately empty negative space. depthWrite off, toneMapped via OutputPass.
+    const skyGeometry = new THREE.SphereGeometry(5000, 32, 32)
     const skyMaterial = new THREE.ShaderMaterial({
       side: THREE.BackSide,
       depthWrite: false,
       uniforms: {
-        // Warm sunset stops, horizon (brightest) -> zenith. The fragment shader
-        // stacks them into a 5-band gradient for the classic outrun sky.
-        horizonColor: { value: ANALOGOUS_PALETTE.sunGold.clone() },
-        amberColor: { value: ANALOGOUS_PALETTE.sunAmber.clone() },
-        magentaColor: { value: ANALOGOUS_PALETTE.hotMagenta.clone() },
-        purpleColor: { value: ANALOGOUS_PALETTE.deepPurple.clone() },
-        topColor: { value: ANALOGOUS_PALETTE.skyIndigo.clone() },
-        glowIntensity: { value: 1.0 },
-        // Mood uniforms (iteration 2): perceived brightness 0..1 and the drop
-        // decay envelope 0..1. As they rise the sky brightens and the horizon
-        // glow shifts amber -> hot-pink, so the whole sky tracks the music.
-        spectralCentroidNorm: { value: 0.0 },
-        dropIntensity: { value: 0.0 }
+        topColor: { value: HARMONY.steelVioletField.clone() },    // #3 sky upper
+        horizonColor: { value: HARMONY.litSteelBlue.clone() }     // #4 sky lower band
       },
       vertexShader: `
         varying vec3 vWorldPosition;
@@ -545,95 +714,33 @@ export class ThreeScene {
       `,
       fragmentShader: `
         varying vec3 vWorldPosition;
-        uniform vec3 horizonColor;
-        uniform vec3 amberColor;
-        uniform vec3 magentaColor;
-        uniform vec3 purpleColor;
         uniform vec3 topColor;
-        uniform float glowIntensity;
-        uniform float spectralCentroidNorm;
-        uniform float dropIntensity;
-
+        uniform vec3 horizonColor;
         void main() {
+          // Height 0 at the horizon, 1 at the zenith. A single soft vertical lerp.
           float h = clamp(normalize(vWorldPosition).y * 0.5 + 0.5, 0.0, 1.0);
-
-          // Mood: slow brightness + the drop spike. Lifts/heats the sky on energy.
-          float mood = clamp(spectralCentroidNorm * 0.6 + dropIntensity * 0.5, 0.0, 1.0);
-
-          // Warm sunset, five stops: gold horizon -> amber -> hot magenta ->
-          // deep purple -> indigo zenith. Purple is delayed so the warm amber/pink
-          // ("golden hour") carries higher up the sky before it cools to purple/indigo.
-          vec3 col = mix(horizonColor, amberColor, smoothstep(0.0, 0.13, h));
-          col = mix(col, magentaColor, smoothstep(0.11, 0.34, h));
-          col = mix(col, purpleColor, smoothstep(0.36, 0.62, h));
-          col = mix(col, topColor, smoothstep(0.60, 0.98, h));
-
-          // Tight horizon glow band: the sun bleeding its warmth into the sky. Amber
-          // at rest, pushes toward hot pink as the music energizes. Kept moderate so
-          // the defined sun disc stays the brightest element (no bloom wash on drops).
-          float horizonGlow = pow(clamp(1.0 - h, 0.0, 1.0), 3.5) * glowIntensity;
-          vec3 glowTint = mix(vec3(1.0, 0.55, 0.22), vec3(1.0, 0.32, 0.55), mood);
-          col += glowTint * horizonGlow * (0.5 + dropIntensity * 0.25);
-
-          // Emotional lift: gently brighten the whole sky on energetic sections.
-          col += col * mood * 0.12;
-
+          vec3 col = mix(horizonColor, topColor, smoothstep(0.0, 0.6, h));
           gl_FragColor = vec4(col, 1.0);
         }
       `
     })
 
-    this.skyMaterial = skyMaterial
     this.skyMesh = new THREE.Mesh(skyGeometry, skyMaterial)
-    this.skyMesh.layers.set(NEON_LAYER) // glowing hero (iteration 7)
     this.scene.add(this.skyMesh)
 
-    // Add star field to keep the sky lively without a texture
-    const starGeometry = new THREE.BufferGeometry()
-    const starCount = 1800
-    const starPositions = new Float32Array(starCount * 3)
-    for (let i = 0; i < starCount; i++) {
-      const theta = Math.random() * Math.PI * 2
-      // Bias well into the upper hemisphere so stars sit above the bright sunset band
-      // rather than washing out inside the horizon glow.
-      const phi = Math.acos(THREE.MathUtils.randFloat(0.08, 1))
-      const radius = 4800
-      const x = radius * Math.sin(phi) * Math.cos(theta)
-      const y = radius * Math.cos(phi)
-      const z = radius * Math.sin(phi) * Math.sin(theta)
-      starPositions[i * 3] = x
-      starPositions[i * 3 + 1] = y
-      starPositions[i * 3 + 2] = z
-    }
-    starGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3))
-    const starMaterial = new THREE.PointsMaterial({
-      color: new THREE.Color(0xfff2e0), // warm white
-      size: 6,
-      sizeAttenuation: true,
-      transparent: true,
-      opacity: 0.85,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false
-    })
-    this.starField = new THREE.Points(starGeometry, starMaterial)
-    this.starField.layers.set(NEON_LAYER) // glowing hero (iteration 7)
-    this.scene.add(this.starField)
-
-    // The iconic big banded retro sun. A DEFINED disc (normal-blended, not additive)
-    // with a gold->magenta vertical gradient and classic outrun horizontal scanline
-    // gaps across its lower half that widen toward the bottom so it dissolves into the
-    // horizon. Normal blending + saturated (non-white) colors keep it from blowing out
-    // the frame the way the old soft additive blob did; the primary bloom pass gives it
-    // a tasteful halo. Stays OFF the hero-isolation layer so it never washes the composite.
+    // Soft achromatic-to-cool luminous DISC (Watercolour Speed §5 "Sun / horizon"): a pale
+    // wet bloom of light — paper-putty #D9D6CE core easing to the steel-violet field — with
+    // NO scanline bands, NO magenta corona, NO glow/bloom. A low-contrast value lift that
+    // dissolves into the sky wash. Normal-blended, matte, soft-edged. Composed off-centre in
+    // a later wave (B5). The mottle/granulation lands in the post stack.
     const sunGeometry = new THREE.PlaneGeometry(380, 380, 1, 1)
     const sunMaterial = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
       blending: THREE.NormalBlending,
       uniforms: {
-        topColor: { value: ANALOGOUS_PALETTE.sunGold.clone() },
-        bottomColor: { value: ANALOGOUS_PALETTE.hotMagenta.clone() },
-        dropIntensity: { value: 0.0 }
+        coreColor: { value: HARMONY.paperPutty.clone() },        // #1 pale putty core
+        edgeColor: { value: HARMONY.steelVioletField.clone() }   // #3 dissolves into field
       },
       vertexShader: `
         varying vec2 vUv;
@@ -644,116 +751,57 @@ export class ThreeScene {
       `,
       fragmentShader: `
         varying vec2 vUv;
-        uniform vec3 topColor;
-        uniform vec3 bottomColor;
-        uniform float dropIntensity;
-
+        uniform vec3 coreColor;
+        uniform vec3 edgeColor;
         void main() {
-          vec2 p = vUv - 0.5;
-          float dist = length(p);
-
-          // Crisp disc plus a soft hot-pink corona beyond it — the underlit magenta halo
-          // that makes a synthwave sun read as iconic rather than merely "a gold circle".
-          // Both MUST fade out before the inscribed-circle radius (0.5), otherwise the halo
-          // bleeds into the square plane's corners and the quad edge clips it into a box.
-          float disc = smoothstep(0.4, 0.37, dist);
-          float halo = smoothstep(0.49, 0.4, dist) * (1.0 - disc);
-
-          // Magenta-dominant two-tone: gold only across the top third, hot pink/magenta
-          // through the broad lower body so the sun sings synthwave, not just sunset gold.
-          vec3 col = mix(bottomColor, topColor, smoothstep(0.55, 0.96, vUv.y));
-
-          // Bold outrun scanline gaps across the lower half; fewer, wider bars whose gaps
-          // grow toward the bottom so the sun dissolves into the horizon.
-          float bands = 1.0;
-          if (vUv.y < 0.5) {
-            float t = (0.5 - vUv.y) / 0.5;        // 0 at center, 1 at the bottom
-            float gapFrac = mix(0.18, 0.85, t);   // gaps grow toward the bottom
-            float s = fract(vUv.y * 18.0);
-            bands = smoothstep(gapFrac - 0.05, gapFrac + 0.05, s);
-          }
-
-          vec3 haloColor = vec3(1.0, 0.16, 0.52); // hot magenta corona
-          float discA = disc * bands;
-          float alpha = max(discA, halo * 0.4);
+          float dist = length(vUv - 0.5);
+          // Soft pale disc: putty core -> steel-violet rim, fully faded before the
+          // inscribed-circle radius so the quad edge never clips a hard box.
+          float core = smoothstep(0.42, 0.0, dist);   // 1 at centre -> 0 by the rim
+          float alpha = smoothstep(0.48, 0.12, dist); // soft wet falloff, gone by 0.48
           if (alpha < 0.01) discard;
-          vec3 outCol = mix(haloColor, col, discA);
-          // Slight headroom (0.92) so the bright disc doesn't run the bloom away on drops;
-          // a gentle swell keeps it alive on emotional peaks without washing the horizon.
-          outCol *= 0.92 + dropIntensity * 0.15;
-          gl_FragColor = vec4(outCol, alpha);
+          vec3 col = mix(edgeColor, coreColor, core);
+          gl_FragColor = vec4(col, alpha);
         }
       `
     })
-    this.sunMaterial = sunMaterial
     this.sunMesh = new THREE.Mesh(sunGeometry, sunMaterial)
     this.sunMesh.position.set(0, 30, -250)
     this.sunMesh.renderOrder = 5
     this.sunMesh.frustumCulled = false
-    this.sunMesh.layers.set(NEON_LAYER) // glowing hero (iteration 7)
     this.scene.add(this.sunMesh)
 
-    // Warm sunset haze: distant geometry melts into a magenta/purple horizon glow
-    // instead of a cold teal. Pulled in a touch so the grid fades into the sunset.
-    const fogColor = ANALOGOUS_PALETTE.deepPurple.clone().lerp(ANALOGOUS_PALETTE.hotMagenta, 0.45)
-    this.scene.fog = new THREE.Fog(fogColor.getHex(), 120, 1500)
+    // Fog retinted to the steel-violet FIELD colour (§3) so the far road/ground dissolve
+    // into paper field, not into black or a synthwave magenta haze (lost horizon).
+    this.scene.fog = new THREE.Fog(HARMONY.steelVioletField.getHex(), 120, 1500)
 
-    // Signature synthwave neon floor. Large enough to reach the horizon haze and
-    // snap-following the car (see updateFloorFollow) so it scrolls infinitely rather
-    // than being left behind at the origin. Lives on NEON_LAYER so it blooms — the
-    // glowing grid is the cool neon counterpoint to the warm sunset sky.
-    const gridSize = 2000
-    const gridDivisions = gridSize / this.gridCellSize // 10-unit cells
-    const gridHelper = new THREE.GridHelper(
-      gridSize,
-      gridDivisions,
-      ANALOGOUS_PALETTE.hotMagenta.getHex(), // center cross (sits under the car)
-      ANALOGOUS_PALETTE.cyanGlow.getHex() // grid lines
-    )
-    gridHelper.position.y = 0.02
-    const gridMaterial = gridHelper.material as THREE.LineBasicMaterial
-    gridMaterial.toneMapped = false
-    gridMaterial.transparent = true
-    gridHelper.layers.set(NEON_LAYER) // glowing neon floor
-    this.gridHelper = gridHelper
-    this.scene.add(gridHelper)
+    // The synthwave neon floor GRID is deleted (no bright cyan lines). The ground plane
+    // (built below) is the warm rose-gray field that streams beneath the car.
 
-    // Dark indigo ground beneath the grid so the neon lines pop and the floor reads
-    // as wet, sunset-reflecting asphalt. Also snap-follows the car (updateFloorFollow).
+    // Warm rose-gray FIELD ground (§5 "Ground"): #CEB9B9, the warm counterweight to the
+    // cool steel sky, a desaturated matte wash. FLAT MATTE — no emissive, no metalness, no
+    // envMap. Snap-follows the car (updateFloorFollow) so the field streams beneath it. Y
+    // still effectively follows the road's RMS hills via the road mesh; the ground is the
+    // quiet field it sits on, dissolving into the field-tinted fog at distance.
     const groundGeometry = new THREE.PlaneGeometry(4000, 4000)
-    // Matte (no metalness): with no environment map, metalness only yields a harsh
-    // specular highlight of the key light that blooms into a stray hotspot. Keep it
-    // matte and dark so the neon grid + sun stay the only bright things on the floor.
     const groundMaterial = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0x0a1230),
-      emissive: ANALOGOUS_PALETTE.deepPurple,
-      emissiveIntensity: 0.22,
+      color: HARMONY.roseGrayField.clone(),
       roughness: 0.95,
       metalness: 0.0
     })
     const ground = new THREE.Mesh(groundGeometry, groundMaterial)
     ground.rotation.x = -Math.PI / 2
     ground.position.y = -0.2
-    ground.layers.set(LAYER_DEFAULT) // sharp non-neon backdrop
+    ground.layers.set(LAYER_DEFAULT)
     this.groundMesh = ground
     this.scene.add(ground)
   }
 
   /**
-   * Snap the neon floor grid and the ground plane to the car in whole-cell steps so
-   * the signature synthwave floor scrolls infinitely beneath the car. Without this the
-   * static origin-centered grid is left behind almost immediately (the "grid disappears
-   * in motion" bug). Whole-cell snapping keeps the lines phase-aligned so the motion
-   * reads as the world streaming past, not the grid sliding.
+   * Snap the ground field plane to the car so the matte field streams beneath it instead
+   * of being left behind at the world origin (the neon grid that also followed is gone).
    */
   private updateFloorFollow(center: THREE.Vector3): void {
-    const cell = this.gridCellSize
-    const snappedX = Math.round(center.x / cell) * cell
-    const snappedZ = Math.round(center.z / cell) * cell
-    if (this.gridHelper) {
-      this.gridHelper.position.x = snappedX
-      this.gridHelper.position.z = snappedZ
-    }
     if (this.groundMesh) {
       this.groundMesh.position.x = center.x
       this.groundMesh.position.z = center.z
@@ -784,10 +832,10 @@ export class ThreeScene {
         size / 2,
         size / 2
       )
-      gradient.addColorStop(0, 'rgba(150, 250, 255, 1)')
-      gradient.addColorStop(0.35, 'rgba(106, 246, 255, 0.85)')
-      gradient.addColorStop(0.75, 'rgba(30, 224, 255, 0.25)')
-      gradient.addColorStop(1, 'rgba(30, 224, 255, 0)')
+      // Soft dusty-rose mark (harmony accent #A96276), not a cyan neon glow.
+      gradient.addColorStop(0, 'rgba(169, 98, 118, 0.95)')
+      gradient.addColorStop(0.4, 'rgba(169, 98, 118, 0.6)')
+      gradient.addColorStop(1, 'rgba(169, 98, 118, 0)')
       ctx.fillStyle = gradient
       ctx.fillRect(0, 0, size, size)
     }
@@ -797,7 +845,7 @@ export class ThreeScene {
 
     const material = new THREE.SpriteMaterial({
       map: texture,
-      color: ANALOGOUS_PALETTE.cyanGlow,
+      color: HARMONY.roseMagentaAccent,
       transparent: true,
       opacity: 0.0,
       depthTest: false,
@@ -813,8 +861,8 @@ export class ThreeScene {
     sprite.scale.set(0.12, 0.12, 0.12)
     sprite.renderOrder = 999
     sprite.frustumCulled = false
-    sprite.layers.set(NEON_LAYER) // glowing hero HUD element (iteration 7)
-    sprite.layers.enable(HERO_LAYER) // also in the hero-isolation bloom (iteration 9)
+    // Foreground element -> the smear sharp-mask layer (no NEON_LAYER; there is no bloom).
+    sprite.layers.enable(HERO_LAYER)
 
     this.beatIndicator = sprite
     this.beatIndicatorMaterial = material
@@ -856,19 +904,22 @@ export class ThreeScene {
     this.carMesh = carGroup
     this.scene.add(carGroup)
 
-    // Build a quick neon fallback while the glTF loads (or if it fails)
+    // Fresh car group -> drop any stale sheen registry entries (their materials, if any,
+    // belonged to a previous car and are being replaced).
+    this.carSheenMaterials = []
+
+    // Build a quick matte fallback while the glTF loads (or if it fails)
     this.buildFallbackCar(carGroup)
-    // Hero car -> neon layer (iteration 7), incl. the freshly built fallback children.
-    ThreeScene.setLayerRecursive(carGroup, NEON_LAYER)
-    // ...and onto the hero-isolation layer (iteration 9) so it gets the exaggerated glow.
+    // Hero car -> the velocity-smear SHARP mask (HERO_LAYER), incl. the fallback children,
+    // so the car stays the one crisp "found" anchor when the smear pass lands. No
+    // NEON_LAYER tag — the bloom that layer selected for is deleted.
     ThreeScene.enableLayerRecursive(carGroup, HERO_LAYER)
 
     try {
       const template = await this.loadCarTemplate()
       if (template) {
         this.replaceCarWithTemplate(carGroup, template)
-        // Re-tag the swapped-in GLB (and rim glow) onto the neon + hero layers.
-        ThreeScene.setLayerRecursive(carGroup, NEON_LAYER)
+        // Re-tag the swapped-in GLB onto the hero sharp-mask layer.
         ThreeScene.enableLayerRecursive(carGroup, HERO_LAYER)
       }
     } catch (error) {
@@ -877,20 +928,11 @@ export class ThreeScene {
   }
 
   /**
-   * Sets `layer` on `root` and every descendant (iteration 7). Three.js tests each
-   * object's own `layers` mask against the camera independently — children do NOT
-   * inherit a parent's layer — so the hero car / obstacle groups must tag the whole
-   * subtree. Used to place all neon/emissive heroes on NEON_LAYER for the focal split.
-   */
-  private static setLayerRecursive(root: THREE.Object3D, layer: number): void {
-    root.traverse(obj => obj.layers.set(layer))
-  }
-
-  /**
-   * Enables `layer` on `root` and every descendant ADDITIVELY (iteration 9), preserving
-   * each object's existing layer membership (unlike setLayerRecursive, which replaces it).
-   * Used to tag the foreground hero objects onto HERO_LAYER in addition to NEON_LAYER so
-   * they appear in BOTH the all-layers primary render and the hero-only isolation render.
+   * Enables `layer` on `root` and every descendant ADDITIVELY, preserving each object's
+   * existing layer membership. Three.js tests each object's own `layers` mask
+   * independently — children do NOT inherit a parent's — so a hero group must tag its
+   * whole subtree. Used to tag the foreground heroes (car, obstacles, particles) onto
+   * HERO_LAYER, the velocity-smear SHARP mask, while they still render on all layers.
    */
   private static enableLayerRecursive(root: THREE.Object3D, layer: number): void {
     root.traverse(obj => obj.layers.enable(layer))
@@ -923,6 +965,10 @@ export class ThreeScene {
   }
 
   private replaceCarWithTemplate(target: THREE.Group, template: THREE.Object3D): void {
+    // The fallback car (and its sheen materials) is about to be disposed and replaced by the
+    // GLB; drop the fallback's sheen registry so updateCarSheen never touches a freed material.
+    // applyPaletteToModel(clone, true) below re-populates it from the GLB's submeshes.
+    this.carSheenMaterials = []
     this.disposeCarChildren(target)
 
     const clone = template.clone(true)
@@ -946,43 +992,23 @@ export class ThreeScene {
     this.applyPaletteToModel(clone, true)
 
     target.add(clone)
-
-    // Re-fit the rim glow to the loaded model's real on-screen footprint. Center it
-    // on the car body (lift by half its height + the ground offset) so the halo wraps
-    // the silhouette rather than sitting on the floor.
-    const glowSize = size.clone().multiplyScalar(scaleFactor)
-    const centerY = Number.isNaN(baseOffset)
-      ? glowSize.y * 0.5
-      : baseOffset + glowSize.y * 0.5
-    this.attachRimGlow(target, glowSize, centerY)
-  }
-
-  /**
-   * Builds (or rebuilds) the hero-car rim-glow shell sized to `size` and parents it
-   * under the car group at local height `centerY`, so it inherits the car transform
-   * and frames the silhouette. Replaces any previous shell (e.g. when the GLB swaps
-   * in over the fallback) to keep a single, correctly-sized halo.
-   */
-  private attachRimGlow(carGroup: THREE.Group, size: THREE.Vector3, centerY: number): void {
-    if (this.rimGlow) {
-      this.rimGlow.mesh.removeFromParent()
-      this.rimGlow.dispose()
-    }
-    this.rimGlow = new RimGlowShell(size)
-    this.rimGlow.mesh.position.y = centerY
-    carGroup.add(this.rimGlow.mesh)
+    // RimGlowShell is retired (its #00ffff->#ff00ff additive Fresnel halo is banned and
+    // would feed a bloom that no longer exists). The in-material car sheen (wired in a
+    // later wave) replaces its hero-focal role; `size`/`baseOffset` are no longer needed
+    // for a halo here.
   }
 
   private buildFallbackCar(carGroup: THREE.Group): void {
-    // Fresh emissive registry for the procedural hero car so the centroid glow drives
-    // these materials (mirrors the reset in applyPaletteToModel for the GLB path).
-    this.carEmissiveMaterials = []
-
+    // FLAT MATTE tinted-gray procedural hero (Watercolour Speed §4): a muted violet-gray
+    // body + a slightly cooler/darker cabin, NO emissive, NO additive glow box, NO rim
+    // glow. metalness 0 / high roughness so it reads as a gouache form taking the soft
+    // warm key + cool ambient. The broad in-material "helmet shine" is injected in a later
+    // wave; B1 just lays the matte base.
     const bodyGeometry = new THREE.BoxGeometry(1.2, 0.4, 2)
     const bodyMaterial = new THREE.MeshStandardMaterial({
-      color: ANALOGOUS_PALETTE.aquaCore,
-      emissive: ANALOGOUS_PALETTE.redAccent,
-      emissiveIntensity: 0.45
+      color: HARMONY.bodyVioletGray.clone(), // #7 hero car albedo (lit faces)
+      roughness: 0.85,
+      metalness: 0.0
     })
     const body = new THREE.Mesh(bodyGeometry, bodyMaterial)
     body.position.y = 0.2
@@ -990,33 +1016,21 @@ export class ThreeScene {
 
     const cabinGeometry = new THREE.BoxGeometry(0.9, 0.5, 1.2)
     const cabinMaterial = new THREE.MeshStandardMaterial({
-      color: ANALOGOUS_PALETTE.cyanGlow,
-      emissive: ANALOGOUS_PALETTE.mintHighlight,
-      emissiveIntensity: 0.35
+      color: HARMONY.bodyShadowViolet.clone(), // #8 a darker violet for the cabin
+      roughness: 0.85,
+      metalness: 0.0
     })
     const cabin = new THREE.Mesh(cabinGeometry, cabinMaterial)
     cabin.position.set(0, 0.65, -0.2)
     carGroup.add(cabin)
 
-    // Register both emissive bodies for the per-frame centroid-driven hero glow.
-    this.carEmissiveMaterials.push(
-      { material: bodyMaterial, base: bodyMaterial.emissiveIntensity },
-      { material: cabinMaterial, base: cabinMaterial.emissiveIntensity }
-    )
-
-    const glowGeometry = new THREE.BoxGeometry(1.3, 0.5, 2.1)
-    const glowMaterial = new THREE.MeshBasicMaterial({
-      color: ANALOGOUS_PALETTE.redAccent,
-      transparent: true,
-      opacity: 0.25
-    })
-    const glow = new THREE.Mesh(glowGeometry, glowMaterial)
-    glow.position.y = 0.25
-    carGroup.add(glow)
-
-    // Beat-locked rim glow sized to the fallback car silhouette (swapped for a
-    // model-fitted shell if the GLB later loads). Centered over the body+cabin.
-    this.attachRimGlow(carGroup, new THREE.Vector3(1.3, 1.0, 2.1), 0.45)
+    // A8 helmet-shine: inject the broad rolling cool-desaturate-capped sheen lobe (added to
+    // totalEmissiveRadiance post-BRDF, NOT a mirror) into the matte body + cabin and register
+    // it for the per-frame beat-breath. Materials are already matte (metalness 0 / rough 0.85)
+    // so the injector only lays the unlit paint on top. Both share one program via the
+    // injector's customProgramCacheKey.
+    this.carSheenMaterials.push(injectCarSheen(bodyMaterial))
+    this.carSheenMaterials.push(injectCarSheen(cabinMaterial))
   }
 
   private disposeCarChildren(target: THREE.Group): void {
@@ -1034,11 +1048,14 @@ export class ThreeScene {
   }
 
   private applyPaletteToModel(object: THREE.Object3D, isPlayer = false): void {
-    // Re-collecting the hero car's emissive materials from scratch each (re)build so
-    // the per-frame centroid glow never targets disposed/stale materials.
-    if (isPlayer) {
-      this.carEmissiveMaterials = []
-    }
+    // Retint any imported GLB material into the tinted-gray harmony (Watercolour Speed §4):
+    // the saturated synthwave palette is REPLACED by a desaturate-toward-violet-gray pass so
+    // the gouache read never collapses into plastic toy colours. Every material is forced
+    // FLAT MATTE (metalness 0, high roughness, no emissive, no envMap) — all "paint"
+    // character is added later in post (Kuwahara + pigment + granulation). The hero car
+    // tints toward the body violet-gray (#7); other models toward the steel-violet field
+    // (#3). The car's broad in-material sheen is injected in a later wave.
+    const target = isPlayer ? HARMONY.bodyVioletGray : HARMONY.steelVioletField
     object.traverse(obj => {
       if (obj instanceof THREE.Mesh) {
         obj.castShadow = true
@@ -1047,29 +1064,35 @@ export class ThreeScene {
         const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
         for (const material of materials) {
           if (material instanceof THREE.MeshStandardMaterial || material instanceof THREE.MeshPhysicalMaterial) {
+            // Desaturate ~0.55 toward the violet-gray family. Untextured materials get a
+            // stronger pull (lerp 0.7) so flat-coloured submeshes land squarely on the
+            // harmony; textured ones keep a little of their own value at lerp 0.55.
             const hasTexture = Boolean(material.map)
-            const baseTone = isPlayer ? ANALOGOUS_PALETTE.aquaCore : ANALOGOUS_PALETTE.tealShadow
+            material.color.lerp(target, hasTexture ? 0.55 : 0.7)
 
-            if (!hasTexture) {
-              material.color.copy(baseTone)
-            } else {
-              material.color.lerp(baseTone, 0.45)
+            // FLAT MATTE: kill emissive (no bloom feeders), kill metal/clearcoat mirror.
+            material.emissive.setRGB(0, 0, 0)
+            material.emissiveIntensity = 0
+            material.metalness = 0
+            material.roughness = Math.max(material.roughness ?? 0.85, 0.85)
+            material.envMapIntensity = 0
+            if (material instanceof THREE.MeshPhysicalMaterial) {
+              material.clearcoat = 0
             }
-
-            const isLightComponent =
-              /light|lamp|emissive/i.test(obj.name) || (material.emissiveIntensity ?? 0) > 0.2
-            const emissiveTarget = isLightComponent ? ANALOGOUS_PALETTE.redAccent : ANALOGOUS_PALETTE.cyanGlow
-
-            material.emissive.copy(emissiveTarget)
-            material.emissiveIntensity = Math.max(material.emissiveIntensity ?? 0, isLightComponent ? 0.7 : 0.3)
             material.needsUpdate = true
-            // Record the hero car's emissive baseline so renderComposite can pump it
-            // up on bright (high-centroid) moments and ease it back on calm sections.
+
+            // A8 helmet-shine (hero car only): inject the broad rolling cool-desaturate-capped
+            // sheen lobe into the now-matte material and register it for the per-frame beat-
+            // breath (updateCarSheen). MeshPhysicalMaterial extends MeshStandardMaterial, so it
+            // is accepted by the injector; the shared customProgramCacheKey compiles every
+            // submesh to one program. Done AFTER the matte forcing above so the injector lays
+            // the unlit sheen on top of a clean matte base.
             if (isPlayer) {
-              this.carEmissiveMaterials.push({ material, base: material.emissiveIntensity })
+              this.carSheenMaterials.push(injectCarSheen(material))
             }
           } else if (material instanceof THREE.MeshBasicMaterial) {
-            material.color.copy(isPlayer ? ANALOGOUS_PALETTE.cyanGlow : ANALOGOUS_PALETTE.mintHighlight)
+            // Unlit submeshes -> a flat harmony gray so nothing reads as neon.
+            material.color.lerp(target, 0.6)
             material.needsUpdate = true
           }
         }
@@ -1091,7 +1114,11 @@ export class ThreeScene {
     this.shakeResidual.set(0, 0, 0)
     this.appliedDepthScale = 1
     this.prevFocused = false
-    this.bloomFocusEnvelope = 0
+    // B4: re-baseline the velocity-smear so a freshly loaded/scrubbed track never smears from a
+    // stale previous view-projection or a discontinuous distance jump. The first frame after
+    // this is treated as a smear-reset (prev distance unknown, no cached prev VP).
+    this.prevCarDistance = null
+    this.hasPrevViewProj = false
     this.particlePool.reset()
 
     this.clearTrebleMeshes()
@@ -1152,40 +1179,22 @@ export class ThreeScene {
     roadGeometry.setIndex(indices)
     roadGeometry.computeVertexNormals()
 
-    // Road material: dark, wet, sunset-reflecting asphalt. Low roughness + higher
-    // metalness so the warm key light and neon edges streak across it like a wet
-    // night highway, while staying dark enough that the neon edges/grid read as the
-    // brightest things on the floor.
+    // FLAT MATTE sand-bridge road (Watercolour Speed §5 "Road"): the warm sienna/sand
+    // bridge #C9B49E (crushed in saturation + value) that stops the rose-ground/steel-sky
+    // pair reading as a cold pink-blue cliché. The baked-neon emissive road shader
+    // (onBeforeCompile cyan edges + lane dividers) is REPLACED wholesale with this matte
+    // material — NO emissive, NO metalness, NO baked neon lines. Lane/road edges are added
+    // later as soft, value-based, lost-and-found marks by the painterly edge pass (often
+    // petrol-teal #48677D in shadow), NEVER as bright neon grid lines here. The per-frame
+    // road morph still recomputes clean normals (morphRoadToMusic) to feed that edge pass.
     const roadMaterial = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0x0a2236),
-      emissive: ANALOGOUS_PALETTE.midnight,
-      emissiveIntensity: 0.4,
-      roughness: 0.6,
-      metalness: 0.15
+      color: HARMONY.sandRoad.clone(),
+      roughness: 0.9,
+      metalness: 0.0
     })
-    // Bake glowing neon edges + lane-divider lines straight into the road's emissive
-    // using the across-width UV.x. Baking (rather than separate strip meshes) means
-    // they ride the per-frame road morph perfectly and need no disposal — the road IS
-    // the Wipeout/Tron light-track. USE_UV forces the vUv varying through the standard
-    // shader even though the road carries no texture map.
-    roadMaterial.defines = { USE_UV: '' }
-    roadMaterial.onBeforeCompile = (shader) => {
-      shader.fragmentShader = shader.fragmentShader.replace(
-        '#include <emissivemap_fragment>',
-        `#include <emissivemap_fragment>
-        float ru = vUv.x;
-        float rEdge = smoothstep(0.045, 0.0, ru) + smoothstep(0.955, 1.0, ru);
-        float rDiv = smoothstep(0.012, 0.0, abs(ru - 0.3333)) + smoothstep(0.012, 0.0, abs(ru - 0.6667));
-        // Fade the neon down the track so the long edge lines don't accumulate into a
-        // blown-out bloom hotspot at the vanishing point — bright by the car, hazing out
-        // into the distance (reads as natural atmospheric depth too).
-        float rFade = 1.0 - smoothstep(35.0, 300.0, length(vViewPosition));
-        totalEmissiveRadiance += (vec3(0.25, 0.85, 1.0) * rEdge * 1.35 + vec3(0.6, 0.95, 1.0) * rDiv * 0.6) * rFade;`
-      )
-    }
 
     this.roadMesh = new THREE.Mesh(roadGeometry, roadMaterial)
-    this.roadMesh.layers.set(LAYER_DEFAULT) // sharp non-neon geometry (iteration 7)
+    this.roadMesh.layers.set(LAYER_DEFAULT)
     this.scene.add(this.roadMesh)
 
     // Cache the immutable base vertex positions for per-frame spectral elevation
@@ -1206,18 +1215,19 @@ export class ThreeScene {
   }
 
   /**
-   * Fires a particle burst from the car marking an emotional peak (drop entry).
-   * The controller supplies the musical drivers it owns — drop strength (count)
-   * and spectral centroid (brightness->color) — while the renderer owns the pool,
-   * the car's world transform, and the palette mapping (cyan when cool/dark,
-   * magenta when bright/hot). Emitting slightly above the car fountains embers up
-   * into the bloom. Count is scaled by strength so bigger drops spray harder.
+   * Fires a pigment-spatter burst from the car marking an emotional peak (drop entry).
+   * The controller supplies the musical drivers it owns — drop strength (count) and
+   * spectral centroid (brightness, biasing ink warmth) — while the renderer owns the pool
+   * and the car's world transform. The particle pool renders all bursts as tinted near-
+   * black ink flecks and only reads the passed colour's warmth to pick the warm/cool ink,
+   * so this throws a spray of dark spatter, not glowing embers. Count scales with strength.
    */
   emitDropBurst(dropStrength: number, spectralCentroid: number): void {
     const count = Math.round(dropStrength * PARTICLES_PER_DROP_UNIT)
     if (count <= 0) return
 
-    // Centroid<0.4 -> cyan, >0.6 -> magenta, with a smooth blend across the middle.
+    // Centroid biases the INK temperature: cool steel-blue ink below 0.4, warm rose ink
+    // above 0.6 (the pool maps these to the two near-blacks #20211C / #1E1B22).
     const t = THREE.MathUtils.clamp((spectralCentroid - 0.4) / 0.2, 0, 1)
     const color = BURST_COLOR_COOL.clone().lerp(BURST_COLOR_HOT, t)
 
@@ -1227,14 +1237,13 @@ export class ThreeScene {
   }
 
   /**
-   * Fires a tiny treble-transient shimmer off the hero car (iteration 7) — the missing
-   * music-FREQUENCY signal. The controller crosses a detected treble peak and supplies
-   * its normalized 0..1 `strength`; the renderer owns the pool, the car transform, and
-   * the palette (cyan when cool, magenta when hot, matching the sky/rim sweep). Only
-   * 6-8 fast, short-lived particles spawn from the car + a small random offset (so they
-   * never cluster with the larger drop/collision bursts), reading as a quick sparkle
-   * on hi-hats/cymbals/snare sizzle that pumps straight into the bloom — orthogonal to
-   * the beat punch (FOV/bloom pulse) and the slow mood swell.
+   * Fires a tiny treble-transient pigment flick off the hero car (iteration 7) — the
+   * music-FREQUENCY signal. The controller crosses a detected treble peak and supplies its
+   * normalized 0..1 `strength`; the renderer owns the pool and the car transform. Only 6-8
+   * fast, short-lived flecks spawn from the car + a small random offset (so they never
+   * cluster with the larger drop/collision bursts), reading as a quick flick of tinted
+   * near-black ink spatter on hi-hats/cymbals/snare sizzle — orthogonal to the beat FOV
+   * punch and the slow mood swell. Centroid only biases the ink temperature.
    */
   emitTrebleBurst(strength: number, spectralCentroid: number): void {
     const s = THREE.MathUtils.clamp(strength, 0, 1)
@@ -1243,7 +1252,8 @@ export class ThreeScene {
     )
     if (count <= 0) return
 
-    // Cool moods spark cyan, hot moods magenta (same blend window as the drop burst).
+    // Centroid biases the INK temperature (cool steel-blue vs warm rose), same window as
+    // the drop burst; the pool maps it to the two near-blacks.
     const t = THREE.MathUtils.clamp((spectralCentroid - 0.4) / 0.2, 0, 1)
     const color = BURST_COLOR_COOL.clone().lerp(BURST_COLOR_HOT, t)
 
@@ -1296,9 +1306,9 @@ export class ThreeScene {
           hazardGroup.add(sword)
         }
 
-        // Obstacles are emissive neon heroes -> neon layer (iteration 7) + the
-        // hero-isolation layer (iteration 9) so their blades flare in the focal bloom.
-        ThreeScene.setLayerRecursive(hazardGroup, NEON_LAYER)
+        // Obstacles are foreground narrative heroes -> the velocity-smear SHARP mask
+        // (HERO_LAYER) so the signal-red blade stays crisp against the streaking world.
+        // No NEON_LAYER tag — the bloom that layer selected for is deleted.
         ThreeScene.enableLayerRecursive(hazardGroup, HERO_LAYER)
         this.scene.add(hazardGroup)
         this.trebleMeshes.push(hazardGroup)
@@ -1333,8 +1343,11 @@ export class ThreeScene {
   private cloneSwordTemplate(template: THREE.Object3D): THREE.Object3D {
     const clone = template.clone(true)
 
-    this.applyPaletteToModel(clone)
-
+    // The sword is the ONE saturated accent (Watercolour Speed §5): a matte signal-red
+    // #D6443B blade (its dark accent stroke is added later by the painterly edge pass), on
+    // a desaturated violet-gray hilt/guard. We retint inline (NOT via applyPaletteToModel)
+    // so the blade detection reads the ORIGINAL material colour before any desaturation,
+    // then force everything FLAT MATTE — no emissive, no transmission, no metalness.
     clone.traverse(obj => {
       if (obj instanceof THREE.Mesh) {
         obj.castShadow = true
@@ -1348,17 +1361,23 @@ export class ThreeScene {
           ) {
             const isBlade = material.color.r > material.color.g * 1.1 && material.color.r > material.color.b
             if (isBlade) {
-              material.color.copy(ANALOGOUS_PALETTE.redAccent)
-              material.emissive.copy(ANALOGOUS_PALETTE.redAccent)
-              material.emissiveIntensity = 1.8
-              material.transparent = true
-              material.opacity = Math.max(material.opacity ?? 0.72, 0.72)
-              if ('transmission' in material) {
-                // @ts-expect-error transmission exists on physical materials
-                material.transmission = Math.max(material.transmission ?? 0.35, 0.35)
-              }
+              // The single saturated hit — matte signal red, NO emissive glow.
+              material.color.copy(HARMONY.signalRed)
+            } else {
+              // Hilt / guard -> desaturated violet-gray, in the harmony.
+              material.color.lerp(HARMONY.bodyShadowViolet, 0.6)
             }
 
+            // FLAT MATTE for the whole sword.
+            material.emissive.setRGB(0, 0, 0)
+            material.emissiveIntensity = 0
+            material.metalness = 0
+            material.roughness = Math.max(material.roughness ?? 0.85, 0.85)
+            material.envMapIntensity = 0
+            material.transparent = false
+            if (material instanceof THREE.MeshPhysicalMaterial) {
+              material.transmission = 0
+            }
             material.needsUpdate = true
           }
         }
@@ -1391,18 +1410,64 @@ export class ThreeScene {
     this.camera.updateProjectionMatrix()
     this.renderer.setSize(width, height)
     this.composer.setSize(width, height)
-    this.bloomPass.setSize(width, height)
-    this.smaaPass.setSize(width, height)
-    // The neon-isolation pipeline (iteration 9) renders at NEON_RESOLUTION_SCALE of the
-    // primary (polish pass): half linear res for the low-frequency hero bloom, ~4x cheaper
-    // on the second render. The additive composite samples it with normalized UVs (upscale).
-    const dpr = Math.min(window.devicePixelRatio, 2)
-    this.neonRenderTarget.setSize(
-      Math.floor(width * dpr * NEON_RESOLUTION_SCALE),
-      Math.floor(height * dpr * NEON_RESOLUTION_SCALE)
-    )
-    this.neonComposer.setSize(width * NEON_RESOLUTION_SCALE, height * NEON_RESOLUTION_SCALE)
-    this.neonBloomPass.setSize(width * NEON_RESOLUTION_SCALE, height * NEON_RESOLUTION_SCALE)
+
+    // --- Aux G-buffers (Watercolour Speed B2): reallocate BOTH the normal target and its
+    // attached DepthTexture to the new drawing-buffer resolution so they stay 1:1 with the
+    // composer's colour target. RenderTarget.setSize resizes the colour texture but NOT the
+    // attached depth texture, so the DepthTexture image dims are updated explicitly (and its
+    // GPU storage is reallocated on the next render via the target's dispose()).
+    const pixelRatio = Math.min(window.devicePixelRatio, 2)
+    const bufW = Math.floor(width * pixelRatio)
+    const bufH = Math.floor(height * pixelRatio)
+    this.sceneDepthTexture.image.width = bufW
+    this.sceneDepthTexture.image.height = bufH
+    this.sceneDepthTexture.needsUpdate = true
+    this.normalTarget.setSize(bufW, bufH)
+
+    // --- Painterly Track-A passes (Watercolour Speed B3): update EVERY resolution/texel/
+    // tensorTexel uniform against the new DRAWING-BUFFER dims so the kernels stay resolution-
+    // stable, and reallocate the half-res tensor side-chain targets. All texel/resolution
+    // uniforms below are in drawing-buffer pixels (bufW/bufH = width*min(dpr,2)).
+    const halfW = Math.max(1, Math.floor(bufW / 2))
+    const halfH = Math.max(1, Math.floor(bufH / 2))
+    this.tensorTargetA.setSize(halfW, halfH)
+    this.tensorTargetB.setSize(halfW, halfH)
+
+    const fullTexel: [number, number] = [1 / bufW, 1 / bufH]
+    const halfTexel: [number, number] = [1 / halfW, 1 / halfH]
+
+    // PreBlur / StructureTensor sample the full-res colour -> full-res texel.
+    ThreeScene.setVec2Uniform(this.preBlurPass.uniforms.texel, fullTexel)
+    ThreeScene.setVec2Uniform(this.structureTensorPass.uniforms.texel, fullTexel)
+    // TensorBlur runs on the half-res tensor target -> half-res texel.
+    ThreeScene.setVec2Uniform(this.tensorBlurHPass.uniforms.texel, halfTexel)
+    ThreeScene.setVec2Uniform(this.tensorBlurVPass.uniforms.texel, halfTexel)
+    // Kuwahara: colour texel (full) + tensor texel (half) for the bilinear upscale.
+    ThreeScene.setVec2Uniform(this.kuwaharaPass.uniforms.texel, fullTexel)
+    ThreeScene.setVec2Uniform(this.kuwaharaPass.uniforms.tensorTexel, halfTexel)
+    // Pigment / SubstratePaper use a `resolution` (pixel size), not a texel.
+    ThreeScene.setVec2Uniform(this.pigmentPass.uniforms.resolution, [bufW, bufH])
+    ThreeScene.setVec2Uniform(this.substratePaperPass.uniforms.resolution, [bufW, bufH])
+    // PainterlyEdge: pixel resolution + colour texel + half-res tensor texel.
+    ThreeScene.setVec2Uniform(this.painterlyEdgePass.uniforms.uResolution, [bufW, bufH])
+    ThreeScene.setVec2Uniform(this.painterlyEdgePass.uniforms.texel, fullTexel)
+    ThreeScene.setVec2Uniform(this.painterlyEdgePass.uniforms.tensorTexel, halfTexel)
+    // VelocitySmear: full-res texel for the noise/wobble sampling.
+    ThreeScene.setVec2Uniform(this.velocitySmearPass.uniforms.uTexelSize, fullTexel)
+  }
+
+  /**
+   * Writes (x, y) into a vec2 uniform whose `.value` may be either a THREE.Vector2 (the
+   * common factory form) or a plain [x, y] array (the Kuwahara texel/tensorTexel form). Sets
+   * Vector2s in place and reassigns array-valued uniforms, so a single call site can update
+   * any of the painterly passes' resolution/texel uniforms uniformly.
+   */
+  private static setVec2Uniform(uniform: { value: unknown }, xy: [number, number]): void {
+    if (uniform.value instanceof THREE.Vector2) {
+      uniform.value.set(xy[0], xy[1])
+    } else {
+      uniform.value = [xy[0], xy[1]]
+    }
   }
 
   private handleObstacleCollision(carPosition: THREE.Vector3, gameState: GameState): void {
@@ -1443,7 +1508,8 @@ export class ThreeScene {
       gameState.car.lastShakeTime = now
 
       const burstColor = gameState.car.spectralCentroid > 0.5 ? BURST_COLOR_HOT : BURST_COLOR_COOL
-      // Emit just above the contact point so embers spray off the car/blade.
+      // Emit just above the contact point so a spray of tinted-near-black pigment spatter
+      // (a "wet drag" pulse) flicks off the car/blade — not the deleted red bloom flash.
       const burstPos = carPosition.clone()
       burstPos.y += 0.4
       this.particlePool.emitBurst(PARTICLES_PER_COLLISION, burstPos, 9, burstColor, PARTICLE_LIFETIME_COLLISION)
@@ -1453,10 +1519,14 @@ export class ThreeScene {
   }
 
   /**
-   * Evaluates the beat-sync envelopes from the audio clock and applies them to the
-   * camera FOV and bloom strength, then renders the composed (bloom + tone-mapped)
-   * frame. Centralizing the render call here means every early-return path in
-   * renderFrame still gets bloom + tone mapping + beat reactivity for free.
+   * Evaluates the per-frame camera/music gestures (beat FOV punch, drop FOV widening, beat
+   * indicator, treble spatter, particle sim, camera shake) and the painterly post-stack music
+   * drivers (B4: car-sheen breath, Kuwahara q ease-down, velocity-smear length/kick, edge
+   * breakup widen, LUT accent-chroma push), then renders the composed (tone-mapped + painted)
+   * frame. Centralizing the render call here means every early-return path in renderFrame still
+   * gets tone mapping + the camera reactivity for free. The velocity-smear view-projection is
+   * taken from the SHAKEN camera transform (the exact one the colour frame renders with) and
+   * its uPrevViewProj is cached AFTER render; the smear is zeroed on seek/large-delta frames.
    */
   private renderComposite(gameState: GameState): void {
     // Milliseconds since the last beat onset. lastBeatTime is a performance.now()
@@ -1467,20 +1537,18 @@ export class ThreeScene {
     const beatAgeMs = performance.now() - gameState.car.lastBeatTime
     const strength = gameState.car.beatStrength
 
-    // Mood signals (smoothed upstream by the controller). centroid drives the slow,
-    // sectional warmth; dropIntensity is the fast cinematic spike on drop entry; flux
-    // (treble volatility) drives the chromatic-aberration shimmer baseline below.
+    // Mood signals (smoothed upstream by the controller). centroid is the slow sectional
+    // brightness; dropIntensity is the fast cinematic spike on drop entry. (The synthwave
+    // bloom/CA/sky-hue mood bindings that also read flux were ripped out; the painterly
+    // music drivers — sheen breath, smear length, edge breakup, accent chroma — are applied
+    // in updatePainterlyMusicDrivers below, all within the saturation discipline.)
     const centroid = gameState.car.spectralCentroid
     const dropIntensity = gameState.car.dropIntensity
-    const flux = gameState.car.spectralFlux
 
-    // --- FOV punch: fast attack to a strength-scaled peak, eased decay back to base.
-    // Iteration 2 adds a drop-driven expansion ON TOP so the camera reacts to both
-    // rhythm (beat) and the music's emotional peaks (drops).
-    // Beat selectivity (iteration 6): the FOV punch only FIRES on strong beats
-    // (car.beatFires). Its amplitude still scales by strength, so a 0.9 kick punches
-    // harder than a 0.6 snare, but weak beats produce zero FOV delta. The drop-driven
-    // expansion below is unaffected and keeps reacting to emotional peaks.
+    // --- FOV punch: fast attack to a strength-scaled peak, eased decay back to base, with
+    // the drop-driven expansion stacked on top so the camera reacts to both rhythm and the
+    // music's emotional peaks. Gated to strong beats (car.beatFires). This is a CAMERA
+    // gesture (kept) — distinct from the deleted bloom/CA gestures.
     let fovOffset = 0
     if (gameState.car.beatFires && Number.isFinite(beatAgeMs) && beatAgeMs >= 0) {
       if (beatAgeMs < FOV_ATTACK_MS) {
@@ -1493,13 +1561,10 @@ export class ThreeScene {
         fovOffset = (1 - d * d) * FOV_PUNCH * strength
       }
     }
-    // Cinematic FOV widening paired with the camera pull-back (iteration 9). The depth
-    // scale sits at 1.0 at rest and rises to ~1.15 during a drop; we map that excess over
-    // the controller's [1.0, DROP_DEPTH_SCALE=1.15] band to a 0..1 factor and scale
-    // FOV_DROP_BOOST_MAX (≈7°) by it, so the lens widens in lock-step with the camera
-    // easing back — a single complementary "open up into the vista" gesture. Read directly
-    // off the same eased depth the camera uses (this.appliedDepthScale) so FOV and distance
-    // never desync. Clamped to [0,1] so it contributes nothing at rest.
+    // Cinematic FOV widening paired with the camera pull-back. The depth scale sits at 1.0
+    // at rest and rises to ~1.15 during a drop; we map that excess to a 0..1 factor and
+    // scale FOV_DROP_BOOST_MAX by it, so the lens widens in lock-step with the camera easing
+    // back — read off the same eased depth (this.appliedDepthScale) so they never desync.
     const depthExcess = THREE.MathUtils.clamp((this.appliedDepthScale - 1) / 0.15, 0, 1)
     const targetFov = BASE_FOV + fovOffset + dropIntensity * FOV_DROP_PUNCH + depthExcess * FOV_DROP_BOOST_MAX
     if (Math.abs(this.camera.fov - targetFov) > 0.01) {
@@ -1507,159 +1572,216 @@ export class ThreeScene {
       this.camera.updateProjectionMatrix()
     }
 
-    // --- Bloom pulse: spike on the beat, exponential-ish decay back to baseline.
-    // Beat selectivity (iteration 6): gated to strong beats only, so weak beats do not
-    // pump the glow. The drop-driven bloom widening below is unaffected.
-    let bloomBoost = 0
-    if (gameState.car.beatFires && Number.isFinite(beatAgeMs) && beatAgeMs >= 0 && beatAgeMs < BLOOM_DECAY_MS) {
-      const d = beatAgeMs / BLOOM_DECAY_MS
-      bloomBoost = (1 - d) * (1 - d) * BLOOM_BEAT_BOOST * strength
-    }
-    // Mood-scaled base glow (iteration 7): the resting bloom strength now BREATHES with
-    // the emotional arc — tight (COOL) on cool/dim intros, blown-out (HOT) on bright
-    // drops — driven by the same smoothed spectral centroid that warms the sky/grid. The
-    // per-beat pulse + drop expansion STACK on top, so rhythm punch and emotional peaks
-    // stay visible and distinct from the slow mood swell.
-    const bloomBase = THREE.MathUtils.lerp(BLOOM_STRENGTH_COOL, BLOOM_STRENGTH_HOT, centroid)
-
-    // Cinematic bloom SUSTAIN (iteration 9). Ease a 0..1 focus envelope toward 1 while the
-    // controller's drop-focus flag is held and toward 0 on exit, with a fast attack
-    // (~150ms) and a slower release (~400ms). This LIFTS the bloom base toward HOT (1.6)
-    // for the WHOLE drop — not just the entry beat — so the glow holds through the moment
-    // and eases out cleanly afterward, reinforcing the cinematic "hold" of the peak. It
-    // composes additively with the centroid-driven base via lerp-to-HOT, so on already-hot
-    // sections it is a gentle confirm rather than a double-count.
-    const focusAttack = this.lastFrameDelta > 0 ? 1 - Math.exp(-this.lastFrameDelta / 0.15) : 0.18
-    const focusRelease = this.lastFrameDelta > 0 ? 1 - Math.exp(-this.lastFrameDelta / 0.4) : 0.08
-    const focusTarget = gameState.isFocusedOnDrop ? 1 : 0
-    const focusRate = gameState.isFocusedOnDrop ? focusAttack : focusRelease
-    this.bloomFocusEnvelope += (focusTarget - this.bloomFocusEnvelope) * focusRate
-    const sustainedBase = THREE.MathUtils.lerp(bloomBase, BLOOM_STRENGTH_HOT, this.bloomFocusEnvelope)
-
-    this.bloomPass.strength = sustainedBase + bloomBoost + dropIntensity * 0.5
-    // Bloom threshold tracks mood: tight/controlled on cool sections, looser (more
-    // of the frame glows) as the music brightens or drops. Drives the "wider glow
-    // on hot moods" feel without touching the beat-sync strength envelope.
-    const warmth = Math.min(1, centroid + dropIntensity * 0.6)
-    this.bloomPass.threshold = THREE.MathUtils.lerp(
-      BLOOM_THRESHOLD_COOL,
-      BLOOM_THRESHOLD_WARM,
-      warmth
-    )
-
-    // --- Neon-isolation bloom drive (iteration 9). The dedicated neon composer's bloom
-    // swells with the drop envelope so the hero car + particles flare on emotional peaks,
-    // and its threshold tracks mood DOWNWARD (cool->warm) so the car's emissive/rim edges
-    // catch the glow ever more aggressively as the music brightens — a focal hierarchy
-    // distinct from the primary road/grid bloom. The additive composite strength likewise
-    // lifts on drops so the flare lands as part of the unified cinematic moment, then eases
-    // back to a tasteful resting glow. All driven from the same mood/drop signals so the
-    // two bloom layers (full-scene + neon-isolated) stay perceptually synchronized.
-    this.neonBloomPass.strength = THREE.MathUtils.lerp(
-      NEON_BLOOM_STRENGTH_BASE,
-      NEON_BLOOM_STRENGTH_DROP,
-      dropIntensity
-    )
-    this.neonBloomPass.threshold = THREE.MathUtils.lerp(
-      NEON_BLOOM_THRESHOLD_COOL,
-      NEON_BLOOM_THRESHOLD_WARM,
-      warmth
-    )
-    this.neonCompositePass.uniforms.strength.value = THREE.MathUtils.lerp(
-      NEON_COMPOSITE_STRENGTH_BASE,
-      NEON_COMPOSITE_STRENGTH_DROP,
-      dropIntensity
-    )
-
-    // --- Sky + grid mood binding.
-    this.applyMoodVisuals(centroid, dropIntensity)
-
-    // --- Rhythm-locked beat indicator glow (bottom-right).
+    // --- Rhythm-locked beat indicator (bottom-right corner element).
     this.updateBeatIndicator(gameState)
 
-    // --- Collision "lens kick" + hero-car flash envelope. 1 at the instant of an
-    // impact, decaying to 0 over CHROMATIC_DECAY_MS, phased off the renderer's own
-    // collision timestamp (set in handleObstacleCollision) so no extra game state is
-    // needed and there is no risk of cross-system mutation. Drives both the chromatic
-    // aberration spike and the rim-glow white flash from one shared envelope.
-    const collisionAge = performance.now() - this.lastCollisionTime
-    let collisionEnvelope = 0
-    if (this.lastCollisionTime > 0 && collisionAge >= 0 && collisionAge < CHROMATIC_DECAY_MS) {
-      const d = collisionAge / CHROMATIC_DECAY_MS
-      collisionEnvelope = (1 - d) * (1 - d)
-    }
-
-    // --- Chromatic aberration is now a music-driven shimmer (iteration 5): a two-stage
-    // flux baseline that is always present (treble transients fringe the frame) with the
-    // collision lens-kick STACKED on top via max(), so impacts still punch but no longer
-    // own the effect. Stage 1 (flux below the spike knee) lerps MIN..MAX; stage 2 (above
-    // the knee, an energy peak) ramps harder by SPIKE_MAX across the remaining range.
-    const fluxBaseline =
-      flux < CHROMATIC_FLUX_SPIKE_THRESHOLD
-        ? CHROMATIC_FLUX_BASELINE_MIN +
-          (flux * (CHROMATIC_FLUX_BASELINE_MAX - CHROMATIC_FLUX_BASELINE_MIN)) /
-            CHROMATIC_FLUX_SPIKE_THRESHOLD
-        : CHROMATIC_FLUX_BASELINE_MAX +
-          (Math.max(0, flux - CHROMATIC_FLUX_SPIKE_THRESHOLD) * CHROMATIC_FLUX_SPIKE_MAX) /
-            (1 - CHROMATIC_FLUX_SPIKE_THRESHOLD)
-    const totalCA = Math.max(fluxBaseline, collisionEnvelope * CHROMATIC_COLLISION_PEAK)
-    this.chromaticPass.uniforms.intensity.value = THREE.MathUtils.clamp(totalCA, 0, 1.2)
-
-    // --- Animate film grain (re-seed the noise each frame so it shimmers like film).
-    this.filmGrainPass.uniforms.time.value = (performance.now() % 100000) / 1000
-
-    // --- Beat-locked, mood-colored hero-car rim glow. Pulses on kicks (beatStrength),
-    // swells with brightness (spectralCentroid), and washes hot-white on collision.
-    this.rimGlow?.update(gameState.car.beatStrength, centroid, collisionEnvelope)
-
-    // --- Hero-car emissive isolation (iteration 5). Scale each captured body-material
-    // base emissive by a centroid-driven multiplier so the car body glows hotter on
-    // bright emotional peaks and eases back to a calm floor in quiet passages.
-    if (this.carEmissiveMaterials.length > 0) {
-      const carEmissiveScale = CAR_EMISSIVE_CENTROID_BASE + CAR_EMISSIVE_CENTROID_RANGE * centroid
-      for (const entry of this.carEmissiveMaterials) {
-        entry.material.emissiveIntensity = entry.base * carEmissiveScale
-      }
-    }
-
-    // --- Treble shimmer (iteration 7): the controller sets a one-frame trebleFires
-    // pulse the instant the audio clock crosses a high-frequency transient. Emit the
-    // sparkle here (centrally, so every render path consumes it exactly once) and clear
-    // the flag so a paused/early-return frame can't re-emit a stale pulse.
+    // --- Treble pulse (Watercolour Speed restyle): the controller sets a one-frame
+    // trebleFires pulse the instant the audio clock crosses a high-frequency transient.
+    // Emit the pigment-spatter flick here (centrally, so every render path consumes it
+    // exactly once) and clear the flag so a paused/early-return frame can't re-emit a stale
+    // pulse.
     if (gameState.car.trebleFires) {
       this.emitTrebleBurst(gameState.car.trebleStrength, centroid)
       gameState.car.trebleFires = false
     }
 
-    // --- Advance the GPU particle simulation (drop + collision + treble bursts).
+    // --- Painterly post-stack music drivers (B4): sheen breath, Kuwahara q ease-down, smear
+    // length/kick, edge breakup widen, accent-chroma push. All within the saturation
+    // discipline (no flashes, no bloom). Computes the smear RESET flag (seek/large-Δ) and
+    // applies the non-matrix uniforms; the smear's view-projection matrices are set below,
+    // from the SHAKEN transform.
+    const smearReset = this.updatePainterlyMusicDrivers(gameState)
+
+    // --- Advance the GPU pigment-spatter simulation (drop + collision + treble bursts).
     this.particlePool.update(this.lastFrameDelta)
 
-    // --- Camera shake: a transient world-space offset added to the camera right
-    // before rendering, then reverted, so it never accumulates into the lerp-driven
-    // chase position on the next frame (clean settle, no residual drift). Applied once
-    // here so BOTH the neon-isolation render and the primary render share the exact same
-    // shaken camera transform (they must stay pixel-aligned for the additive composite).
+    // --- Camera shake: a transient world-space offset added to the camera right before
+    // rendering, then reverted, so it never accumulates into the lerp-driven chase position
+    // on the next frame (clean settle, no residual drift). The velocity-smear pass reads its
+    // view-projection from this same shaken transform.
     this.applyCameraShake(gameState)
-    this.renderNeonIsolation()
+
+    // --- Aux G-buffers (Watercolour Speed B2): fill the depth + normal targets with the
+    // SAME shaken camera the colour frame is about to render with, so tDepth/tNormal stay
+    // pixel-aligned with the painted image. renderAuxTargets ALSO captures this frame's
+    // shaken view-projection into curViewProj — built with the SAME tightened DEPTH_FAR
+    // projection the DepthTexture is written under, so the smear's unprojection is geometric-
+    // ally consistent with the depth it samples (using the full-far projection here would
+    // mis-unproject the DEPTH_FAR-captured depth). The shake offset is subtracted after.
+    this.renderAuxTargets()
+
+    // --- VelocitySmear view-projection (B4): uInvCurViewProj is the inverse of this frame's
+    // shaken VP (the smear unprojects depth with it); uPrevViewProj holds the PREVIOUS frame's
+    // shaken VP (cached after the previous render). On the first frame (no prev) or a seek/
+    // large-Δ frame, force uReset=1 so a stale/absent prev-matrix can't drag the whole screen.
+    const smearU = this.velocitySmearPass.uniforms
+    ;(smearU.uInvCurViewProj.value as THREE.Matrix4).copy(this.curViewProj).invert()
+    if (this.hasPrevViewProj) {
+      ;(smearU.uPrevViewProj.value as THREE.Matrix4).copy(this.prevViewProj)
+    } else {
+      ;(smearU.uPrevViewProj.value as THREE.Matrix4).copy(this.curViewProj)
+    }
+    smearU.uReset.value = smearReset || !this.hasPrevViewProj ? 1 : 0
+
     this.composer.render()
+
+    // Cache this frame's shaken VP for next frame's uPrevViewProj (copied AFTER render so it is
+    // exactly the transform this frame painted with).
+    this.prevViewProj.copy(this.curViewProj)
+    this.hasPrevViewProj = true
+
     this.camera.position.sub(this.shakeOffset)
   }
 
   /**
-   * Renders the HERO_LAYER-only pass into `neonRenderTarget` (iteration 9). Temporarily
-   * masks the camera to HERO_LAYER so only the FOREGROUND heroes draw (car + rim glow,
-   * particles, beat indicator, sword obstacles) — explicitly NOT the sky/sun/starfield,
-   * which would otherwise fill the frame and wash the additive composite — runs them
-   * through the exaggerated neon bloom, then restores the camera to all-layers so the
-   * subsequent primary render draws the full world. The resulting texture is wired into
-   * `neonCompositePass` (set once at construction; the target's texture handle is stable)
-   * and additively blended onto the primary image as the final primary pass. Allocation-
-   * free and flicker-free: the same shaken camera transform is shared with both renders.
+   * Per-frame painterly music drivers (Watercolour Speed B4). Expresses the music THROUGH the
+   * medium — never brightness or bloom — by easing a small set of painterly uniforms each
+   * frame:
+   *
+   *  - CAR SHEEN: updateCarSheen drives uSheenStrength ≈ 0.45 + beat*0.5 + centroid*0.25
+   *    (smoothed inside the module) so the broad helmet-shine lobe BREATHES on the beat as a
+   *    saturation/value pulse of the existing hue; uSheenDir is rolled by the camera bank so the
+   *    lobe sweeps the body as the car leans.
+   *  - KUWAHARA q: eased DOWN from KUWAHARA_Q_REST toward KUWAHARA_Q_DROP by dropIntensity so the
+   *    gouache strokes broaden/bleed (a WETTER look) on drops.
+   *  - VELOCITY SMEAR: uSpeedMul = speedMultiplier (drop acceleration lengthens the wet drag);
+   *    uBeatKick is a brief "wet drag" pulse off the beat envelope; uMaxSmear opens a touch on
+   *    drops; uStrength eases toward a speed/drop target; uVelocityScale keeps the streak
+   *    framerate-stable.
+   *  - PAINTERLY EDGE: uMusic eased toward dropIntensity so the breakup threshold WIDENS (more
+   *    "found" ink — the painter pressing harder) on drops; uTime advanced for the slow crawl.
+   *  - PAINT-GRADE LUT: a micro uHueShift toward rose on LOUD passages (accent-chroma push),
+   *    eased so the frame never snaps.
+   *
+   * Returns whether THIS frame is a smear-reset frame (a seek / rewind / tab-throttle re-
+   * baseline, detected as a large jump in the clamped car distance): the caller forces the
+   * velocity-smear uReset on so a stale prev view-projection can't drag the whole screen.
    */
-  private renderNeonIsolation(): void {
-    this.camera.layers.set(HERO_LAYER)
-    this.neonComposer.render()
-    this.camera.layers.enableAll()
+  private updatePainterlyMusicDrivers(gameState: GameState): boolean {
+    const car = gameState.car
+    const dt = this.lastFrameDelta
+    const dropIntensity = THREE.MathUtils.clamp(car.dropIntensity, 0, 1)
+    const centroid = THREE.MathUtils.clamp(car.spectralCentroid, 0, 1)
+
+    // Beat "breath/drag" envelope: a fast ease-out off the last STRONG beat, phased off the
+    // performance.now() timestamp the controller stamps (same idiom as the FOV punch). Gated to
+    // strong beats (beatFires) so weak hi-hats don't pump the sheen/smear.
+    const beatAgeMs = performance.now() - car.lastBeatTime
+    let beatPulse = 0
+    if (car.beatFires && Number.isFinite(beatAgeMs) && beatAgeMs >= 0 && beatAgeMs < SMEAR_BEAT_KICK_MS) {
+      const d = beatAgeMs / SMEAR_BEAT_KICK_MS
+      beatPulse = (1 - d) * (1 - d) * THREE.MathUtils.clamp(car.beatStrength, 0, 1)
+    }
+
+    // --- CAR SHEEN: roll the view-space lobe direction by the camera bank so the broad shine
+    // sweeps across the body as the car leans (spec §4), then breathe each registered material.
+    // Base is the module default (up-and-toward-camera); cameraRoll (radians) tilts it laterally.
+    const roll = this.cameraRoll
+    this.sheenDir.set(
+      0.35 + Math.sin(roll) * 0.25,
+      0.8,
+      0.45
+    ).normalize()
+    for (const entry of this.carSheenMaterials) {
+      updateCarSheen(entry, {
+        beatStrength: car.beatStrength,
+        spectralCentroid: centroid,
+        sheenDir: this.sheenDir,
+        dt
+      })
+    }
+
+    // --- KUWAHARA q eases DOWN on drops (looser/wetter strokes).
+    const qTarget = THREE.MathUtils.lerp(KUWAHARA_Q_REST, KUWAHARA_Q_DROP, dropIntensity)
+    this.smoothedKuwaharaQ += (qTarget - this.smoothedKuwaharaQ) * KUWAHARA_Q_EASE
+    this.kuwaharaPass.uniforms.sharpness.value = this.smoothedKuwaharaQ
+
+    // --- VELOCITY SMEAR length/kick/clamp. uSpeedMul drives the in-shader 0.6+0.4*speedMul
+    // base; a small extra master push on drops lengthens the wet drag further; the beat is a
+    // brief kick on the smear LENGTH (never a flash). uMaxSmear opens a touch on drops so the
+    // comet tail can physically reach further. uStrength is eased so the drag breathes.
+    const smearU = this.velocitySmearPass.uniforms
+    smearU.uSpeedMul.value = car.speedMultiplier
+    const smearTarget = THREE.MathUtils.clamp(0.85 + dropIntensity * 0.35, 0, 1.4)
+    this.smoothedSmearStrength += (smearTarget - this.smoothedSmearStrength) * SMEAR_DRIVE_EASE
+    smearU.uStrength.value = this.smoothedSmearStrength
+    smearU.uBeatKick.value = beatPulse * SMEAR_BEAT_KICK_MAX
+    smearU.uMaxSmear.value = THREE.MathUtils.lerp(SMEAR_MAX_REST, SMEAR_MAX_DROP, dropIntensity)
+    // Framerate-stable streak length: currentFps/targetFps (60). Clamp the dt so a stalled
+    // frame doesn't blow the scale up; identity when dt is unknown (paused/first frame).
+    smearU.uVelocityScale.value = dt > 1e-4 ? THREE.MathUtils.clamp((1 / dt) / 60, 0.25, 2) : 1
+
+    // --- PAINTERLY EDGE breakup widen on drops + slow crawl.
+    this.smoothedEdgeMusic += (dropIntensity - this.smoothedEdgeMusic) * EDGE_MUSIC_EASE
+    this.painterlyEdgePass.uniforms.uMusic.value = this.smoothedEdgeMusic
+    this.painterlyEdgePass.uniforms.uTime.value += Math.max(0, dt)
+
+    // --- PAINT-GRADE LUT accent-chroma push on LOUD passages (micro hue rotation toward rose).
+    // Driven by the louder of the drop spike and the beat pulse so the accents warm on emphasis;
+    // eased and tiny (≤ a few degrees) so the harmony never hard-swaps.
+    const loud = Math.max(dropIntensity, beatPulse)
+    const hueTarget = loud * HUE_SHIFT_MAX
+    this.smoothedHueShift += (hueTarget - this.smoothedHueShift) * HUE_SHIFT_EASE
+    this.paintGradePass.uniforms.uHueShift.value = this.smoothedHueShift
+
+    // --- Smear RESET detection: a large jump in the clamped car distance is a seek / rewind /
+    // tab-throttle re-baseline (mirrors the controller's dt>0.5 ⇒ ~25u jump at 50 u/s). The very
+    // first frame after a track (re)load (prevCarDistance === null) is also a reset.
+    let smearReset = false
+    if (this.prevCarDistance === null) {
+      smearReset = true
+    } else if (Math.abs(car.distance - this.prevCarDistance) > SMEAR_RESET_DISTANCE_JUMP) {
+      smearReset = true
+    }
+    this.prevCarDistance = car.distance
+
+    return smearReset
+  }
+
+  /**
+   * Renders the dedicated aux G-buffer pre-pass (Watercolour Speed B2). One scene render
+   * with `scene.overrideMaterial = MeshNormalMaterial` fills BOTH aux buffers at once:
+   *   - the colour attachment of `normalTarget` gets view-space normals (n*0.5+0.5 in RGB),
+   *   - the attached `sceneDepthTexture` gets the perspective depth.
+   *
+   * The camera far is TIGHTENED to DEPTH_FAR for this pass only (saved/restored around the
+   * render) so the device-depth written into the DepthTexture has a usable z-distribution
+   * AND matches the `cameraFar` the painterly edge (A6) / velocity-smear (A7) passes
+   * linearise against — the scene's real far=10000 would both crush the depth precision and
+   * desync the in-shader linearisation. The override material is restored to null and the
+   * camera projection is rebuilt afterwards so the subsequent colour render is unaffected.
+   *
+   * Deterministic and decoupled from EffectComposer's ping-ponged buffers: A6/A7 read these
+   * owned textures as wired uniforms, never the composer's internal renderTarget1/2.
+   */
+  private renderAuxTargets(): void {
+    const prevFar = this.camera.far
+    const prevOverride = this.scene.overrideMaterial
+    const prevTarget = this.renderer.getRenderTarget()
+
+    // Tighten the far plane just for the depth/normal capture.
+    this.camera.far = DEPTH_FAR
+    this.camera.updateProjectionMatrix()
+
+    // Capture this frame's SHAKEN view-projection under the TIGHTENED DEPTH_FAR projection —
+    // the exact projection the DepthTexture is about to be written with — so the velocity
+    // smear's unprojection (uInvCurViewProj) is geometrically consistent with the depth it
+    // samples. The camera position already carries the shake offset (applyCameraShake ran
+    // first); refresh its world matrix so matrixWorldInverse is current.
+    this.camera.updateMatrixWorld()
+    this.curViewProj.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse)
+
+    this.scene.overrideMaterial = this.normalMaterial
+    this.renderer.setRenderTarget(this.normalTarget)
+    // Clear so cleared depth reads 1.0 (== "no geometry"/sky) for the passes that gate on it.
+    this.renderer.clear()
+    this.renderer.render(this.scene, this.camera)
+
+    // Restore everything for the colour render that follows.
+    this.scene.overrideMaterial = prevOverride
+    this.renderer.setRenderTarget(prevTarget)
+    this.camera.far = prevFar
+    this.camera.updateProjectionMatrix()
   }
 
   /**
@@ -1720,30 +1842,6 @@ export class ThreeScene {
     this.camera.position.add(this.shakeOffset)
   }
 
-  /**
-   * Pushes the mood signals into the sky shader uniforms and the neon grid's
-   * brightness so the whole world emotionally tracks the music as one gesture:
-   * cool/dim during intros, warm/bright during drops.
-   */
-  private applyMoodVisuals(centroid: number, dropIntensity: number): void {
-    if (this.skyMaterial) {
-      this.skyMaterial.uniforms.spectralCentroidNorm.value = centroid
-      this.skyMaterial.uniforms.dropIntensity.value = dropIntensity
-    }
-
-    if (this.sunMaterial) {
-      this.sunMaterial.uniforms.dropIntensity.value = dropIntensity
-    }
-
-    if (this.gridHelper) {
-      const material = this.gridHelper.material as THREE.LineBasicMaterial
-      // Map centroid -> a brightness multiplier in the 0.3..0.7 "emissive" range the
-      // plan calls for (here applied as color opacity, which scales bloom feed for a
-      // line material), with an extra kick from the drop envelope.
-      const glow = GRID_EMISSIVE_MIN + centroid * GRID_EMISSIVE_RANGE + dropIntensity * 0.3
-      material.opacity = Math.min(1, glow)
-    }
-  }
 
   renderFrame(gameState: GameState): void {
     const now = performance.now()
@@ -1980,7 +2078,12 @@ export class ThreeScene {
       .multiplyScalar(-cameraDistance)
       .add(currentNode.up.clone().multiplyScalar(cameraHeight))
 
-    baseCameraOffset.applyAxisAngle(currentNode.up, this.cameraOrbitAngle)
+    // Off-centre diagonal composition (B5): orbit the camera by the PERSISTENT COMPOSE_YAW
+    // (a fixed raking stance) PLUS the lane-driven cameraOrbitAngle (the transient glide). The
+    // constant yaw is what slides the road's vanishing point off the vertical centre; the lane
+    // term still nudges on top of it. The drop-entry orbit snap zeroes only the lane term, so
+    // the composition stays raking even during a head-on drop moment.
+    baseCameraOffset.applyAxisAngle(currentNode.up, this.cameraOrbitAngle + COMPOSE_YAW)
 
     const cameraPosition = visualCarPosition.clone().add(baseCameraOffset)
     this.camera.position.lerp(cameraPosition, 0.2)
@@ -2000,6 +2103,26 @@ export class ThreeScene {
       .add(
         smoothedRight.clone().multiplyScalar(this.cameraOrbitAngle * cameraDistance * 0.45)
       )
+
+    // Off-centre diagonal composition (B5): YAW THE OPTICAL AXIS by a fixed angle rather than
+    // translating the near look-target. The road's vanishing point projects where the camera's
+    // FORWARD direction points relative to the road's forward; rotating the whole look DIRECTION
+    // by a constant COMPOSE_LOOK_YAW about the up axis therefore slides the VP a STABLE amount
+    // off the vertical centre (a near-target world offset saturates/overshoots because the
+    // target is only ~15m out — see B5 notes). A fixed COMPOSE_PITCH about the right axis lifts
+    // the horizon so the diagonal RAKES rather than merely pans. The base target still anchors
+    // the car (the camera keeps tracking it + looking ahead); we only rotate the aim around it,
+    // so lane glides/banking still read on top and obstacles enter along the resulting diagonal.
+    // Sign (measured): the negative COMPOSE_LOOK_YAW used here slides the road/VP to ~20% off the
+    // vertical centre toward screen-LEFT and opens ~65-70% quiet negative space on the RIGHT,
+    // where the off-axis sun (COMPOSE_SUN_OFFSET, screen-RIGHT) sits well clear of the VP.
+    const lookDir = lookTarget.clone().sub(this.camera.position)
+    const lookLen = lookDir.length() || 1
+    lookDir.normalize()
+    lookDir.applyAxisAngle(currentNode.up, COMPOSE_LOOK_YAW)
+    lookDir.applyAxisAngle(smoothedRight, -COMPOSE_PITCH) // -ve about right tilts the aim UP
+    lookDir.normalize()
+    lookTarget.copy(this.camera.position).addScaledVector(lookDir, lookLen)
 
     const targetMatrix = new THREE.Matrix4().lookAt(this.camera.position, lookTarget, currentNode.up)
     const targetQuaternion = new THREE.Quaternion().setFromRotationMatrix(targetMatrix)
@@ -2189,9 +2312,16 @@ export class ThreeScene {
     const elapsed = (performance.now() - this.startTime) / 1000
     const sunDistance = 800
 
-    // Mostly pinned dead-center on the horizon (the iconic outrun framing) with only a
-    // whisper of drift so it never reads as a frozen sprite.
-    const horizonWave = Math.sin(elapsed * 0.15) * 0.06
+    // Off-centre diagonal composition (Watercolour Speed B5, §5 "Sun / horizon"): the soft
+    // achromatic-to-cool luminous disc is pulled OFF the view centre and NEVER stacked on the
+    // vanishing point (the hard ban on the centred one-point stack). The camera already rakes
+    // off-axis (COMPOSE_YAW orbit + COMPOSE_LOOK_YAW optical-axis yaw slide the road's VP toward
+    // screen-LEFT), so we seat the sun in the quiet negative-space region on the opposite side
+    // (screen-RIGHT) and lifted, where it reads as a pale wet bloom of light dissolving into
+    // the sky wash rather than a disc sitting on the road's convergence. Anchored to the
+    // camera-relative view basis so it stays put in-frame as the world rushes past; a whisper
+    // of drift keeps it from reading as a frozen sprite.
+    const horizonDrift = Math.sin(elapsed * 0.15) * 0.04
     const heightWave = Math.sin(elapsed * 0.1) * 6
 
     const right = new THREE.Vector3().crossVectors(viewDir, new THREE.Vector3(0, 1, 0)).normalize()
@@ -2199,11 +2329,14 @@ export class ThreeScene {
     const targetPos = this.camera.position
       .clone()
       .add(viewDir.clone().multiplyScalar(sunDistance))
-      .add(right.multiplyScalar(sunDistance * 0.2 * horizonWave))
+      // Persistent screen-RIGHT lateral seat (off the VP, into the open negative space) plus a
+      // tiny drift. Positive COMPOSE_SUN_OFFSET pushes it to the side opposite the raked VP.
+      .add(right.multiplyScalar(sunDistance * (COMPOSE_SUN_OFFSET + horizonDrift)))
 
-    // Seat the sun so most of the disc — including its banded lower half — clears the
-    // horizon line and reads as a big sun resting on the grid.
-    const horizonBase = Math.max(55, this.camera.position.y * 0.2 + 48)
+    // Seat the disc above the horizon line so it reads as a high pale bloom off the diagonal,
+    // not a sun resting on the (deleted) grid. The banded striped sun is gone — this is a soft
+    // value-lift disc, so it can ride higher without a hard scanline edge to betray it.
+    const horizonBase = Math.max(70, this.camera.position.y * 0.2 + 64)
     targetPos.y = horizonBase + heightWave
 
     this.sunMesh.position.copy(targetPos)
