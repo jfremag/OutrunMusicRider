@@ -19,6 +19,14 @@ export interface CarState {
   spectralCentroid: number
   spectralFlux: number
   dropIntensity: number
+  // Unified screen-shake envelope (iteration 3). `cameraShakeAmplitude` (0..1) is
+  // the target intensity of the camera shake, set by the controller from beat +
+  // spectral flux and spiked on collision; `lastShakeTime` is the performance.now()
+  // timestamp it was (re)triggered. The renderer phases an ease-out envelope off
+  // these, samples a multi-frequency oscillation, and applies a transient,
+  // non-destructive position offset so beats punch and chaos jitters the view.
+  cameraShakeAmplitude: number
+  lastShakeTime: number
 }
 
 export interface GameState {
@@ -38,7 +46,9 @@ export function initGameState(): GameState {
       beatStrength: 0,
       spectralCentroid: 0,
       spectralFlux: 0,
-      dropIntensity: 0
+      dropIntensity: 0,
+      cameraShakeAmplitude: 0,
+      lastShakeTime: -Infinity
     }
   }
 }

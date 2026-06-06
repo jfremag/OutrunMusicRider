@@ -259,6 +259,22 @@ export class GameController {
     this.gameState.car.spectralCentroid = this.smoothedCentroid
     this.gameState.car.spectralFlux = this.smoothedFlux
 
+    // --- Unified camera-shake amplitude (iteration 3). Beats dominate (0.7) so the
+    // shake punches fast and legibly on each kick/snare, while spectral flux (0.5)
+    // layers in choppy treble texture: busy, bright sections jitter more than calm
+    // ones. The renderer phases an ease-out envelope off lastShakeTime, so we only
+    // (re)stamp the timestamp when the music actually drives a fresh punch — a quick
+    // beat or a flux surge — rather than every frame, which would freeze the
+    // envelope at full and produce a constant rattle. A hard collision spike
+    // (handled in the renderer) overrides this softer musical amplitude.
+    const musicalShake = this.gameState.car.beatStrength * 0.7 + this.smoothedFlux * 0.5
+    const beatAgeMs = performance.now() - this.gameState.car.lastBeatTime
+    const freshBeat = Number.isFinite(beatAgeMs) && beatAgeMs >= 0 && beatAgeMs < 60
+    if (freshBeat || this.smoothedFlux > 0.45) {
+      this.gameState.car.cameraShakeAmplitude = Math.min(1, musicalShake)
+      this.gameState.car.lastShakeTime = performance.now()
+    }
+
     // --- Drop envelope: detect entry into a new region, then decay.
     const regions = this.musicMap.dropRegions
     let insideIndex = -1
@@ -270,9 +286,13 @@ export class GameController {
     }
 
     if (insideIndex !== -1 && insideIndex !== this.activeDropIndex) {
-      // Just crossed into a new drop: fire the envelope.
+      // Just crossed into a new drop: fire the envelope...
       this.lastDropTime = performance.now()
       this.lastDropStrength = regions[insideIndex].strength
+      // ...and spray a one-shot particle burst marking the emotional peak. Color is
+      // chosen by the renderer from the current brightness (cyan when cool/dark,
+      // magenta when bright/hot); count scales with the drop's strength.
+      this.threeScene.emitDropBurst(this.lastDropStrength, this.smoothedCentroid)
     }
     this.activeDropIndex = insideIndex
 
