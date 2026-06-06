@@ -4,6 +4,11 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
+import { createFilmGrainPass } from './FilmGrainPass'
+import { createVignettePass } from './VignettePass'
+import { createChromaticAberrationPass } from './ChromaticAberrationPass'
+import { RimGlowShell } from './RimGlowShell'
 import { TrackData } from '../track/TrackTypes'
 import { GameState, getLaneOffset } from '../game/GameState'
 
@@ -49,6 +54,16 @@ const PARTICLE_LIFETIME_COLLISION = 0.5 // seconds a collision-burst particle li
 // sections burst cyan, bright/hot sections burst magenta, matching the sky sweep.
 const BURST_COLOR_COOL = new THREE.Color(0x6af6ff)
 const BURST_COLOR_HOT = new THREE.Color(0xff00ff)
+
+// Cinematic post-processing tuning (iteration 4). The film grain + vignette are
+// always-on, subtle, and frame-state-free (the grain only animates via a time
+// uniform). Chromatic aberration sits at 0 at rest and spikes briefly on impact for
+// a Wipeout-style "lens kick" that decays over CHROMATIC_DECAY_MS — driven off the
+// renderer's existing collision timestamp (no new game state needed).
+const FILM_GRAIN_INTENSITY = 0.032 // tiny: reads as film texture, never as snow
+const VIGNETTE_DARKNESS = 0.7 // corner brightness (30% darker) to frame the car
+const CHROMATIC_COLLISION_PEAK = 1.0 // max CA intensity at the instant of a hit
+const CHROMATIC_DECAY_MS = 220 // ease the lens kick back to 0 over this window
 
 const ANALOGOUS_PALETTE = {
   abyss: new THREE.Color(0x041226),
@@ -282,6 +297,13 @@ export class ThreeScene {
   private camera: THREE.PerspectiveCamera
   private composer: EffectComposer
   private bloomPass: UnrealBloomPass
+  // Cinematic post passes (iteration 4). CA intensity is driven per-frame from the
+  // collision envelope; grain advances its time uniform each frame; vignette is static.
+  private chromaticPass: ShaderPass
+  private filmGrainPass: ShaderPass
+  // Beat-locked hero-car rim glow (iteration 4). Built lazily once the car bounds are
+  // known, parented under the car group, and updated each frame from beat + mood.
+  private rimGlow: RimGlowShell | null = null
   private roadMesh: THREE.Mesh | null = null
   private carMesh: THREE.Group | null = null
   private trackData: TrackData | null = null
@@ -364,10 +386,14 @@ export class ThreeScene {
       10000
     )
 
-    // Post-processing pipeline: RenderPass -> UnrealBloomPass -> OutputPass.
-    // Bloom makes the neon emissives glow like a premium synthwave promo film.
-    // OutputPass performs the ACES tone-map + sRGB conversion as the final step
-    // (correct placement when rendering through a composer).
+    // Post-processing pipeline (iteration 4):
+    //   RenderPass -> UnrealBloomPass -> OutputPass -> ChromaticAberration -> Vignette -> FilmGrain
+    // Bloom makes the neon emissives glow like a premium synthwave promo film, and
+    // OutputPass performs the ACES tone-map + sRGB conversion. The three cinematic
+    // passes run AFTER OutputPass so they operate on the final, display-space graded
+    // image — the correct place for lens/film effects: CA fringing, edge vignette,
+    // and film grain all read as artifacts of the camera/stock, not of the linear
+    // scene, and aren't re-tone-mapped. The last pass auto-renders to screen.
     this.composer = new EffectComposer(this.renderer)
     this.composer.setSize(width, height)
     this.composer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
@@ -380,6 +406,15 @@ export class ThreeScene {
     )
     this.composer.addPass(this.bloomPass)
     this.composer.addPass(new OutputPass())
+
+    // Chromatic aberration: 0 at rest, spiked on collision (driven in renderComposite).
+    this.chromaticPass = createChromaticAberrationPass(0.0)
+    this.composer.addPass(this.chromaticPass)
+    // Vignette: static radial edge darkening to frame the hero car + road.
+    this.composer.addPass(createVignettePass(VIGNETTE_DARKNESS))
+    // Film grain: always-on subtle animated noise (time uniform advanced per frame).
+    this.filmGrainPass = createFilmGrainPass(FILM_GRAIN_INTENSITY)
+    this.composer.addPass(this.filmGrainPass)
 
     // Lighting - brighter for better visibility
     const ambientLight = new THREE.AmbientLight(ANALOGOUS_PALETTE.cyanGlow, 0.4)
@@ -773,6 +808,31 @@ export class ThreeScene {
     this.applyPaletteToModel(clone, true)
 
     target.add(clone)
+
+    // Re-fit the rim glow to the loaded model's real on-screen footprint. Center it
+    // on the car body (lift by half its height + the ground offset) so the halo wraps
+    // the silhouette rather than sitting on the floor.
+    const glowSize = size.clone().multiplyScalar(scaleFactor)
+    const centerY = Number.isNaN(baseOffset)
+      ? glowSize.y * 0.5
+      : baseOffset + glowSize.y * 0.5
+    this.attachRimGlow(target, glowSize, centerY)
+  }
+
+  /**
+   * Builds (or rebuilds) the hero-car rim-glow shell sized to `size` and parents it
+   * under the car group at local height `centerY`, so it inherits the car transform
+   * and frames the silhouette. Replaces any previous shell (e.g. when the GLB swaps
+   * in over the fallback) to keep a single, correctly-sized halo.
+   */
+  private attachRimGlow(carGroup: THREE.Group, size: THREE.Vector3, centerY: number): void {
+    if (this.rimGlow) {
+      this.rimGlow.mesh.removeFromParent()
+      this.rimGlow.dispose()
+    }
+    this.rimGlow = new RimGlowShell(size)
+    this.rimGlow.mesh.position.y = centerY
+    carGroup.add(this.rimGlow.mesh)
   }
 
   private buildFallbackCar(carGroup: THREE.Group): void {
@@ -805,6 +865,10 @@ export class ThreeScene {
     const glow = new THREE.Mesh(glowGeometry, glowMaterial)
     glow.position.y = 0.25
     carGroup.add(glow)
+
+    // Beat-locked rim glow sized to the fallback car silhouette (swapped for a
+    // model-fitted shell if the GLB later loads). Centered over the body+cabin.
+    this.attachRimGlow(carGroup, new THREE.Vector3(1.3, 1.0, 2.1), 0.45)
   }
 
   private disposeCarChildren(target: THREE.Group): void {
@@ -1239,6 +1303,26 @@ export class ThreeScene {
 
     // --- Rhythm-locked beat indicator glow (bottom-right).
     this.updateBeatIndicator(gameState)
+
+    // --- Collision "lens kick" + hero-car flash envelope. 1 at the instant of an
+    // impact, decaying to 0 over CHROMATIC_DECAY_MS, phased off the renderer's own
+    // collision timestamp (set in handleObstacleCollision) so no extra game state is
+    // needed and there is no risk of cross-system mutation. Drives both the chromatic
+    // aberration spike and the rim-glow white flash from one shared envelope.
+    const collisionAge = performance.now() - this.lastCollisionTime
+    let collisionEnvelope = 0
+    if (this.lastCollisionTime > 0 && collisionAge >= 0 && collisionAge < CHROMATIC_DECAY_MS) {
+      const d = collisionAge / CHROMATIC_DECAY_MS
+      collisionEnvelope = (1 - d) * (1 - d)
+    }
+    this.chromaticPass.uniforms.intensity.value = collisionEnvelope * CHROMATIC_COLLISION_PEAK
+
+    // --- Animate film grain (re-seed the noise each frame so it shimmers like film).
+    this.filmGrainPass.uniforms.time.value = (performance.now() % 100000) / 1000
+
+    // --- Beat-locked, mood-colored hero-car rim glow. Pulses on kicks (beatStrength),
+    // swells with brightness (spectralCentroid), and washes hot-white on collision.
+    this.rimGlow?.update(gameState.car.beatStrength, centroid, collisionEnvelope)
 
     // --- Advance the GPU particle simulation (drop + collision bursts).
     this.particlePool.update(this.lastFrameDelta)
