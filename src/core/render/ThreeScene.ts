@@ -5,6 +5,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
+import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js'
 import { createFilmGrainPass } from './FilmGrainPass'
 import { createVignettePass } from './VignettePass'
 import { createChromaticAberrationPass } from './ChromaticAberrationPass'
@@ -218,6 +219,10 @@ export class ThreeScene {
   // collision envelope; grain advances its time uniform each frame; vignette is static.
   private chromaticPass: ShaderPass
   private filmGrainPass: ShaderPass
+  // Proper anti-aliasing (SMAA). The composer renders to offscreen targets, which bypasses
+  // the renderer's MSAA, so geometry edges (the road/sword silhouettes against the bright
+  // sky) were aliased; this pass smooths them on the tone-mapped image.
+  private smaaPass: SMAAPass
   // Beat-locked hero-car rim glow (iteration 4). Built lazily once the car bounds are
   // known, parented under the car group, and updated each frame from beat + mood.
   private rimGlow: RimGlowShell | null = null
@@ -338,7 +343,7 @@ export class ThreeScene {
     this.camera.layers.enableAll()
 
     // Post-processing pipeline (iteration 4):
-    //   RenderPass -> UnrealBloomPass -> OutputPass -> ChromaticAberration -> Vignette -> FilmGrain
+    //   RenderPass -> UnrealBloomPass -> OutputPass -> SMAA -> ChromaticAberration -> Vignette -> FilmGrain
     // Bloom makes the neon emissives glow like a premium synthwave promo film, and
     // OutputPass performs the ACES tone-map + sRGB conversion. The three cinematic
     // passes run AFTER OutputPass so they operate on the final, display-space graded
@@ -361,6 +366,12 @@ export class ThreeScene {
     )
     this.composer.addPass(this.bloomPass)
     this.composer.addPass(new OutputPass())
+
+    // Anti-aliasing on the tone-mapped (LDR/sRGB) image, right after OutputPass and before
+    // the lens grade, so it smooths the geometry edges without fighting the intentional
+    // chromatic-aberration fringing that follows.
+    this.smaaPass = new SMAAPass(width, height)
+    this.composer.addPass(this.smaaPass)
 
     // Chromatic aberration: 0 at rest, spiked on collision (driven in renderComposite).
     this.chromaticPass = createChromaticAberrationPass(0.0)
@@ -1306,6 +1317,7 @@ export class ThreeScene {
     this.renderer.setSize(width, height)
     this.composer.setSize(width, height)
     this.bloomPass.setSize(width, height)
+    this.smaaPass.setSize(width, height)
     // The neon-isolation pipeline (iteration 9) renders at NEON_RESOLUTION_SCALE of the
     // primary (polish pass): half linear res for the low-frequency hero bloom, ~4x cheaper
     // on the second render. The additive composite samples it with normalized UVs (upscale).
