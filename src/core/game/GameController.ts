@@ -14,6 +14,17 @@ export class GameController {
   private lastAutoLaneChange = 0
   // Cursor into musicMap.beats so we only fire each beat once as the clock passes it.
   private nextBeatIndex = 0
+  // Wall-clock (performance.now) timestamp of the most recent drop-region entry,
+  // and that drop's strength. The renderer-facing dropIntensity is a decay
+  // envelope phased off this so it spikes on entry and eases back to 0.
+  private lastDropTime = -Infinity
+  private lastDropStrength = 0
+  // Index of the drop region we're currently inside (-1 = none), used to fire the
+  // "drop entered" envelope exactly once per region as the clock crosses into it.
+  private activeDropIndex = -1
+  // Smoothed spectral centroid (rolling 1-pole filter) for calm mood transitions.
+  private smoothedCentroid = 0
+  private smoothedFlux = 0
 
   constructor(canvas: HTMLCanvasElement) {
     this.audioEngine = new AudioEngine()
@@ -38,6 +49,11 @@ export class GameController {
       // Reset game state
       this.gameState = initGameState()
       this.nextBeatIndex = 0
+      this.lastDropTime = -Infinity
+      this.lastDropStrength = 0
+      this.activeDropIndex = -1
+      this.smoothedCentroid = 0
+      this.smoothedFlux = 0
     } catch (error) {
       console.error('Error loading file:', error)
       throw error
@@ -89,6 +105,10 @@ export class GameController {
 
     // Detect beats crossing the audio clock and record them for the renderer.
     this.updateBeatSync(audioTime)
+
+    // Sample spectral mood + drop envelope and write them onto the car state so
+    // the renderer can drive sky/grid/bloom/FOV from a single mood north-star.
+    this.updateMood(audioTime)
 
     // Anticipate treble obstacles and dodge within the lane grid
     this.maybeAutoDodge(audioTime)
@@ -200,6 +220,75 @@ export class GameController {
       }
       this.nextBeatIndex++
     }
+  }
+
+  /**
+   * Samples the spectral mood signals (centroid + flux) at the current audio time
+   * and maintains the drop-intensity decay envelope, writing all three onto the
+   * car state. The centroid/flux are linearly interpolated between the two nearest
+   * 75ms spectral samples, then run through a 1-pole low-pass so mood transitions
+   * glide rather than snap (matching the renderer's lerp-driven aesthetic). The
+   * drop envelope spikes to the region's strength on entry (detected via a cursor
+   * that crosses into a new region) and decays toward 0 over DROP_DECAY_MS.
+   */
+  private updateMood(audioTime: number): void {
+    if (!this.musicMap) return
+
+    // --- Interpolate spectral centroid + flux at the playback time.
+    const samples = this.musicMap.spectralSamples
+    let centroid = 0
+    let flux = 0
+    if (samples.length > 0) {
+      // 75ms hop -> direct index estimate, then refine to the bracketing pair.
+      const approx = Math.min(samples.length - 1, Math.max(0, Math.floor(audioTime / 0.075)))
+      let i = approx
+      while (i > 0 && samples[i].time > audioTime) i--
+      while (i < samples.length - 1 && samples[i + 1].time <= audioTime) i++
+      const a = samples[i]
+      const b = samples[Math.min(i + 1, samples.length - 1)]
+      const span = b.time - a.time
+      const f = span > 1e-6 ? Math.max(0, Math.min(1, (audioTime - a.time) / span)) : 0
+      centroid = a.centroidNorm + (b.centroidNorm - a.centroidNorm) * f
+      flux = a.flux + (b.flux - a.flux) * f
+    }
+
+    // 1-pole smoothing (≈2-3 frame window) for calm mood drift.
+    const smoothing = 0.12
+    this.smoothedCentroid += (centroid - this.smoothedCentroid) * smoothing
+    this.smoothedFlux += (flux - this.smoothedFlux) * smoothing
+    this.gameState.car.spectralCentroid = this.smoothedCentroid
+    this.gameState.car.spectralFlux = this.smoothedFlux
+
+    // --- Drop envelope: detect entry into a new region, then decay.
+    const regions = this.musicMap.dropRegions
+    let insideIndex = -1
+    for (let r = 0; r < regions.length; r++) {
+      if (audioTime >= regions[r].startTime && audioTime <= regions[r].endTime) {
+        insideIndex = r
+        break
+      }
+    }
+
+    if (insideIndex !== -1 && insideIndex !== this.activeDropIndex) {
+      // Just crossed into a new drop: fire the envelope.
+      this.lastDropTime = performance.now()
+      this.lastDropStrength = regions[insideIndex].strength
+    }
+    this.activeDropIndex = insideIndex
+
+    const DROP_DECAY_MS = 500
+    const dropAge = performance.now() - this.lastDropTime
+    let dropIntensity = 0
+    if (Number.isFinite(dropAge) && dropAge >= 0 && dropAge < DROP_DECAY_MS) {
+      const d = dropAge / DROP_DECAY_MS
+      dropIntensity = (1 - d) * (1 - d) * this.lastDropStrength
+    }
+    // While still physically inside a long drop region, hold a sustained floor so
+    // the world stays energized for the whole passage, not just the entry spike.
+    if (insideIndex !== -1) {
+      dropIntensity = Math.max(dropIntensity, this.lastDropStrength * 0.55)
+    }
+    this.gameState.car.dropIntensity = dropIntensity
   }
 
   setCollisionHandler(handler: (() => void) | null): void {

@@ -10,6 +10,15 @@ export interface CarState {
   // lets the renderer compute the envelope phase without knowing the audio time.
   lastBeatTime: number
   beatStrength: number
+  // Mood signals sampled from the MusicMap at the current audio time and smoothed
+  // by the controller. `spectralCentroid` (0..1) is perceived brightness and drives
+  // the sky hue (cool cyan -> hot magenta), grid emissive, and bloom threshold.
+  // `spectralFlux` (0..1) is brightness volatility (mood nuance). `dropIntensity`
+  // (0..1) is a decay envelope that spikes to 1 on entering a detected drop and
+  // eases back to 0, driving the cinematic FOV push + bloom expansion.
+  spectralCentroid: number
+  spectralFlux: number
+  dropIntensity: number
 }
 
 export interface GameState {
@@ -26,7 +35,10 @@ export function initGameState(): GameState {
       laneOffset: 0,
       verticalOffset: 0,
       lastBeatTime: -Infinity,
-      beatStrength: 0
+      beatStrength: 0,
+      spectralCentroid: 0,
+      spectralFlux: 0,
+      dropIntensity: 0
     }
   }
 }

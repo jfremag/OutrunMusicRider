@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { BeatMarker, MusicMap, EnergySample } from '../audio/AudioAnalysis'
+import { BeatMarker, MusicMap, EnergySample, DropRegion } from '../audio/AudioAnalysis'
 import { TrackData, TrackNode, TreblePulse } from './TrackTypes'
 import { LANE_WIDTH } from '../game/GameState'
 
@@ -79,7 +79,7 @@ export function generateTrack(musicMap: MusicMap): TrackData {
 
   return {
     nodes,
-    treblePulses: createTreblePulses(musicMap.treblePeaks, nodes, duration),
+    treblePulses: createTreblePulses(musicMap.treblePeaks, nodes, duration, musicMap.dropRegions),
     length: totalLength
   }
 }
@@ -127,7 +127,8 @@ function calculateBeatThreshold(beats: { strength: number }[]): number {
 function createTreblePulses(
   treblePeaks: BeatMarker[],
   nodes: TrackNode[],
-  duration: number
+  duration: number,
+  dropRegions: DropRegion[]
 ): TreblePulse[] {
   if (treblePeaks.length === 0 || nodes.length === 0 || duration <= 0) {
     return []
@@ -137,17 +138,22 @@ function createTreblePulses(
 
   const lanePattern: Array<-1 | 0 | 1> = [-1, 1, 0]
 
-  return treblePeaks.map((peak, index) => {
+  // Build one pulse anchored to a track node, honoring the cycling lane pattern.
+  const buildPulse = (
+    peak: BeatMarker,
+    laneIndex: -1 | 0 | 1,
+    density: number
+  ): TreblePulse => {
     const normalizedTime = Math.max(0, Math.min(1, peak.time / duration))
     const nodeIndex = Math.min(nodes.length - 1, Math.round(normalizedTime * (nodes.length - 1)))
     const node = nodes[nodeIndex]
 
     const right = new THREE.Vector3().crossVectors(node.forward, node.up).normalize()
-    const laneIndex = lanePattern[index % lanePattern.length]
     const lateralOffset = laneIndex * LANE_WIDTH
     const normalizedIntensity = maxStrength > 0 ? peak.strength / maxStrength : 0
 
-    const pos = node.pos.clone()
+    const pos = node.pos
+      .clone()
       .add(right.clone().multiplyScalar(lateralOffset))
       .add(new THREE.Vector3(0, 0.6 + normalizedIntensity * 1.8, 0))
 
@@ -155,8 +161,67 @@ function createTreblePulses(
       time: peak.time,
       pos,
       intensity: normalizedIntensity,
-      laneIndex
+      laneIndex,
+      density
+    }
+  }
+
+  const pulses: TreblePulse[] = []
+
+  treblePeaks.forEach((peak, index) => {
+    const laneIndex = lanePattern[index % lanePattern.length]
+    // How "deep" into a drop this peak sits (0 outside, up to region strength inside).
+    const dropEnvelope = dropDensityAt(peak.time, dropRegions)
+
+    pulses.push(buildPulse(peak, laneIndex, dropEnvelope))
+
+    // Drop-aware clustering: during confirmed drops we raise obstacle density to
+    // ~1.3x by occasionally spawning a flanking obstacle in an adjacent lane. The
+    // chance scales with the drop envelope so the increase ramps smoothly across
+    // the region boundary (sparse at the edges, densest at the peak) rather than
+    // snapping on. The flank lane is offset from the primary so a clear lane
+    // always remains for the auto-dodge to escape into.
+    if (dropEnvelope > 0) {
+      // Deterministic per-index gate that, integrated over a region, yields ~0.3
+      // extra obstacles per peak at full strength (the 1.3x baseline target).
+      const clusterChance = dropEnvelope * 0.3
+      const gate = pseudoRandom(index * 2654435761) // stable hash, no Math.random in gen
+      if (gate < clusterChance) {
+        const flankLane = (laneIndex === -1 ? 0 : laneIndex === 1 ? 0 : 1) as -1 | 0 | 1
+        pulses.push(buildPulse(peak, flankLane, dropEnvelope))
+      }
     }
   })
+
+  return pulses
+}
+
+/**
+ * Returns the drop-density envelope at a given time: 0 outside any drop region,
+ * rising toward the region's `strength` as you approach its temporal center and
+ * fading back toward the edges. This keeps the obstacle-density increase smooth
+ * across region boundaries instead of a hard step.
+ */
+function dropDensityAt(time: number, dropRegions: DropRegion[]): number {
+  let best = 0
+  for (const region of dropRegions) {
+    if (time < region.startTime || time > region.endTime) continue
+    const span = Math.max(1e-3, region.endTime - region.startTime)
+    const phase = (time - region.startTime) / span // 0..1 across the region
+    // Triangular window peaking at the center, scaled by region strength.
+    const window = 1 - Math.abs(phase - 0.5) * 2
+    const value = region.strength * Math.max(0, window)
+    if (value > best) best = value
+  }
+  return best
+}
+
+/**
+ * Deterministic 0..1 hash so generation stays reproducible for a given track
+ * (no Math.random, which would make obstacle layout flicker between reloads).
+ */
+function pseudoRandom(seed: number): number {
+  const x = Math.sin(seed) * 43758.5453
+  return x - Math.floor(x)
 }
 

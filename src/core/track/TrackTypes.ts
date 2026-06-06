@@ -14,6 +14,10 @@ export interface TreblePulse {
   pos: THREE.Vector3
   intensity: number
   laneIndex: -1 | 0 | 1
+  // 0..1 mood/drop weighting baked at generation time. Higher inside detected
+  // drop regions (denser, heavier obstacles); ~0 in calm intro/verse passages.
+  // Lets the renderer scale obstacle visual weight to match the music's energy.
+  density: number
 }
 
 export interface TrackData {

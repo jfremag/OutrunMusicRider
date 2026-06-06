@@ -19,6 +19,16 @@ const BLOOM_BASE_STRENGTH = 0.95
 const BLOOM_BEAT_BOOST = 0.85 // added at peak of a full-strength beat
 const BLOOM_DECAY_MS = 260
 
+// Mood-driven tuning (iteration 2). These layer on TOP of the beat-sync envelopes
+// so the world reacts to both rhythm (fast, per-beat) and mood (slow, per-section).
+// Cool intros sit at low centroid -> tight bloom + cyan sky; bright drops push high
+// centroid -> looser glow + magenta sky, with an extra FOV expansion on drop entry.
+const BLOOM_THRESHOLD_COOL = 0.85 // tight, controlled bloom on cool/quiet moods
+const BLOOM_THRESHOLD_WARM = 0.62 // looser, blown-out glow on bright/hot moods
+const FOV_DROP_PUNCH = 6 // extra degrees at full drop intensity (cinematic expand)
+const GRID_EMISSIVE_MIN = 0.3 // dim grid in calm passages
+const GRID_EMISSIVE_RANGE = 0.4 // -> up to 0.7 at peak brightness
+
 const ANALOGOUS_PALETTE = {
   abyss: new THREE.Color(0x041226),
   midnight: new THREE.Color(0x0a2f44),
@@ -39,8 +49,12 @@ export class ThreeScene {
   private carMesh: THREE.Group | null = null
   private trackData: TrackData | null = null
   private skyMesh: THREE.Mesh | null = null
+  private skyMaterial: THREE.ShaderMaterial | null = null
   private starField: THREE.Points | null = null
   private sunMesh: THREE.Mesh | null = null
+  private gridHelper: THREE.GridHelper | null = null
+  private beatIndicator: THREE.Sprite | null = null
+  private beatIndicatorMaterial: THREE.SpriteMaterial | null = null
   private trebleMeshes: THREE.Object3D[] = []
   private swordTemplate: THREE.Object3D | null = null
   private swordTemplatePromise: Promise<THREE.Object3D | null> | null = null
@@ -132,6 +146,9 @@ export class ThreeScene {
     // Create synthwave background
     this.createBackground()
 
+    // Create the immersion-preserving beat indicator (a glowing sprite, not HUD text)
+    this.createBeatIndicator()
+
     // Create initial car
     this.createCar().catch(error => {
       console.error('Failed to create car', error)
@@ -170,7 +187,13 @@ export class ThreeScene {
         topColor: { value: ANALOGOUS_PALETTE.abyss.clone() },
         midColor: { value: ANALOGOUS_PALETTE.midnight.clone() },
         horizonColor: { value: ANALOGOUS_PALETTE.cyanGlow.clone() },
-        glowIntensity: { value: 1.0 }
+        glowIntensity: { value: 1.0 },
+        // Mood uniforms (iteration 2): perceived brightness 0..1 and the drop
+        // decay envelope 0..1. The fragment shader blends the horizon band from
+        // cool cyan toward hot magenta in HSL as these rise, so the whole sky
+        // emotionally tracks the music.
+        spectralCentroidNorm: { value: 0.0 },
+        dropIntensity: { value: 0.0 }
       },
       vertexShader: `
         varying vec3 vWorldPosition;
@@ -186,18 +209,54 @@ export class ThreeScene {
         uniform vec3 midColor;
         uniform vec3 horizonColor;
         uniform float glowIntensity;
+        uniform float spectralCentroidNorm;
+        uniform float dropIntensity;
+
+        // Standard HSL->RGB so we can sweep hue/sat/lightness by mood directly.
+        vec3 hsl2rgb(vec3 hsl) {
+          float h = hsl.x;
+          float s = hsl.y;
+          float l = hsl.z;
+          float c = (1.0 - abs(2.0 * l - 1.0)) * s;
+          float hp = h * 6.0;
+          float x = c * (1.0 - abs(mod(hp, 2.0) - 1.0));
+          vec3 rgb;
+          if (hp < 1.0) rgb = vec3(c, x, 0.0);
+          else if (hp < 2.0) rgb = vec3(x, c, 0.0);
+          else if (hp < 3.0) rgb = vec3(0.0, c, x);
+          else if (hp < 4.0) rgb = vec3(0.0, x, c);
+          else if (hp < 5.0) rgb = vec3(x, 0.0, c);
+          else rgb = vec3(c, 0.0, x);
+          return rgb + (l - 0.5 * c);
+        }
 
         void main() {
           float h = normalize(vWorldPosition).y * 0.5 + 0.5;
           float horizonGlow = pow(clamp(1.0 - h, 0.0, 1.0), 2.0) * glowIntensity;
-          vec3 gradient = mix(horizonColor, midColor, smoothstep(0.05, 0.35, h));
+
+          // Mood drive: combine slow brightness with the drop spike for the warmth.
+          float mood = clamp(spectralCentroidNorm + dropIntensity * 0.5, 0.0, 1.0);
+
+          // Hue 200deg (cyan) -> 320deg (magenta); sat 0.4 -> 1.0; light 0.2 -> 0.35.
+          float hue = mix(200.0, 320.0, mood) / 360.0;
+          float sat = mix(0.4, 1.0, mood);
+          float light = mix(0.2, 0.35, mood);
+          vec3 moodHorizon = hsl2rgb(vec3(hue, sat, light));
+
+          // Blend the static palette horizon toward the mood color as mood rises.
+          vec3 horizon = mix(horizonColor, moodHorizon, mood);
+
+          vec3 gradient = mix(horizon, midColor, smoothstep(0.05, 0.35, h));
           gradient = mix(gradient, topColor, smoothstep(0.35, 1.0, h));
-          gradient += vec3(1.0, 0.23, 0.33) * horizonGlow * 0.48;
+          // Warm horizon glow tint also shifts toward magenta on hot moods.
+          vec3 glowTint = mix(vec3(1.0, 0.23, 0.33), vec3(1.0, 0.15, 0.7), mood);
+          gradient += glowTint * horizonGlow * (0.48 + dropIntensity * 0.25);
           gl_FragColor = vec4(gradient, 1.0);
         }
       `
     })
 
+    this.skyMaterial = skyMaterial
     this.skyMesh = new THREE.Mesh(skyGeometry, skyMaterial)
     this.scene.add(this.skyMesh)
 
@@ -281,6 +340,14 @@ export class ThreeScene {
       ANALOGOUS_PALETTE.cyanGlow.getHex()
     )
     gridHelper.position.y = 0
+    // GridHelper uses a vertex-colored LineBasicMaterial (no emissive channel), so
+    // we drive its "glow" by scaling the material color's brightness each frame —
+    // brighter lines feed more energy into the bloom pass. Mark vertex colors so we
+    // can multiply the whole material uniformly. Tone-map disabled keeps neon punchy.
+    const gridMaterial = gridHelper.material as THREE.LineBasicMaterial
+    gridMaterial.toneMapped = false
+    gridMaterial.transparent = true
+    this.gridHelper = gridHelper
     this.scene.add(gridHelper)
     
     // Add a ground plane for better visibility
@@ -294,6 +361,92 @@ export class ThreeScene {
     ground.rotation.x = -Math.PI / 2
     ground.position.y = 0
     this.scene.add(ground)
+  }
+
+  /**
+   * Builds the beat indicator: a soft cyan radial-glow sprite pinned to the
+   * bottom-right of the view. It is parented to the camera (not the scene) so it
+   * stays a fixed on-screen element while remaining a 3D, bloom-affected glow —
+   * deliberately NOT HUD text, to preserve synthwave immersion. Each beat the
+   * controller records, the sprite punches up in scale + opacity then auto-fades,
+   * giving the viewer confirmation that the visuals are rhythm-locked. The glow
+   * texture is generated procedurally so no asset download is required.
+   */
+  private createBeatIndicator(): void {
+    const size = 128
+    const canvas = document.createElement('canvas')
+    canvas.width = size
+    canvas.height = size
+    const ctx = canvas.getContext('2d')
+    if (ctx) {
+      const gradient = ctx.createRadialGradient(
+        size / 2,
+        size / 2,
+        0,
+        size / 2,
+        size / 2,
+        size / 2
+      )
+      gradient.addColorStop(0, 'rgba(150, 250, 255, 1)')
+      gradient.addColorStop(0.35, 'rgba(106, 246, 255, 0.85)')
+      gradient.addColorStop(0.75, 'rgba(30, 224, 255, 0.25)')
+      gradient.addColorStop(1, 'rgba(30, 224, 255, 0)')
+      ctx.fillStyle = gradient
+      ctx.fillRect(0, 0, size, size)
+    }
+
+    const texture = new THREE.CanvasTexture(canvas)
+    texture.colorSpace = THREE.SRGBColorSpace
+
+    const material = new THREE.SpriteMaterial({
+      map: texture,
+      color: ANALOGOUS_PALETTE.cyanGlow,
+      transparent: true,
+      opacity: 0.0,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false
+    })
+
+    const sprite = new THREE.Sprite(material)
+    // Place in the bottom-right corner of the near view plane. Parenting to the
+    // camera keeps it screen-locked; the small z keeps it in front of everything.
+    sprite.position.set(0.62, -0.42, -1)
+    sprite.scale.set(0.12, 0.12, 0.12)
+    sprite.renderOrder = 999
+    sprite.frustumCulled = false
+
+    this.beatIndicator = sprite
+    this.beatIndicatorMaterial = material
+    this.camera.add(sprite)
+    // The camera must be in the scene graph for its child sprite to render.
+    this.scene.add(this.camera)
+  }
+
+  /**
+   * Pulses the beat-indicator glow from the beat-sync envelope. Scales 1.0->~1.3
+   * and opacity ~0.5->1.0 on a beat onset, then auto-fades, so the viewer can see
+   * the rhythm is locked without any immersion-breaking UI text.
+   */
+  private updateBeatIndicator(gameState: GameState): void {
+    if (!this.beatIndicator || !this.beatIndicatorMaterial) return
+
+    const beatAgeMs = performance.now() - gameState.car.lastBeatTime
+    const strength = gameState.car.beatStrength
+    const PULSE_MS = 320
+
+    let pulse = 0
+    if (Number.isFinite(beatAgeMs) && beatAgeMs >= 0 && beatAgeMs < PULSE_MS) {
+      const d = beatAgeMs / PULSE_MS
+      pulse = (1 - d) * (1 - d) * strength
+    }
+
+    const baseScale = 0.1
+    const scale = baseScale * (1.0 + pulse * 0.3)
+    this.beatIndicator.scale.set(scale, scale, scale)
+    // Idle glow ~0.18 so it reads as a persistent synthwave element; punches to ~1.
+    this.beatIndicatorMaterial.opacity = 0.18 + pulse * 0.82
   }
 
   private async createCar(): Promise<void> {
@@ -746,7 +899,14 @@ export class ThreeScene {
     const beatAgeMs = performance.now() - gameState.car.lastBeatTime
     const strength = gameState.car.beatStrength
 
+    // Mood signals (smoothed upstream by the controller). centroid drives the slow,
+    // sectional warmth; dropIntensity is the fast cinematic spike on drop entry.
+    const centroid = gameState.car.spectralCentroid
+    const dropIntensity = gameState.car.dropIntensity
+
     // --- FOV punch: fast attack to a strength-scaled peak, eased decay back to base.
+    // Iteration 2 adds a drop-driven expansion ON TOP so the camera reacts to both
+    // rhythm (beat) and the music's emotional peaks (drops).
     let fovOffset = 0
     if (Number.isFinite(beatAgeMs) && beatAgeMs >= 0) {
       if (beatAgeMs < FOV_ATTACK_MS) {
@@ -759,7 +919,7 @@ export class ThreeScene {
         fovOffset = (1 - d * d) * FOV_PUNCH * strength
       }
     }
-    const targetFov = BASE_FOV + fovOffset
+    const targetFov = BASE_FOV + fovOffset + dropIntensity * FOV_DROP_PUNCH
     if (Math.abs(this.camera.fov - targetFov) > 0.01) {
       this.camera.fov = targetFov
       this.camera.updateProjectionMatrix()
@@ -771,9 +931,46 @@ export class ThreeScene {
       const d = beatAgeMs / BLOOM_DECAY_MS
       bloomBoost = (1 - d) * (1 - d) * BLOOM_BEAT_BOOST * strength
     }
-    this.bloomPass.strength = BLOOM_BASE_STRENGTH + bloomBoost
+    // Drops also widen the overall glow for a blown-out, euphoric peak.
+    this.bloomPass.strength = BLOOM_BASE_STRENGTH + bloomBoost + dropIntensity * 0.5
+    // Bloom threshold tracks mood: tight/controlled on cool sections, looser (more
+    // of the frame glows) as the music brightens or drops. Drives the "wider glow
+    // on hot moods" feel without touching the beat-sync strength envelope.
+    const warmth = Math.min(1, centroid + dropIntensity * 0.6)
+    this.bloomPass.threshold = THREE.MathUtils.lerp(
+      BLOOM_THRESHOLD_COOL,
+      BLOOM_THRESHOLD_WARM,
+      warmth
+    )
+
+    // --- Sky + grid mood binding.
+    this.applyMoodVisuals(centroid, dropIntensity)
+
+    // --- Rhythm-locked beat indicator glow (bottom-right).
+    this.updateBeatIndicator(gameState)
 
     this.composer.render()
+  }
+
+  /**
+   * Pushes the mood signals into the sky shader uniforms and the neon grid's
+   * brightness so the whole world emotionally tracks the music as one gesture:
+   * cool/dim during intros, warm/bright during drops.
+   */
+  private applyMoodVisuals(centroid: number, dropIntensity: number): void {
+    if (this.skyMaterial) {
+      this.skyMaterial.uniforms.spectralCentroidNorm.value = centroid
+      this.skyMaterial.uniforms.dropIntensity.value = dropIntensity
+    }
+
+    if (this.gridHelper) {
+      const material = this.gridHelper.material as THREE.LineBasicMaterial
+      // Map centroid -> a brightness multiplier in the 0.3..0.7 "emissive" range the
+      // plan calls for (here applied as color opacity, which scales bloom feed for a
+      // line material), with an extra kick from the drop envelope.
+      const glow = GRID_EMISSIVE_MIN + centroid * GRID_EMISSIVE_RANGE + dropIntensity * 0.3
+      material.opacity = Math.min(1, glow)
+    }
   }
 
   renderFrame(gameState: GameState): void {
