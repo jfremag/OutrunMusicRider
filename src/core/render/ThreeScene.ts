@@ -62,8 +62,29 @@ const BURST_COLOR_HOT = new THREE.Color(0xff00ff)
 // renderer's existing collision timestamp (no new game state needed).
 const FILM_GRAIN_INTENSITY = 0.032 // tiny: reads as film texture, never as snow
 const VIGNETTE_DARKNESS = 0.7 // corner brightness (30% darker) to frame the car
-const CHROMATIC_COLLISION_PEAK = 1.0 // max CA intensity at the instant of a hit
+// Collision is now a punchy spike that STACKS on top of an always-present flux
+// baseline (iteration 5), so it's pulled down from 1.0 -> 0.8: the lens kick still
+// reads as a hard impact but no longer oversaturates against the live baseline.
+const CHROMATIC_COLLISION_PEAK = 0.8 // max CA contribution at the instant of a hit
 const CHROMATIC_DECAY_MS = 220 // ease the lens kick back to 0 over this window
+
+// Spectral-flux -> chromatic-aberration tuning (iteration 5). Flux (treble
+// volatility, 0..1) was computed and smoothed upstream but never made visible.
+// Binding it to a CA *baseline* turns treble transients into a prismatic shimmer:
+// a two-stage envelope sits gently at rest (BASELINE_MIN..MAX as flux climbs to the
+// SPIKE_THRESHOLD) then ramps faster toward SPIKE_MAX on bright, volatile peaks, so
+// the lens fringing breathes with the music instead of only kicking on collisions.
+const CHROMATIC_FLUX_BASELINE_MIN = 0.1 // resting shimmer when flux ≈ 0
+const CHROMATIC_FLUX_BASELINE_MAX = 0.3 // shimmer as flux approaches the spike knee
+const CHROMATIC_FLUX_SPIKE_THRESHOLD = 0.6 // flux above this ramps harder (energy peak)
+const CHROMATIC_FLUX_SPIKE_MAX = 0.5 // extra CA added across the post-threshold range
+// Hero-car emissive isolation (iteration 5). The player body's emissive intensity is
+// scaled each frame by (BASE + RANGE × centroid) so the car glows hotter during bright
+// emotional peaks and settles to a calm floor in quiet passages — a centroid-driven
+// focal "product light" that stacks orthogonally with the beat (FOV/bloom) and flux
+// (CA) gestures. Applied to base intensities captured once at model load.
+const CAR_EMISSIVE_CENTROID_BASE = 0.3 // floor multiplier on calm/dark sections
+const CAR_EMISSIVE_CENTROID_RANGE = 0.5 // -> up to 0.8× at peak perceived brightness
 
 const ANALOGOUS_PALETTE = {
   abyss: new THREE.Color(0x041226),
@@ -304,6 +325,12 @@ export class ThreeScene {
   // Beat-locked hero-car rim glow (iteration 4). Built lazily once the car bounds are
   // known, parented under the car group, and updated each frame from beat + mood.
   private rimGlow: RimGlowShell | null = null
+  // Player-car body materials + their base emissive intensities, captured when the
+  // palette is applied (iteration 5). Per-frame, each base is scaled by a centroid-
+  // driven multiplier so the hero car glows hotter on bright emotional peaks. Reset
+  // and re-collected whenever the car model is (re)built so it never references stale
+  // materials (e.g. when the GLB swaps in over the procedural fallback).
+  private carEmissiveMaterials: { material: THREE.Material & { emissiveIntensity: number }; base: number }[] = []
   private roadMesh: THREE.Mesh | null = null
   private carMesh: THREE.Group | null = null
   private trackData: TrackData | null = null
@@ -836,6 +863,10 @@ export class ThreeScene {
   }
 
   private buildFallbackCar(carGroup: THREE.Group): void {
+    // Fresh emissive registry for the procedural hero car so the centroid glow drives
+    // these materials (mirrors the reset in applyPaletteToModel for the GLB path).
+    this.carEmissiveMaterials = []
+
     const bodyGeometry = new THREE.BoxGeometry(1.2, 0.4, 2)
     const bodyMaterial = new THREE.MeshStandardMaterial({
       color: ANALOGOUS_PALETTE.aquaCore,
@@ -855,6 +886,12 @@ export class ThreeScene {
     const cabin = new THREE.Mesh(cabinGeometry, cabinMaterial)
     cabin.position.set(0, 0.65, -0.2)
     carGroup.add(cabin)
+
+    // Register both emissive bodies for the per-frame centroid-driven hero glow.
+    this.carEmissiveMaterials.push(
+      { material: bodyMaterial, base: bodyMaterial.emissiveIntensity },
+      { material: cabinMaterial, base: cabinMaterial.emissiveIntensity }
+    )
 
     const glowGeometry = new THREE.BoxGeometry(1.3, 0.5, 2.1)
     const glowMaterial = new THREE.MeshBasicMaterial({
@@ -886,6 +923,11 @@ export class ThreeScene {
   }
 
   private applyPaletteToModel(object: THREE.Object3D, isPlayer = false): void {
+    // Re-collecting the hero car's emissive materials from scratch each (re)build so
+    // the per-frame centroid glow never targets disposed/stale materials.
+    if (isPlayer) {
+      this.carEmissiveMaterials = []
+    }
     object.traverse(obj => {
       if (obj instanceof THREE.Mesh) {
         obj.castShadow = true
@@ -910,6 +952,11 @@ export class ThreeScene {
             material.emissive.copy(emissiveTarget)
             material.emissiveIntensity = Math.max(material.emissiveIntensity ?? 0, isLightComponent ? 0.7 : 0.3)
             material.needsUpdate = true
+            // Record the hero car's emissive baseline so renderComposite can pump it
+            // up on bright (high-centroid) moments and ease it back on calm sections.
+            if (isPlayer) {
+              this.carEmissiveMaterials.push({ material, base: material.emissiveIntensity })
+            }
           } else if (material instanceof THREE.MeshBasicMaterial) {
             material.color.copy(isPlayer ? ANALOGOUS_PALETTE.cyanGlow : ANALOGOUS_PALETTE.mintHighlight)
             material.needsUpdate = true
@@ -1255,9 +1302,11 @@ export class ThreeScene {
     const strength = gameState.car.beatStrength
 
     // Mood signals (smoothed upstream by the controller). centroid drives the slow,
-    // sectional warmth; dropIntensity is the fast cinematic spike on drop entry.
+    // sectional warmth; dropIntensity is the fast cinematic spike on drop entry; flux
+    // (treble volatility) drives the chromatic-aberration shimmer baseline below.
     const centroid = gameState.car.spectralCentroid
     const dropIntensity = gameState.car.dropIntensity
+    const flux = gameState.car.spectralFlux
 
     // --- FOV punch: fast attack to a strength-scaled peak, eased decay back to base.
     // Iteration 2 adds a drop-driven expansion ON TOP so the camera reacts to both
@@ -1315,7 +1364,22 @@ export class ThreeScene {
       const d = collisionAge / CHROMATIC_DECAY_MS
       collisionEnvelope = (1 - d) * (1 - d)
     }
-    this.chromaticPass.uniforms.intensity.value = collisionEnvelope * CHROMATIC_COLLISION_PEAK
+
+    // --- Chromatic aberration is now a music-driven shimmer (iteration 5): a two-stage
+    // flux baseline that is always present (treble transients fringe the frame) with the
+    // collision lens-kick STACKED on top via max(), so impacts still punch but no longer
+    // own the effect. Stage 1 (flux below the spike knee) lerps MIN..MAX; stage 2 (above
+    // the knee, an energy peak) ramps harder by SPIKE_MAX across the remaining range.
+    const fluxBaseline =
+      flux < CHROMATIC_FLUX_SPIKE_THRESHOLD
+        ? CHROMATIC_FLUX_BASELINE_MIN +
+          (flux * (CHROMATIC_FLUX_BASELINE_MAX - CHROMATIC_FLUX_BASELINE_MIN)) /
+            CHROMATIC_FLUX_SPIKE_THRESHOLD
+        : CHROMATIC_FLUX_BASELINE_MAX +
+          (Math.max(0, flux - CHROMATIC_FLUX_SPIKE_THRESHOLD) * CHROMATIC_FLUX_SPIKE_MAX) /
+            (1 - CHROMATIC_FLUX_SPIKE_THRESHOLD)
+    const totalCA = Math.max(fluxBaseline, collisionEnvelope * CHROMATIC_COLLISION_PEAK)
+    this.chromaticPass.uniforms.intensity.value = THREE.MathUtils.clamp(totalCA, 0, 1.2)
 
     // --- Animate film grain (re-seed the noise each frame so it shimmers like film).
     this.filmGrainPass.uniforms.time.value = (performance.now() % 100000) / 1000
@@ -1323,6 +1387,16 @@ export class ThreeScene {
     // --- Beat-locked, mood-colored hero-car rim glow. Pulses on kicks (beatStrength),
     // swells with brightness (spectralCentroid), and washes hot-white on collision.
     this.rimGlow?.update(gameState.car.beatStrength, centroid, collisionEnvelope)
+
+    // --- Hero-car emissive isolation (iteration 5). Scale each captured body-material
+    // base emissive by a centroid-driven multiplier so the car body glows hotter on
+    // bright emotional peaks and eases back to a calm floor in quiet passages.
+    if (this.carEmissiveMaterials.length > 0) {
+      const carEmissiveScale = CAR_EMISSIVE_CENTROID_BASE + CAR_EMISSIVE_CENTROID_RANGE * centroid
+      for (const entry of this.carEmissiveMaterials) {
+        entry.material.emissiveIntensity = entry.base * carEmissiveScale
+      }
+    }
 
     // --- Advance the GPU particle simulation (drop + collision bursts).
     this.particlePool.update(this.lastFrameDelta)

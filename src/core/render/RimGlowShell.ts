@@ -57,9 +57,12 @@ export class RimGlowShell {
       side: THREE.FrontSide,
       uniforms: {
         glowColor: { value: this.color.clone() },
-        glowStrength: { value: 0.8 },
+        // Iteration 5: brighter base glow (0.8 -> 1.1) to pop the hero car as the focal
+        // "product" point, and a slightly wider/softer rim (fresnel 3.2 -> 2.5) so the
+        // halo reads as a deliberate isolation light rather than a thin edge.
+        glowStrength: { value: 1.1 },
         // Fresnel sharpness: higher = thinner, more concentrated rim at the edge.
-        fresnelPower: { value: 3.2 }
+        fresnelPower: { value: 2.5 }
       },
       vertexShader: /* glsl */ `
         varying vec3 vNormalW;
