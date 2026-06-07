@@ -223,10 +223,16 @@ export function createSubstratePaperPass(opts: {
         // Centre the height around 0 so peaks (>0) and valleys (<0) are signed.
         float hSigned = h - 0.5;
         // Pigment pools in the VALLEYS (low height) -> settle increases as height drops.
+        // SHARPENED (pow > 1) so the granulation reads as discrete pools settling into the
+        // tooth (real watercolour granulation) rather than a uniform fine veil over everything.
         float settle = clamp(0.5 - hSigned, 0.0, 1.0); // 0 at peaks, ->1 in deep valleys
-        // Luma BELL gate: bite in the mid washes (peak ~0.45), fade in paper-white & darks.
+        settle = pow(settle, 1.8);                      // pool in the deep valleys, clear the peaks
+        // Luma BELL gate: bite in the mid washes, fade in paper-white & darks. NARROWED and
+        // pivoted a touch DOWN (peak ~0.40, width ~0.20) so the luminous negative space / bright
+        // sky stays CLEAN (ref 02's quiet field is ungranulated) and the granulation concentrates
+        // in the mid-value washes (ground, road, forms) where watercolour granulation lives.
         float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
-        float bell = exp(-pow((luma - 0.45) / 0.30, 2.0)); // gaussian bell, peak at 0.45
+        float bell = exp(-pow((luma - 0.40) / 0.20, 2.0));
         float gran = granDensity * settle * bell;
         // Subtractive: darken toward the local value (pigment drying denser).
         col *= (1.0 - gran);

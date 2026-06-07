@@ -667,32 +667,60 @@ export class ThreeScene {
     // PASS 4 — Anisotropic Kuwahara (KEYSTONE), full-res. tDiffuse auto-wires to the PreBlur
     // colour (untouched in readBuffer by the non-swapping tensor trio); tTensor is the final
     // blurred half-res tensor. tensorTexel is the half-res texel for the bilinear upscale.
+    // Round 2: radius 6 → 7 (the loop cap) for broader gouache strokes, and a LOWER
+    // eccentricityClamp (0.6 → 0.48) so the edge-aligned ellipse elongates MORE along contours
+    // — the strokes now carry directional brush STRUCTURE (Sienkiewicz gouache sweep), not just
+    // an isotropic smooth. q stays 12 at rest (KUWAHARA_Q_REST), easing down on drops.
     this.kuwaharaPass = createAnisotropicKuwaharaPass({
       texel: fullTexel,
       tensorTexel: halfTexel,
-      radius: 6,
-      sharpness: 12,
-      eccentricityClamp: 0.6
+      radius: 7,
+      sharpness: KUWAHARA_Q_REST,
+      eccentricityClamp: 0.48
     })
     this.kuwaharaPass.uniforms.tTensor.value = this.tensorTargetA.texture
 
     // PASS 5 — WatercolourPigment: wobble + edge-darken + granulate + bleed (resolution px).
-    this.pigmentPass = createWatercolourPigmentPass({ resolution: [bufW, bufH] })
+    // Round 2: COARSER tooth (paperScale 2.2 → 1.1, larger cells) + lighter granulation so the
+    // grain reads as watercolour granulation pooling in the paper, not fine uniform static.
+    this.pigmentPass = createWatercolourPigmentPass({
+      resolution: [bufW, bufH],
+      paperScale: 1.1,
+      granulation: 0.17,
+      edgeStrength: 0.55
+    })
 
     // PASS 6 — PaintGradeLUT (PALETTE LOCK). Explicitly build the gouache ramp via paintRamp
     // (the factory would default to the same, but constructing it here makes the palette-lock
     // DataTexture an owned, swappable artefact for the B4 drop cross-fade).
-    this.paintGradePass = createPaintGradeLUTPass({ gradient: buildPaintRamp() })
+    // Round 2: the value-range reshape (blackPoint/whitePoint/contrast) is what gives the
+    // frame REAL value contrast — it pulls the scene's darkest forms (under-car, shadow sides,
+    // road-in-shade) down into the ramp's deep ink stops while the luminous field stays bright,
+    // so the punched darks of ref 02 appear WITHOUT undoing Round 1's mid-key base.
+    this.paintGradePass = createPaintGradeLUTPass({
+      gradient: buildPaintRamp(),
+      blackPoint: 0.38,
+      whitePoint: 0.92,
+      contrast: 1.32,
+      shadowDepth: 1.0
+    })
 
     // PASS 7 — PainterlyEdge: flow-XDoG ∪ depth/normal edges, gated, MULTIPLY ink. Consumes
     // the blurred tensor (flow), the depth + normal G-buffers (B2), at drawing-buffer res.
     // cameraFar TIGHTENED to DEPTH_FAR to match the aux depth capture's linearisation.
+    // Round 2: the painterly edge is the BIGGEST lever for "reads as a painting". The defaults
+    // gated to ~0% on this luminous low-contrast scene; these values loosen the gate to the
+    // SMALL contrasts the scene actually has, DILATE the 1px detector scribble into a brush-
+    // width calligraphic stroke, and ink the survivors CONFIDENTLY — while the slow breakup
+    // keeps most contours LOST (found-here/lost-there like ref 02), not a uniform toon outline.
     this.painterlyEdgePass = createPainterlyEdgePass({
       resolution: [bufW, bufH],
       texel: fullTexel,
       tensorTexel: halfTexel,
       cameraNear: this.camera.near,
-      cameraFar: DEPTH_FAR
+      cameraFar: DEPTH_FAR,
+      inkGain: 2.4,
+      edgeDilate: 2.0
     })
     this.painterlyEdgePass.uniforms.tTensor.value = this.tensorTargetA.texture
     this.painterlyEdgePass.uniforms.useTensor.value = 1
@@ -715,7 +743,15 @@ export class ThreeScene {
 
     // PASS 9 — SubstratePaper (FINAL): frame-anchored paper granulation + tooth-light +
     // micro-distort, Pegtop soft-light, folded dither (drawing-buffer resolution).
-    this.substratePaperPass = createSubstratePaperPass({ resolution: [bufW, bufH] })
+    // Round 2: a COARSER cold-press tooth (paperScale 2.6 → 1.25, low-frequency paper grain)
+    // and slightly lighter density/strength so the substrate reads as a watercolour SHEET with
+    // big granulating tooth, not the fine uniform sandpaper veil of the R1 frame.
+    this.substratePaperPass = createSubstratePaperPass({
+      resolution: [bufW, bufH],
+      paperScale: 1.25,
+      granDensity: 0.20,
+      paperStrength: 0.14
+    })
 
     // addPass in the EXACT STYLE_SPEC §3 order.
     this.composer.addPass(this.preBlurPass)

@@ -225,8 +225,14 @@ export function createWatercolourPigmentPass(opts: {
         // at ~0.45 so the tooth bites in the mid washes and fades out in paper-white and in
         // the dense darks (a Gaussian bell on luma, width ~0.30).
         float h = paperHeight(uv);
-        float bell = exp(-pow((lum - 0.45) / 0.30, 2.0));
-        float gran = 1.0 - granulation * density * (1.0 - h) * bell;
+        // Narrowed luma bell (peak ~0.40, width ~0.20) so granulation bites in the MID washes
+        // and clears the luminous negative space — matches the SubstratePaper gate so the two
+        // tooth layers agree and the bright field stays clean (not a uniform fine veil).
+        float bell = exp(-pow((lum - 0.40) / 0.20, 2.0));
+        // Sharpen the valley response (1-h)^1.6 so pigment POOLS in the deep tooth rather than
+        // veiling evenly — reads as watercolour granulation, not sandpaper static.
+        float valley = pow(clamp(1.0 - h, 0.0, 1.0), 1.6);
+        float gran = 1.0 - granulation * density * valley * bell;
         col *= gran;
 
         // -- OP 5: DENSITY-GATED 4-TAP BLEED ----------------------------------------------

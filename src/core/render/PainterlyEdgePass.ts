@@ -109,6 +109,8 @@ export function createPainterlyEdgePass(opts: {
   cohHi?: number
   noiseScale?: number
   strength?: number
+  inkGain?: number
+  edgeDilate?: number
 } = {}): ShaderPass {
   const [rx, ry] = opts.resolution ?? [1920, 1080]
   const [tx, ty] = opts.texel ?? [1 / rx, 1 / ry]
@@ -143,22 +145,38 @@ export function createPainterlyEdgePass(opts: {
       // XDoG controls.
       sigma_e: { value: opts.sigmaE ?? 1.1 },
       k: { value: opts.k ?? 1.6 },
-      tau: { value: opts.tau ?? 0.95 },
-      phi: { value: opts.phi ?? 3.0 },
+      tau: { value: opts.tau ?? 0.97 },
+      phi: { value: opts.phi ?? 4.0 },
       epsilon: { value: opts.epsilon ?? 0.0 },
 
       // Geometric thresholds.
-      normalThresh: { value: opts.normalThresh ?? 0.45 },
-      depthThresh: { value: opts.depthThresh ?? 0.6 },
+      normalThresh: { value: opts.normalThresh ?? 0.30 },
+      depthThresh: { value: opts.depthThresh ?? 0.45 },
 
-      // Gate bands.
-      salLo: { value: opts.salLo ?? 0.18 },
-      salHi: { value: opts.salHi ?? 0.55 },
-      cohLo: { value: opts.cohLo ?? 0.12 },
-      cohHi: { value: opts.cohHi ?? 0.5 },
-      noiseScale: { value: opts.noiseScale ?? 34.0 },
+      // Gate bands. The scene is a LOW-contrast luminous wash (ref 02's mid-key), so the
+      // saliency band keys off the SMALL local contrasts that actually exist here — a band
+      // of 0.18..0.55 (sensible for a punchy photo) gates to ~0% on this material. cohLo/Hi
+      // keep low-coherence wet zones inking less, but with a generous floor so the strongest
+      // road/car/sword contours still fire. noiseScale is LOWER => coarser found/lost patches
+      // (longer inked stretches alternating with longer lost ones, like a brush lifting).
+      salLo: { value: opts.salLo ?? 0.04 },
+      salHi: { value: opts.salHi ?? 0.20 },
+      cohLo: { value: opts.cohLo ?? 0.05 },
+      cohHi: { value: opts.cohHi ?? 0.30 },
+      noiseScale: { value: opts.noiseScale ?? 16.0 },
 
       uStrength: { value: opts.strength ?? 1.0 },
+      // Debug visualiser: 0 = normal; 1 = show raw `candidate` edge field (white-on-black);
+      // 2 = show gated `e`. Dev-only diagnostic, left at 0 in production.
+      uDebug: { value: 0 },
+      // Ink presence: how confidently a FOUND stroke darkens toward the tinted near-black.
+      // >1 lets the gated edge `e` saturate so the survivors are a deep calligraphic pool
+      // (ref 02's confident accent strokes), not a faint gray smudge. The lost-and-found
+      // SPARSENESS comes from the gate (breakup), not from a weak ink — so we can ink the
+      // ~30-45% that survive HARD while the rest stay fully lost.
+      uInkGain: { value: opts.inkGain ?? 2.2 },
+      // Edge dilation radius (px) — fattens the 1px detector scribble into a brush-width stroke.
+      uEdgeDilate: { value: opts.edgeDilate ?? 2.0 },
       uTime: { value: 0 },
       uMusic: { value: 0 }
     },
@@ -210,6 +228,9 @@ export function createPainterlyEdgePass(opts: {
       uniform float noiseScale;
 
       uniform float uStrength;
+      uniform float uDebug;
+      uniform float uInkGain;
+      uniform float uEdgeDilate;
       uniform float uTime;
       uniform float uMusic;
 
@@ -379,6 +400,22 @@ export function createPainterlyEdgePass(opts: {
         return clamp((div - normalThresh) / max(1.0 - normalThresh, EPS), 0.0, 1.0);
       }
 
+      // -- Combined candidate edge (luma XDoG ∪ near-foreground depth/normal) at one UV ------
+      // Factored out so the candidate can be DILATED (a few offset samples, max-combined) into
+      // a brush-WIDTH stroke. The raw XDoG/geo edges are 1px scribbles; ref 02's accent strokes
+      // have real weight, so we fatten them morphologically (cheap dilation) before gating.
+      float candidateAt(vec2 uv, vec2 tang) {
+        float le = flowXDoG(uv, tang);
+        float ge = 0.0;
+        if (useDepth > 0.5)  ge = max(ge, depthEdge(uv));
+        if (useNormal > 0.5) ge = max(ge, normalEdge(uv));
+        if (useDepth > 0.5) {
+          float ldg = linearDepth(uv);
+          ge *= 1.0 - smoothstep(0.05, 0.11, ldg); // near-foreground silhouettes only
+        }
+        return max(le, ge);
+      }
+
       void main() {
         vec3 src = texture2D(tDiffuse, vUv).rgb;
 
@@ -393,29 +430,36 @@ export function createPainterlyEdgePass(opts: {
         vec2 tang = fc.xy;
         float coherence = fc.z;
 
-        // --- (a) Flow-based XDoG on luma -------------------------------------------------
-        float lumaEdge = flowXDoG(vUv, tang);
+        // --- CANDIDATE EDGE (luma XDoG ∪ near-foreground depth/normal), DILATED to brush width
+        // The detectors carry the right contours (car/sword silhouettes, road value edges) but
+        // as 1px scribbles. Sample the candidate at the centre + a ring of offsets along/across
+        // the stroke and MAX-combine → a confident brush-WIDTH mark. The geometric branch is
+        // depth-attenuated INSIDE candidateAt so the mid-distance sun plane never inks.
+        float candidate = candidateAt(vUv, tang);
+        // 1-ring dilation: 4 axis samples at uEdgeDilate px spacing, max-combined. This is the
+        // single biggest lever turning thin scribble into a calligraphic stroke with weight.
+        vec2 dpx = texel * uEdgeDilate;
+        candidate = max(candidate, candidateAt(vUv + vec2(dpx.x, 0.0), tang));
+        candidate = max(candidate, candidateAt(vUv - vec2(dpx.x, 0.0), tang));
+        candidate = max(candidate, candidateAt(vUv + vec2(0.0, dpx.y), tang));
+        candidate = max(candidate, candidateAt(vUv - vec2(0.0, dpx.y), tang));
 
-        // --- (b) Geometric depth/normal edges (UNION) -----------------------------------
-        // Optional: only read tDepth/tNormal when their targets are actually bound, so an
-        // unbound sampler is never fetched (same guard pattern as the pigment pass's tPaper).
-        float geoEdge = 0.0;
-        if (useDepth > 0.5) {
-          geoEdge = max(geoEdge, depthEdge(vUv));
-        }
-        if (useNormal > 0.5) {
-          geoEdge = max(geoEdge, normalEdge(vUv));
-        }
+        // --- THE GATE: saliency (lost-and-found driver) attenuated by coherence + depthFade --
+        // Restructured from the old four-way PRODUCT (which multiplied four sub-1 terms into a
+        // near-zero gate on this low-contrast wash => ~0% inked). The new shape:
+        //   - SALIENCY decides "is this a strong enough contour to consider", on a band tuned
+        //     to the SMALL contrasts this luminous mid-key scene actually has, and it counts
+        //     the GEOMETRIC candidate too (car/sword silhouettes are same-value forms where
+        //     luma contrast ~0 but depth/normal edges are strong — those must read as salient).
+        //   - BREAKUP is the lost-and-found ENGINE — a slow-crawling field that keeps the ink
+        //     on ~30-45% of the salient length and drops it on the rest, the SAME edge found
+        //     here / lost there.
+        //   - COHERENCE + DEPTHFADE are gentle ATTENUATORS with a high floor (not hard gates),
+        //     so the strongest contours still ink even in lowish-coherence/mid-depth regions.
 
-        // UNION of the luma and geometric detectors (max = "edge if either fires").
-        float candidate = max(lumaEdge, geoEdge);
-
-        // --- THE GATE: saliency x coherence x slow-noise breakup x depthFade -------------
-
-        // 1) SALIENCY (hysteresis band on a smoothed contrast field). A small local-contrast
-        //    estimate (max-min luma over a + of taps) is the "is there anything worth inking
-        //    here" signal; a smoothstep band (salLo..salHi) lets strong cores through and
-        //    suppresses faint speckle so it cannot flicker frame-to-frame.
+        // 1) SALIENCY. Local luma contrast (max-min over a + of taps) OR the geometric edge —
+        //    whichever says "there is a real form boundary here". Banded so faint wash speckle
+        //    stays lost and firm contours read as fully salient.
         float lc = lumaAt(vUv);
         float lmin = lc, lmax = lc;
         float ln1 = lumaAt(vUv + vec2(texel.x, 0.0));
@@ -425,40 +469,53 @@ export function createPainterlyEdgePass(opts: {
         lmin = min(lmin, min(min(ln1, ln2), min(ln3, ln4)));
         lmax = max(lmax, max(max(ln1, ln2), max(ln3, ln4)));
         float contrast = lmax - lmin;
-        float saliency = smoothstep(salLo, salHi, contrast);
+        float lumaSal = smoothstep(salLo, salHi, contrast);
+        // The dilated candidate IS the "is there a real contour here" signal (it already unions
+        // the luma XDoG and the near-foreground silhouettes). A strong candidate is salient even
+        // where local luma contrast is tiny (same-value car/sword forms). Threshold it softly so
+        // faint speckle still needs the luma-contrast band to qualify.
+        float saliency = max(lumaSal, smoothstep(0.15, 0.45, candidate));
 
-        // 2) FLOW COHERENCE (anisotropy). The ref's wet chrome is a LOW-coherence field that
-        //    inks almost nothing; high-coherence true contours ink. Band cohLo..cohHi.
-        float cohGate = smoothstep(cohLo, cohHi, coherence);
+        // 2) FLOW COHERENCE (anisotropy) as a soft ATTENUATOR (floor 0.45, not 0). Low-coherence
+        //    wet zones ink a little LESS; high-coherence true contours ink full.
+        float cohGate = mix(0.45, 1.0, smoothstep(cohLo, cohHi, coherence));
 
         // 3) SLOW-CRAWLING BREAKUP NOISE — the lost-and-found engine. A frame-anchored fbm
         //    that crawls at uTime*0.05 (slow, per spec, or edges strobe). Compared against a
         //    threshold so only the higher-noise stretches keep their ink: the SAME edge is
         //    found where the field is high and LOST where it is low, and because the field
-        //    drifts slowly the boundary creeps rather than blinking.
+        //    drifts slowly the boundary creeps rather than blinking. Threshold ~0.42 calm so
+        //    a healthy MINORITY (~35-45%) of the salient length survives (the rest stay lost).
         vec2 aspect = vec2(uResolution.x / uResolution.y, 1.0);
         vec2 np = vUv * aspect * noiseScale + vec2(uTime * 0.05, uTime * 0.037);
         float n = breakupFbm(np);
-        // Music WIDENS the threshold window so MORE ink survives on drops (+/-15% max, never
-        // a strength strobe). Lower threshold => more of the field passes => more found ink.
-        float breakThresh = mix(0.55, 0.40, clamp(uMusic, 0.0, 1.0)); // 0.55 calm -> 0.40 drop
+        // Music WIDENS the threshold window so MORE ink survives on drops (never a strength
+        // strobe). Lower threshold => more of the field passes => more found ink.
+        float breakThresh = mix(0.42, 0.30, clamp(uMusic, 0.0, 1.0)); // calm -> drop
         // Soft step so the found/lost boundary is feathered (a brush lifting), not a hard cut.
-        float breakup = smoothstep(breakThresh - 0.12, breakThresh + 0.12, n);
+        float breakup = smoothstep(breakThresh - 0.14, breakThresh + 0.14, n);
 
-        // 4) DEPTH FADE — gate the whole thing to the foreground heroes/road, not the sky/far
-        //    distance (the spec excludes the sky from the edge budget). Near = full, far = 0.
-        //    Falls back to "all foreground" (1.0) when depth isn't wired yet.
+        // 4) DEPTH FADE — soft ATTENUATOR toward the far distance (sky excluded), floor 0.35 so
+        //    mid-distance road still inks. Near = full, sky (ld -> 1) = fully out.
         float depthFade = 1.0;
         if (useDepth > 0.5) {
           float ld = linearDepth(vUv);
-          // 1 up close, easing to 0 by the far plane; the sky (ld -> 1) is excluded entirely.
-          depthFade = 1.0 - smoothstep(0.25, 0.85, ld);
+          depthFade = mix(1.0, 0.35, smoothstep(0.20, 0.80, ld));
+          // Hard-exclude the true background (sky / far plane) entirely.
+          depthFade *= 1.0 - smoothstep(0.90, 0.985, ld);
         }
 
-        // Combine the gate. The product means a contour must satisfy ALL four to ink, which is
-        // what knocks the ~100% candidate silhouettes down to the spec's sparse ~25-40%.
-        float gate = saliency * cohGate * breakup * depthFade;
-        float e = clamp(candidate * gate * uStrength, 0.0, 1.0);
+        // Combine. Saliency AND breakup are the load-bearing lost-and-found pair; coherence and
+        // depthFade only attenuate. This knocks the candidates down to a sparse, confident set.
+        float gate = saliency * breakup * cohGate * depthFade;
+        float e = clamp(candidate * gate * uStrength * uInkGain, 0.0, 1.0);
+
+        // --- DEV DIAGNOSTIC: visualise the edge fields as white-on-black ------------------
+        if (uDebug > 0.5) {
+          float v = (uDebug < 1.5) ? candidate : e;
+          gl_FragColor = vec4(vec3(v), 1.0);
+          return;
+        }
 
         // --- COMPOSITE: MULTIPLY toward a TINTED warm-black (never additive, never black) --
         // Pick cool vs warm ink by the pixel's local temperature (R vs B): warm-lit forms get

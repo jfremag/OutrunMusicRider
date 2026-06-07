@@ -41,6 +41,10 @@ export function createPaintGradeLUTPass(opts: {
   posterize?: number
   dither?: number
   hueShift?: number
+  blackPoint?: number
+  whitePoint?: number
+  contrast?: number
+  shadowDepth?: number
   /** Provide a custom ramp DataTexture; otherwise the default gouache ramp is built. */
   gradient?: import('three').DataTexture | null
 } = {}): ShaderPass {
@@ -54,7 +58,26 @@ export function createPaintGradeLUTPass(opts: {
       uChromaPreserve: { value: opts.chromaPreserve ?? 0.22 },
       uPosterize: { value: opts.posterize ?? 0.0 },
       uDither: { value: opts.dither ?? 1.0 },
-      uHueShift: { value: opts.hueShift ?? 0.0 }
+      uHueShift: { value: opts.hueShift ?? 0.0 },
+      // --- VALUE-RANGE RESHAPE (Round 2: real, SELECTIVE value contrast) ----------------
+      // Round 1 lifted the whole scene into the light half (luma ~0.55..0.85) for a luminous
+      // mid-key — beautiful, but it means the ramp's DARK stops (the deep violet near-blacks,
+      // ramp pos 0..0.3) are never reached, so the frame has no punched darks like ref 02.
+      // These three knobs reshape ONLY the lookup coordinate (the value the ramp is sampled
+      // at), pulling the scene's existing darkest pixels (under-car, shadow sides, road-in-
+      // shade) DOWN into the dark ramp stops while leaving the bright field where R1 put it.
+      // This is a tone curve, NOT a global darken — the midtones/highlights barely move.
+      //   uBlackPoint  : luma at/below this maps to ramp 0 (the punched-dark floor). Lifting it
+      //                  toward ~0.30 lets the darkest forms actually reach the deep ink stops.
+      //   uContrast    : S-curve gain around the 0.5 pivot AFTER the black-point lift, so darks
+      //                  deepen and lights stay luminous (value separation, not a flat dim).
+      //   uShadowDepth : how far toward ramp-0 the reshaped dark coordinate is allowed to go
+      //                  (0 = no extra darks; ~1 = full reach). Keeps the darks as ACCENTS.
+      //   uWhitePoint  : luma at/above this maps to ramp 1 (the bright field stays luminous).
+      uBlackPoint: { value: opts.blackPoint ?? 0.34 },
+      uWhitePoint: { value: opts.whitePoint ?? 0.92 },
+      uContrast: { value: opts.contrast ?? 1.22 },
+      uShadowDepth: { value: opts.shadowDepth ?? 1.0 }
     },
     vertexShader: /* glsl */ `
       varying vec2 vUv;
@@ -72,6 +95,10 @@ export function createPaintGradeLUTPass(opts: {
       uniform float uPosterize;
       uniform float uDither;
       uniform float uHueShift;
+      uniform float uBlackPoint;
+      uniform float uWhitePoint;
+      uniform float uContrast;
+      uniform float uShadowDepth;
 
       // Cheap hash for the dither (two summed evaluations make it triangular).
       float hash12(vec2 p) {
@@ -98,13 +125,26 @@ export function createPaintGradeLUTPass(opts: {
       void main() {
         vec3 src = texture2D(tDiffuse, vUv).rgb;
 
-        // Rec.709 luminance — the lookup coordinate into the gouache ramp.
+        // Rec.709 luminance — the basis of the lookup coordinate into the gouache ramp.
         float luma = dot(src, vec3(0.2126, 0.7152, 0.0722));
 
-        // PALETTE LOCK: map luminance through the hand-authored ramp.
+        // --- VALUE-RANGE RESHAPE: pull the scene's darkest forms into the ramp's dark stops.
+        // The scene sits in the light half (luma ~0.55..0.85). A photographic LEVELS remap on
+        // the lookup coordinate stretches [uBlackPoint, uWhitePoint] across the full 0..1 ramp:
+        // the darkest forms (under-car, shadow sides, road-in-shade) drop into the deep ink
+        // stops while the bright field, sitting near the white point, still reaches the light
+        // stops. An S-curve about 0.5 then deepens the new darks without dimming the lights.
+        // uShadowDepth blends back toward raw luma so the extra darks stay a tunable ACCENT.
+        float lvl = clamp((luma - uBlackPoint) / max(uWhitePoint - uBlackPoint, 1e-3), 0.0, 1.0);
+        float s = clamp(0.5 + (lvl - 0.5) * uContrast, 0.0, 1.0);
+        float coord = mix(lvl, s, 0.85);
+        coord = mix(luma, coord, uShadowDepth);
+        coord = clamp(coord, 0.0, 1.0);
+
+        // PALETTE LOCK: map the reshaped coordinate through the hand-authored ramp.
         // LinearFilter on the 256x1 ramp gives a smooth value gradient; sample at
         // row centre (v = 0.5). NO in-shader pow — ramp + src share display space.
-        vec3 graded = texture2D(tGradient, vec2(clamp(luma, 0.0, 1.0), 0.5)).rgb;
+        vec3 graded = texture2D(tGradient, vec2(coord, 0.5)).rgb;
 
         // Keep a sliver of the source's local hue so the hero/accents stay colour,
         // not dead gray; then blend the whole thing toward the locked grade.
