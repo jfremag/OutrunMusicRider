@@ -36,7 +36,7 @@ import { injectCarSheen, updateCarSheen, CarSheenMaterial } from './CarSheenMate
 // flattened focal subject the way the chrome rider fills its panel in ref 02 — a tighter
 // FOV magnifies the car and gently compresses depth (flattering the painted read) without
 // touching the off-centre diagonal stance (the COMPOSE_* angles below are re-tuned to suit).
-const BASE_FOV = 50
+const BASE_FOV = 44 // ralph(iter4) PRIORITY-6: 50 -> 44. A longer lens enlarges the hero kart and COMPRESSES the road's leading lines into the frame so the composition reads intentional/filled, not vast empty negative space. (Tighter framing pairs with the pulled-in chase distance below.)
 const FOV_PUNCH = 6 // extra degrees added at peak of a full-strength beat (scaled to the longer lens)
 const FOV_ATTACK_MS = 90 // ramp up to peak
 const FOV_DECAY_MS = 420 // ease back to base
@@ -76,7 +76,7 @@ const FOV_DROP_PUNCH = 6 // extra degrees at full drop intensity (cinematic expa
 // extra FOV is a complementary widening bound to the SAME normalized depth excess, so the
 // two always move in concert. On the rising edge of the focus flag the camera orbit angle
 // is snapped square (one frame) so the car is framed head-on during the moment.
-const BASE_CAMERA_DISTANCE = 3.7 // resting chase distance behind the car (units) — pulled in further (was 4.2) so the kart commands the frame as the hero focal subject; still clears lane changes
+const BASE_CAMERA_DISTANCE = 3.2 // ralph(iter4) PRIORITY-6: pulled in 3.7 -> 3.2 so the kart fills more of the frame as the hero focal subject (less empty negative space); paired with the longer 44mm lens it still clears lane changes
 const FOV_DROP_BOOST_MAX = 7 // extra degrees of FOV at full camera pull-back (6-8° band)
 const CAMERA_DEPTH_LERP = 0.12 // per-frame ease of the applied depth toward cameraDepthScale
 
@@ -148,9 +148,9 @@ const BURST_COLOR_HOT = new THREE.Color(0xa96276) // rose-magenta accent -> warm
 // trick). The shadow is a flat plane with a soft radial-violet alpha; as verticalOffset rises it
 // SHRINKS, SOFTENS (lower opacity) and drifts so the gap is unmistakable.
 const SHADOW_BASE_RADIUS = 1.7        // grounded half-size of the shadow ellipse (world units, ~kart footprint)
-const SHADOW_LENGTH_SCALE = 1.08      // ralph(iter3): shortened 1.35 -> 1.08 so the contact pool is a soft near-ROUND disc, not a comet streaking back along forward (the dark wake under/behind the kart was the elongated shadow, not just the smear)
+const SHADOW_LENGTH_SCALE = 1.0       // ralph(iter4): NEAR-ROUND (1.08 -> 1.0). Any elongation along forward reads as a WAKE trailing the kart; a circular disc cannot. The contact pool is now a clean round soft shadow directly under the kart.
 const SHADOW_GROUND_LIFT = 0.05       // height above the road surface to avoid z-fighting (world units)
-const SHADOW_BASE_OPACITY = 0.34      // ralph(iter3): softened 0.42 -> 0.34 so the contact pool is a clean soft shadow that cannot compound with the velocity smear into a muddy dark wake
+const SHADOW_BASE_OPACITY = 0.26      // ralph(iter4): softened 0.34 -> 0.26 so the contact pool is a faint clean grounding shadow that cannot compound with the velocity smear into a dark wake/smudge on the tarmac behind the hero
 const SHADOW_COLOR = new THREE.Color(0x241d2d) // deep dusky-violet (NOT black) — in the mauve-shadow harmony
 // Jump-height response: over this lift (world units) the shadow shrinks/fades to its airborne floor.
 const SHADOW_LIFT_FALLOFF = 4.5       // verticalOffset at which the shadow reaches its smallest/faintest
@@ -912,7 +912,13 @@ export class ThreeScene {
       // Granulation dialed way down (0.08) per feedback — the print speckle read as a static dot
       // field on the fast scene; keep only a faint hint.
       granulation: 0.08,
-      edgeStrength: 0.55,
+      // ralph(iter4) PRIORITY-6: edge-darkening CUT 0.55 -> 0.18. The Marangoni pooling was ringing
+      // a dark sketchy halo around every silhouette (car/sword), reading as a hand-drawn AMATEUR
+      // outline that compounded with the PainterlyEdge ink into a doubled, quirky contour. The
+      // premium painterly soul now comes from the VALUE/colour grade + chrome sheen, NOT from edge
+      // pooling. A faint 0.18 keeps a whisper of pigment settling at the very strongest value
+      // boundaries (so washes still read as wet) without ringing the focal forms.
+      edgeStrength: 0.18,
       // R-FINAL: wobble ZEROED (was 0.0012). Even a tiny static UV tremor warps every silhouette a
       // hair, reading as a hand-drawn WOBBLE on the car/sword outlines — off-brand for a Tesla-
       // premium frame. Zero it so the forms stay PRECISE; the Kuwahara strokes + edge ink carry the
@@ -977,20 +983,25 @@ export class ThreeScene {
       // stops (paintRamp.ts putty 0.96 / paper-white 1.0), which only coord >~0.93 reaches — i.e.
       // ONLY the sun's luminous core (src ~0.94 -> coord 1.0) and the helmet-sheen crest. The mid
       // field (sky/ground, coord <=0.84) is untouched, so nothing globally brightens.
-      // ralph(iter3): whitePoint OPENED 0.85 -> 0.90 (priority-6 value-range fix). At 0.85 the bright
-      // sky/horizon (pre-LUT luma ~0.85-0.89) was already saturating the ramp's cream/apex stops, so the
-      // whole upper value band collapsed onto the same washed cream — a low-contrast, two-zone, muddy
-      // frame. Raising the white point STRETCHES that bright band back across the cream->apex stops so the
-      // luminous sky reaches true paper-white at its brightest while the mid-key field sits a notch lower
-      // (real luminous depth restored). Darks stay punched via the unchanged blackPoint + contrast 1.7.
-      whitePoint: 0.90,
-      // V2 C4: contrast 1.7 (strong S-curve about 0.5) for value SEPARATION — deep darks + luminous
-      // lights. shadowDepth 0.88 so the genuinely darkest forms (under-car, sword/car shadow sides)
-      // reach the ink stops (the punched darks ref 02 has) while the BROAD shadow-side ground blends
-      // back toward its muted mid-green instead of crushing the whole band black at raking camera
-      // angles — the darks stay FOCAL accents, the field stays a luminous muted painting.
-      contrast: 1.7,
-      shadowDepth: 0.93,
+      // ralph(iter4) PRIORITY-4 (MID-KEY COMPRESSION): whitePoint RAISED 0.90 -> 0.985. (The task brief
+      // suggested LOWERING toward 0.84, but the LUT math + this ramp make that BACKWARDS: a lower white
+      // point makes the bright sky's lookup COORD reach ~1.0 sooner, landing it on the ramp's near-WHITE
+      // apex (#F6F3EA, ~245) — a BRIGHTER, more blown sky. Confirmed by the iter3 history note above.)
+      // The bright sky (pre-LUT luma ~0.87) at wp=0.90 mapped to coord ~0.95 → the cream stop (~222) — a
+      // blown near-white wall. RAISING wp to 0.985 widens the [black,white] span so that same sky maps to
+      // coord ~0.82 → the LUMINOUS COOL-CREAM/sage stop #CCC6AC (~199 ≈ the ref's ~190), pulling the sky
+      // DOWN off the apex while RESERVING the near-white apex for ONLY the genuinely brightest pixels (sun
+      // core / helmet sheen, pre-LUT >0.95). Net: the blown ~222 sky drops toward ~190, collapsing the
+      // sky-vs-ground spread into ref 02's tight ~150-190 luminous field with the chrome hero as the focus.
+      whitePoint: 0.985,
+      // ralph(iter4) PRIORITY-4: contrast SOFTENED 1.7 -> 1.32 and shadowDepth 0.93 -> 0.72. The strong
+      // 1.7 S-curve + deep shadowDepth was crushing the BROAD ground toward the dark ink stops, which
+      // (with the blown sky) produced the cheap two-zone split. Softening both LIFTS the mid/far ground
+      // back toward its muted mid-key value (~150) so the whole field reads as ref 02's unified luminous
+      // band — while the genuinely darkest FOCAL forms (under-car, the car/sword shadow side) still
+      // reach the ink stops as punched accents (just no longer dragging the entire ground plane down).
+      contrast: 1.32,
+      shadowDepth: 0.72,
       // POSTERIZE OFF (user: "don't apply flat effects that obfuscate depth"). The ~7-level
       // posterize crushed the smooth value gradients into flat plateaus, destroying the 3D
       // light-and-shadow form modelling — keep the smooth value range so volume/depth read as 3D.
@@ -1016,7 +1027,11 @@ export class ThreeScene {
       // smear; inkGain held at 1.25 so a FOUND stroke is a confident deep accent. The coherence-
       // driven taper (in-shader) now decides found/lost, so strokes run along real contours only.
       inkGain: 1.25,
-      edgeDilate: 1.0,
+      // ralph(iter4) PRIORITY-4: edgeDilate 1.0 -> 0.8 + phi 4.0 -> 5.5 so the accent stroke is a CRISP
+      // thin contour, not a fuzzy fattened smear (the sketchy amateur read). The higher tanh steepness
+      // (phi) hardens the XDoG ramp so a found stroke has a clean confident edge.
+      edgeDilate: 0.8,
+      phi: 5.5,
       // R3: raise the GEOMETRIC edge thresholds so only BIG depth/normal steps ink. The now-large
       // hero kart has an open frame (seat/engine/struts) whose many fine interior depth+normal
       // steps were inking into a busy black tangle that fought the helmet sheen. Higher thresholds
@@ -1036,7 +1051,10 @@ export class ThreeScene {
       // heroInkGain held at 1.3 so what lands on the shaded side is a confident-but-thin accent. The
       // coherence taper keeps it found-here/lost-there. lightDir2D is the key light projected to screen.
       heroInkGain: 1.3,
-      heroDilate: 1.0,
+      // ralph(iter4) PRIORITY-4: heroDilate 1.0 -> 0.8 so the hero silhouette stroke is a crisp brush
+      // line hugging the outer edge, not a fuzzy band — combined with the disabled breakup (in-shader)
+      // the blade reads as one clean confident accent, identical above vs below the horizon.
+      heroDilate: 0.8,
       lightDir2D: [-0.55, 0.84]
     })
     this.painterlyEdgePass.uniforms.tTensor.value = this.tensorTargetA.texture
@@ -1103,8 +1121,16 @@ export class ThreeScene {
       hazeStrength: 0.55,
       desat: 0.15,
       contrast: 0.52,
-      lift: 0.05,
+      // ralph(iter4) PRIORITY-4: lift RAISED 0.05 -> 0.12 so the far/mid ground band reads LUMINOUS
+      // (rises toward the ~150-190 mid-key) instead of receding into a dark veil — part of collapsing
+      // the blown-sky / dark-ground spread into ref 02's unified field.
+      lift: 0.12,
       pivot: 0.6,
+      // ralph(iter4) PRIORITY-4: foreground-DEEPEN dialled down (default 0.16 -> 0.06). The near-ground
+      // value-deepening was actively pushing the road plane under/around the kart DARKER (compounding
+      // the two-zone split + reinforcing the dark wake read). A light 0.06 keeps a hint of foreground
+      // value weight without crushing the near tarmac, so the whole ground stays in the luminous band.
+      foreRich: 0.06,
       // The foreground-rich counter-veil enriches the near/mid road, fading out by raw 0.986 — just
       // below the far-ground wash band (0.990) — so the near/mid foreground (incl. the road under and
       // around the car) keeps its rich, dark, contrasty painted value while the far ground is owned
@@ -1302,7 +1328,12 @@ export class ThreeScene {
           // Keep a touch more warmth toward the horizon (a low sun grazes the horizon band) but let
           // it reach UP to the disc too, so the bloom surrounds the sun instead of being clipped low.
           float lowBias = 1.0 - smoothstep(0.6, 1.0, h);
-          col = mix(col, sunGlowColor, clamp(glow * (0.5 + 0.4 * lowBias), 0.0, 0.92));
+          // ralph(iter4) PRIORITY-4: glow mix clamp LOWERED 0.92 -> 0.62. At 0.92 the near-sun sky
+          // washed almost fully to the warm cream key colour — a near-WHITE wall in the upper frame
+          // that, post-grade, saturated the apex and broke ref 02's tight mid-key. Capping the wash at
+          // 0.62 keeps a luminous DIRECTIONAL glow (light + depth in the negative space) while leaving
+          // the upper sky a graded sage→beige value, not a blown white wall.
+          col = mix(col, sunGlowColor, clamp(glow * (0.5 + 0.4 * lowBias), 0.0, 0.62));
 
           gl_FragColor = vec4(col, 1.0);
         }

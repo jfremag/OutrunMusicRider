@@ -591,12 +591,18 @@ export function createPainterlyEdgePass(opts: {
           // from the key light (dot < 0 → shaded side). clamp(0.5 - dot,0,1) peaks there and
           // fades on the lit side, so the kart inks heavily on its shadow edge and lightly (or
           // not at all) on the lit edge — a painter's accent, never an even outline.
-          float shadowSide = clamp(0.5 - dot(normalize(outN + 1e-5), normalize(uLightDir2D)), 0.0, 1.0);
-          // Reuse the same slow breakup field so even the hero stroke is FOUND-here/LOST-there
-          // (a broken brush line), not a continuous toon outline. A higher floor (0.45) keeps the
-          // hero stroke more present than the global ink (it is THE focal gesture) while still
-          // breaking. Multiply by the band so it only lives on the silhouette.
-          float heroBreak = mix(0.45, 1.0, breakup);
+          // ralph(iter4) PRIORITY-4 (CLEAN HERO INK ACROSS THE HORIZON): the old stroke gated HARD on
+          // the shadow side AND applied the coherence breakup, so the blade inked found-here/lost-there
+          // and, worse, INCONSISTENTLY as its orientation changed relative to the light/horizon — the
+          // sketchy amateur look on the swords. The focal hero must get ONE clean confident accent along
+          // its FULL length. Raise the shadow-side floor to 0.7 (a gentle lean toward the shaded edge,
+          // never a hard lost half) so the whole silhouette inks evenly.
+          float shadowSide = mix(0.7, 1.0, clamp(0.5 - dot(normalize(outN + 1e-5), normalize(uLightDir2D)), 0.0, 1.0));
+          // DISABLE the coherence/value-noise breakup on the hero: drive the hero stroke at a flat
+          // FULL presence so the blade is one continuous calligraphic accent (no stipple on the focal
+          // subject). This is the single change that makes the sword read identical above vs below the
+          // horizon — its ink no longer depends on the breakup/coherence field that varies at the seam.
+          float heroBreak = 1.0;
           float heroE = clamp(band * shadowSide * heroBreak * uStrength * uHeroInkGain, 0.0, 1.0);
           // Union with the global edge — the hero stroke is additive presence, taking the stronger
           // of the two so a found global edge on the kart isn't weakened.

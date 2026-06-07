@@ -261,7 +261,12 @@ export function createVelocitySmearPass(opts: {
         // Start the ramp WELL PAST the car (0.90, above the ~0.987 near-tarmac band stays inside it but
         // the floor is removed) and zero the floor so the drag is ~0 on near tarmac and only GROWS toward
         // the off-centre horizon — a clean road around the hero, wet drag only in the distance.
-        float flowRamp = smoothstep(0.90, 0.998, rawDepth);       // drag confined to mid→far ground
+        // ralph(iter4): START THE FLOW DRAG FURTHER OUT (0.90 -> 0.994). The kart + the several
+        // car-lengths of road directly behind it sit at raw ~0.987..0.993 in this chase view; a ramp
+        // starting at 0.90 still bit that near band into a dark wet wake. Confining the drag to raw
+        // >= 0.994 means it engages ONLY on the genuinely FAR road toward the horizon, so the tarmac
+        // for several car-lengths behind the hero is provably untouched (drag ~0 there).
+        float flowRamp = smoothstep(0.994, 0.999, rawDepth);      // drag confined to FAR ground only
         vec2  flowVel  = uFlowDir * uFlowGain * flowRamp * uSpeedMul;
         flowVel       *= uStrength * uVelocityScale * (1.0 - clamp(uReset, 0.0, 1.0));
         velocity      += flowVel;
@@ -304,7 +309,11 @@ export function createVelocitySmearPass(opts: {
         // a few car-lengths) is fully held crisp — the wet drag now only engages on the FAR road, so no
         // dark wake pools on the tarmac behind the hero. Combined with the gated flow ramp above the near
         // road around the car is clean.
-        float nearKeep = smoothstep(0.988, 0.996, rawDepth);
+        // ralph(iter4): RAISED the protected near band 0.988..0.996 -> 0.993..0.9985 so the whole
+        // stretch of road for several car-lengths directly behind the kart (raw ~0.987..0.993) is
+        // fully held crisp (nearKeep ~0) and ONLY the far road toward the horizon carries any wet
+        // drag — the dark wake/smudge behind the hero is provably zero on the near/mid tarmac.
+        float nearKeep = smoothstep(0.993, 0.9985, rawDepth);
         velocity      *= nearKeep;
 
         // HARD-CLAMP |velocity| so nothing (a depth-edge spike, a stale matrix slipping past
