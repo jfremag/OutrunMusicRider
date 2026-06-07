@@ -132,6 +132,13 @@ export function createSubstratePaperPass(opts: {
       // and far ones finer (correct texture perspective), clamped to a tasteful band.
       uWorldDistRef: { value: opts.worldDistRef ?? 26.0 },
       useWorldGrain: { value: 1 },
+      // ralph(iter7) STRAY-SQUARE GUARD (PRIORITY-4): 0 until ThreeScene has computed a REAL inverse
+      // view-projection (set to 1 each frame after the first valid matrix). While 0 — the identity
+      // PLACEHOLDER on the very first / a seek frame — the depth→world unproject degenerates (worldH.w
+      // collapses, wp blows up into a hard block), which can flash a stray square. The shader falls
+      // back to the stable SCREEN-SPACE grain until a real matrix exists, so no degenerate world
+      // reconstruction is ever sampled.
+      uViewProjReady: { value: 0 },
       // Drawing-buffer resolution (vec2); placeholder 1080p, ThreeScene .set()s it in resize().
       resolution: { value: new THREE.Vector2(res[0], res[1]) },
       paperScale: { value: opts.paperScale ?? 2.6 },
@@ -173,6 +180,7 @@ export function createSubstratePaperPass(opts: {
       uniform float uWorldGrainScale;
       uniform float uWorldDistRef;
       uniform float useWorldGrain;
+      uniform float uViewProjReady;
       uniform vec2  resolution;
       uniform float paperScale;
       uniform float paperAngle;
@@ -294,7 +302,10 @@ export function createSubstratePaperPass(opts: {
         // Sky / cleared depth (== far) cannot be unprojected, so fall back to the screen-space
         // coordinate (the sky dome is camera-centred → stable, no swim).
         float rawDepth = texture2D(tDepth, fragUv).r;
-        bool isSky = rawDepth >= 0.9999 || useWorldGrain < 0.5;
+        // Fall back to the stable screen-space grain for sky/cleared depth, when world grain is off,
+        // OR (ralph iter7) when the inverse view-projection is still the identity placeholder
+        // (uViewProjReady<0.5) — guarding the world reconstruction from the degenerate-matrix square.
+        bool isSky = rawDepth >= 0.9999 || useWorldGrain < 0.5 || uViewProjReady < 0.5;
 
         // Screen-space paper coordinate (used directly for sky, and as the grazing-angle/far
         // fallback the world grain cross-fades into — both stable, no swim).

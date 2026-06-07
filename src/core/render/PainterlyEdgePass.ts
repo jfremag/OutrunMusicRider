@@ -591,17 +591,19 @@ export function createPainterlyEdgePass(opts: {
           // from the key light (dot < 0 → shaded side). clamp(0.5 - dot,0,1) peaks there and
           // fades on the lit side, so the kart inks heavily on its shadow edge and lightly (or
           // not at all) on the lit edge — a painter's accent, never an even outline.
-          // ralph(iter4) PRIORITY-4 (CLEAN HERO INK ACROSS THE HORIZON): the old stroke gated HARD on
-          // the shadow side AND applied the coherence breakup, so the blade inked found-here/lost-there
-          // and, worse, INCONSISTENTLY as its orientation changed relative to the light/horizon — the
-          // sketchy amateur look on the swords. The focal hero must get ONE clean confident accent along
-          // its FULL length. Raise the shadow-side floor to 0.7 (a gentle lean toward the shaded edge,
-          // never a hard lost half) so the whole silhouette inks evenly.
-          float shadowSide = mix(0.7, 1.0, clamp(0.5 - dot(normalize(outN + 1e-5), normalize(uLightDir2D)), 0.0, 1.0));
+          // ralph(iter7) PRIORITY-4 (CLEAN + SPARSE, restore the shadow-side bias): the iter4 floor of
+          // 0.7 inked the hero's FULL length — a heavy even cartoon outline. Restore a real SHADOW-SIDE
+          // bias (floor 0.18) so only a SHORT calligraphic accent lands on the SHADED edge (where the
+          // silhouette's outward normal faces AWAY from the key light) and the LIT edge stays mostly LOST
+          // — the deliberate "finished Sienkiewicz" gesture, not a CG outline. The sketchiness the iter4
+          // note was fighting came from the BREAKUP varying along the blade, NOT the shadow bias — so we
+          // keep heroBreak FLAT (no stipple) below; with no breakup, the shadow-side accent is one clean
+          // continuous stroke on the shaded edge that reads identical above vs below the horizon.
+          float shadowSide = mix(0.18, 1.0, clamp(0.5 - dot(normalize(outN + 1e-5), normalize(uLightDir2D)), 0.0, 1.0));
           // DISABLE the coherence/value-noise breakup on the hero: drive the hero stroke at a flat
-          // FULL presence so the blade is one continuous calligraphic accent (no stipple on the focal
-          // subject). This is the single change that makes the sword read identical above vs below the
-          // horizon — its ink no longer depends on the breakup/coherence field that varies at the seam.
+          // FULL presence so the SHADED-edge accent is one continuous calligraphic mark (no stipple on
+          // the focal subject). This keeps the sword reading identical above vs below the horizon — its
+          // ink no longer depends on the breakup/coherence field that varies at the seam.
           float heroBreak = 1.0;
           float heroE = clamp(band * shadowSide * heroBreak * uStrength * uHeroInkGain, 0.0, 1.0);
           // Union with the global edge — the hero stroke is additive presence, taking the stronger

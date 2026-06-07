@@ -80,9 +80,17 @@ export function createPaintGradeLUTPass(opts: {
       //   uShadowDepth : how far toward ramp-0 the reshaped dark coordinate is allowed to go
       //                  (0 = no extra darks; ~1 = full reach). Keeps the darks as ACCENTS.
       //   uWhitePoint  : luma at/above this maps to ramp 1 (the bright field stays luminous).
-      uBlackPoint: { value: opts.blackPoint ?? 0.34 },
-      uWhitePoint: { value: opts.whitePoint ?? 0.90 },
-      uContrast: { value: opts.contrast ?? 1.22 },
+      // ralph(iter7) VALUE-RANGE (PRIORITY-5): the frame was a low-contrast mid-key mud (luma
+      // ~0.55..0.85), a ~150-200 band, so the Kuwahara/edge passes "mostly just smoothed". WIDEN
+      // the histogram toward ref-02's full range: RAISE the black point (0.34 -> 0.46) so the
+      // scene's darkest forms (under-car, car shadow side, road-in-shade) map onto the ramp's deep
+      // near-black ink stops — genuine punched darks — and LOWER the white point (0.90 -> 0.80) so
+      // the sun/sheen/road sheen highlights reach the luminous cream/white apex. A STRONGER S-curve
+      // (1.22 -> 1.6) about 0.5 then separates the mids so the car/road gain real Lambert form-
+      // shadow modelling. shadowDepth stays full so the new darks land at full strength.
+      uBlackPoint: { value: opts.blackPoint ?? 0.46 },
+      uWhitePoint: { value: opts.whitePoint ?? 0.80 },
+      uContrast: { value: opts.contrast ?? 1.6 },
       uShadowDepth: { value: opts.shadowDepth ?? 1.0 },
       // V2 C4 accent pop knobs (defaults are no-ops if the integrator doesn't set them).
       uAccentSatGate: { value: opts.accentSatGate ?? 0.30 },

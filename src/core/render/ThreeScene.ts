@@ -898,13 +898,14 @@ export class ThreeScene {
       radius: 8,
       sharpness: KUWAHARA_Q_REST,
       eccentricityClamp: 0.52,
-      // PREMIUM-CLEAN PASS: lower anisoGain (2.0 -> 1.6) and RAISE anisoExp (0.4 -> 0.62) so the
-      // kernel only elongates on GENUINE contours (real edges keep their directional stroke) but
-      // the near-flat fields (sky/ground), where A≈0, no longer get over-amplified into wavy
-      // directional smear that reads as hand-tremor waviness. The result is clean broad washes over
-      // flat fields with brushwork that still bends along the forms — precise, not jittery.
-      anisoGain: 1.6,
-      anisoExp: 0.62,
+      // ralph(iter7) PRIORITY-4 (PREMIUM-CLEAN, kill the fake wobble): anisoGain 1.6 -> 1.3 and
+      // anisoExp 0.62 -> 0.9 (toward the brief's 1.0). With anisoExp near 1.0 the kernel elongation
+      // is LINEAR in the true anisotropy A, so it only elongates on REAL edges (high A) and stays
+      // near-CIRCULAR on the near-flat fields (A≈0) — the lifted-noise directional smear that read as
+      // amateur hand-tremor waviness on the swords/car/flats is gone. Real contours keep a clean
+      // directional stroke; the flats become clean broad washes, not jittery streaks.
+      anisoGain: 1.3,
+      anisoExp: 0.9,
       strokeBias: 0.42
     })
     this.kuwaharaPass.uniforms.tTensor.value = this.tensorTargetA.texture
@@ -981,7 +982,14 @@ export class ThreeScene {
       // the frame into a narrow high-key band with NO punched darks and no luminous high — exactly
       // ref-02's MISSING dramatic value structure. blackPoint 0.345 -> 0.30 lets the genuinely dark
       // focal forms (under-car, car/sword shadow sides) drop into the deep ink stops.
-      blackPoint: 0.3,
+      // ralph(iter7) VALUE-RANGE (PRIORITY-5): blackPoint 0.30 -> 0.42. The frame was a low-contrast
+      // mid-key MUD with no deep darks — the histogram sat in a ~150-200 band and the Kuwahara/edge
+      // passes "mostly just smoothed". Raising the black point maps the scene's genuinely darkest
+      // forms (under-car, the car's shadow-side flank, sword shadow, road-in-deep-shade) DOWN onto the
+      // ramp's deep coloured near-black ink stops — real punched shadow CORES like ref-02 — widening
+      // the histogram toward the full range. Paired with the stronger key (2.15) so the form-shadow
+      // falloff that feeds these darks actually exists on the car/road.
+      blackPoint: 0.42,
       // whitePoint 0.96 (P45-APEX: raised from 0.88). The ramp's top stops were just opened toward
       // true paper-white (paintRamp.ts: putty #ECE9E1 ~0.91, apex #F4F4F8 ~0.96). whitePoint sets
       // the input luma that maps to ramp coord 1.0 (the apex), so RAISING it RESERVES the new bright
@@ -1017,8 +1025,15 @@ export class ThreeScene {
       // so it does NOT drag the emissive crimson swords' darker faces into muddy ink (they must stay
       // RED at all distances). The aerial far-band lift (lift 0.12) still holds the DISTANT ground
       // luminous so this bites in the near foreground without a two-zone split.
-      contrast: 1.48,
-      shadowDepth: 0.84,
+      // ralph(iter7) VALUE-RANGE (PRIORITY-5): contrast 1.48 -> 1.62, shadowDepth 0.84 -> 0.95. A
+      // firmer S-curve about the 0.5 pivot deepens the new darks and lifts the road/sun-sheen
+      // highlights so the value SEPARATION reads (the Kuwahara/edge passes need this contrast to make
+      // confident brushwork, not a flat smooth). shadowDepth near-full so the deepened shadow cores
+      // land at full strength as bold accents against the luminous field. Held just under 1.0 so the
+      // emissive crimson swords' darker faces don't get dragged into muddy ink — they stay RED at all
+      // distances (BladeMaterial's raised emissive floor backs this up).
+      contrast: 1.62,
+      shadowDepth: 0.95,
       // POSTERIZE OFF (user: "don't apply flat effects that obfuscate depth"). The ~7-level
       // posterize crushed the smooth value gradients into flat plateaus, destroying the 3D
       // light-and-shadow form modelling — keep the smooth value range so volume/depth read as 3D.
@@ -1057,17 +1072,25 @@ export class ThreeScene {
       // interior reads mostly LOST (spec §4: body contours lost, sheen the one found mark).
       normalThresh: 0.55,
       depthThresh: 1.1,
-      // R-FINAL: RAISE the saliency band (0.03..0.14 -> 0.07..0.26) so ONLY genuinely strong
-      // contours qualify — faint wash speckle and low-contrast noise no longer ink, killing the
-      // sketchy amateur scribble on near-flat fields. The strongest road/car/sword contours still
-      // clear the band and ink as clean, sparse accents.
-      salLo: 0.07,
-      salHi: 0.26,
+      // ralph(iter7) PRIORITY-4 (CLEAN + SPARSE): RAISE the saliency band further (0.07..0.26 ->
+      // 0.09..0.34) so the low-contrast luminous WASH never qualifies — only genuinely strong form
+      // boundaries ink, killing the sketchy amateur scribble the painterly passes amplified out of
+      // tiny gradients. Only the strongest road/car/sword contours clear it, as sparse deliberate
+      // accents.
+      salLo: 0.09,
+      salHi: 0.34,
+      // ralph(iter7) PRIORITY-4: RAISE the coherence (anisotropy) gate (defaults 0.05..0.30 ->
+      // 0.12..0.45). The coherence-driven taper IS the lost-and-found engine; gating it higher means
+      // only genuinely high-anisotropy (clean directional) contours ink, so the wobbly low-anisotropy
+      // strokes the Kuwahara lifted out of noise never qualify — precise calligraphy, no fake wobble.
+      cohLo: 0.12,
+      cohHi: 0.45,
       // HERO SILHOUETTE — a SUBTLE, CRISP, broken accent (mostly LOST), NOT a heavy outline. heroDilate
-      // 1.6 -> 1.0 so the kart's outer-edge stroke is a crisp brush line, not a fattened smear;
-      // heroInkGain held at 1.3 so what lands on the shaded side is a confident-but-thin accent. The
-      // coherence taper keeps it found-here/lost-there. lightDir2D is the key light projected to screen.
-      heroInkGain: 1.3,
+      // 1.6 -> 1.0 so the kart's outer-edge stroke is a crisp brush line, not a fattened smear. ralph
+      // (iter7) PRIORITY-4: heroInkGain 1.3 -> 1.2 (the brief's clean/sparse target) so the hero accent
+      // is a confident-but-restrained calligraphic mark, and the in-shader shadow-side bias (restored
+      // this iter) keeps it to the SHADED edge only. lightDir2D is the key light projected to screen.
+      heroInkGain: 1.2,
       // ralph(iter4) PRIORITY-4: heroDilate 1.0 -> 0.8 so the hero silhouette stroke is a crisp brush
       // line hugging the outer edge, not a fuzzy band — combined with the disabled breakup (in-shader)
       // the blade reads as one clean confident accent, identical above vs below the horizon.
@@ -1118,12 +1141,15 @@ export class ThreeScene {
     this.aerialPass = createAerialPerspectivePass({
       cameraNear: this.camera.near,
       cameraFar: DEPTH_FAR,
-      // ralph(iter3): haze BRIGHTENED + cooled #CCCCBA -> #D6D8C8 (priority-6). The old target was a
-      // dingy beige that dragged the whole distance toward a muddy low-luminance band; lifting it toward
-      // the LUMINOUS cool sky value (brighter, a hair cooler/greener than beige) means distance now
-      // dissolves into a luminous-cool veil that reads as deep atmospheric space (ref 02), not dinge.
-      // Kept just under the post-grade sky luminance so the far ground washes INTO the sky, not past it.
-      hazeColor: new THREE.Color(0xd6d8c8),
+      // ralph(iter7) PHYSICALLY-CORRECT AERIAL: the haze target MUST be the BRIGHT SKY luminance, not
+      // the ground/field colour — real atmospheric haze lifts distance toward the bright sky (lighter,
+      // cooler, lower-contrast) because the sky is brighter than the ground. Set to #D8D6C6 (luma
+      // ~0.82) to MATCH the graded HORIZON-SKY band value (skyMaterial horizonColor #D2CFBD post-LUT)
+      // so the far ground/horizon dissolves SEAMLESSLY UP into the sky — NOT brighter than it (an
+      // over-bright haze would paint a reverse-halo bright line right at the horizon) and never down
+      // toward the dark sage field. The far ground now reads as a luminous, cool, low-contrast lost
+      // horizon that vanishes into the sky exactly at the line (ref 02).
+      hazeColor: new THREE.Color(0xd8d6c6),
       // The HERO CAR sits at raw depth ~0.987 in this chase view, so the depth wash band MUST start
       // ABOVE it (else the car is fully washed into the ground — a regression that hid it). The far
       // ground / horizon packs to raw ~0.997..1.0, so the wash band 0.990..0.997 catches the far
@@ -2489,6 +2515,11 @@ export class ThreeScene {
     const paperU = this.substratePaperPass.uniforms
     ;(paperU.uInvViewProj.value as THREE.Matrix4).copy(this.invViewProj)
     ;(paperU.uCameraPos.value as THREE.Vector3).copy(this.shakenCameraPos)
+    // ralph(iter7) STRAY-SQUARE GUARD: a REAL inverse view-projection now exists this frame (computed
+    // just above from the shaken VP), so the paper pass may use the world-locked grain. Until this
+    // ran (the identity placeholder) the pass fell back to the stable screen-space grain, so no
+    // degenerate world reconstruction (the hard-square artefact) is ever sampled.
+    paperU.uViewProjReady.value = 1
 
     // --- P4: derive the screen-space TRACK-FLOW direction for the injected smear drag. Project a
     // point ~FLOW_LOOKAHEAD units ahead down the centerline AND the car's own position into clip

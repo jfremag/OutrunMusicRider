@@ -147,18 +147,29 @@ export function injectBladeEmissive(
           core = pow(clamp(core, 0.0, 1.0), 0.7);           // fatten the bright band a touch
           vec3 grad = mix(uBladeOxblood, uBladeCore, core);
 
+          // ralph(iter7) PRIORITY-6 (CONSISTENT ACROSS THE SEAM): RAISE the self-illumination FLOOR.
+          // The blade still takes the scene key/shadow through the BRDF, so against the DARK ground its
+          // lit base reads darker and against the BRIGHT sky lighter — the value-mismatch at the horizon
+          // seam. Scaling the emissive gradient up (×1.45) makes the blade's OWN blood-red the DOMINANT
+          // term over the (background-dependent) BRDF lighting, so a blade on bright sky and one on dark
+          // ground read at the SAME value — the blood-red is consistent regardless of what is behind it.
+          // Still authored sub-bloom (oxblood luma ~0.10 linear × 1.45 ≈ 0.15; the lit albedo + this stay
+          // below the ~0.80 selective-bloom threshold) so it never glows neon.
+          grad *= 1.45;
+
           // COOL FRESNEL RIM: a thin steel-blue catch on the grazing silhouette so the blade reads
           // as a dimensional metal form (it catches the cool sky), not a flat sticker. 'normal' is
-          // view-space; vViewPosition points to the camera, so its normalize is the view dir.
+          // view-space; vViewPosition points to the camera, so its normalize is the view dir. The
+          // Fresnel keys off the view-grazing angle alone (no length term), so it is SYMMETRIC along
+          // the blade's full length — identical on the tip, mid and base, above or below the horizon.
           vec3 bN = normalize(normal);
           vec3 bV = normalize(vViewPosition);
           float bFres = pow(1.0 - clamp(dot(bN, bV), 0.0, 1.0), 3.2);
 
           // Self-illumination: a CONFIDENT blood-red emissive (so the blade reads consistently red
           // through the aerial haze + LUT at ALL distances, like the prior flat emissive did, but now
-          // with the core/tip MODELLING) PLUS a low cool rim. Kept below the ~0.80 selective-bloom
-          // threshold (blood-red luma ~0.35, so even ×1.0 + the lit albedo stays sub-bloom) so it
-          // never glows neon. Added to the emissive radiance so it overlays the lit 3D form.
+          // with the core/tip MODELLING) PLUS a low cool rim. Added to the emissive radiance so it
+          // overlays the lit 3D form, with the raised floor above making the emissive dominate.
           totalEmissiveRadiance += grad + uBladeRim * (bFres * 0.55);
         }
         #include <opaque_fragment>`

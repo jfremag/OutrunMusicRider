@@ -240,28 +240,16 @@ export function createAerialPerspectivePass(opts: {
           // Smooth proximity gradient (a soft gamma so the lower edge dissolves, not steps).
           float horizonW = smoothstep(0.04, 0.9, skyAbove);
           horizonW *= horizonW;
-          // ralph(iter6) SWORD HORIZON SEAM (PRIORITY-4): SUPPRESS this depth-INDEPENDENT screen-space
-          // band on the hero blade/car. The problem the iter3 "remove the special case" note missed:
-          // a vertical blade crossing the horizon has sky directly ABOVE the part that sits just below
-          // the line (a thin form lets sky peek over it), so skyAbove — and thus this band — is HIGH on
-          // the lower blade and LOW further down its length, painting a value GRADIENT along the blade
-          // that does NOT match its own depth-driven haze (steps 1-3, which ARE continuous). That
-          // mismatch IS the seam. Letting the blade haze ONLY by its own depth makes it read identical
-          // above vs below the line. To avoid the mask-EDGE step the iter3 note feared, the mask is
-          // DILATED (a few px ring, max-combined) and FEATHERED with a wide smoothstep, so the
-          // suppression fades smoothly off the silhouette instead of cutting at it.
-          float hero = texture2D(tCarMask, vUv).r;
-          vec2  hp = uTexelSize * 5.0;                    // dilation radius (~5 px)
-          hero = max(hero, texture2D(tCarMask, vUv + vec2(hp.x, 0.0)).r);
-          hero = max(hero, texture2D(tCarMask, vUv - vec2(hp.x, 0.0)).r);
-          hero = max(hero, texture2D(tCarMask, vUv + vec2(0.0, hp.y)).r);
-          hero = max(hero, texture2D(tCarMask, vUv - vec2(0.0, hp.y)).r);
-          hero = max(hero, texture2D(tCarMask, vUv + hp).r);
-          hero = max(hero, texture2D(tCarMask, vUv - hp).r);
-          hero = max(hero, texture2D(tCarMask, vUv + vec2(hp.x, -hp.y)).r);
-          hero = max(hero, texture2D(tCarMask, vUv + vec2(-hp.x, hp.y)).r);
-          float heroSuppress = 1.0 - smoothstep(0.02, 0.5, hero); // 1 off-hero -> 0 on the dilated hero
-          col = mix(col, uHazeColor, uHorizonHaze * horizonW * heroSuppress);
+          // ralph(iter7) PRIORITY-6 (REMOVE THE MASK-EDGE FEATHER SEAM): the old build SUPPRESSED this
+          // band on a DILATED+FEATHERED hero mask, but that feathered suppression ring IS a seam sitting
+          // right on the blade silhouette. Now that the haze target is the BRIGHT SKY value (uHazeColor)
+          // AND BladeMaterial raises the blade's self-illumination FLOOR so its blood-red DOMINATES over
+          // both the BRDF lighting and this haze, the blade reads consistent across the horizon WITHOUT
+          // the special case — so the per-blade mask suppression is dropped and every form (blade, car,
+          // ground) hazes UNIFORMLY toward the bright sky by the same smooth screen-space horizon
+          // gradient. No mask edge, no feather seam. (tCarMask is retained on the uniform for back-compat
+          // but no longer sampled here.)
+          col = mix(col, uHazeColor, uHorizonHaze * horizonW);
         }
 
         gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
