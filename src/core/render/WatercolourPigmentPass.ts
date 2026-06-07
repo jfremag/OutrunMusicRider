@@ -1,3 +1,4 @@
+import * as THREE from 'three'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 
 /**
@@ -22,20 +23,22 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
  *   3. PIGMENT DENSITY — `density = pow(1-luma, pigmentGamma) + sat*0.3`: dark and saturated
  *      pixels carry more pigment. Drives both the granulation bite and the bleed amount.
  *   4. GRANULATION — heavy pigment particles settle into the paper valleys. A paper height
- *      field `h` (sampled from `tPaper` if supplied, else a procedural 3-octave value-noise
- *      fbm fallback so the pass is self-contained) subtracts pigment in the troughs:
- *      `gran = 1 - granulation*density*(1-h)`. Gated by a LUMA BELL peaking at ~0.45 so it
- *      bites in the mid washes (where granulation lives) and fades out in paper-white and in
- *      the dense darks — otherwise it reads as snow over the whole frame.
+ *      field `h` subtracts pigment in the troughs: `gran = 1 - granulation*density*(1-h)`.
+ *      Gated by a LUMA BELL so it bites in the mid/bright washes and fades out in paper-white
+ *      and in the dense darks — otherwise it reads as snow over the whole frame. The tooth is
+ *      now GEOMETRY-LOCKED: `paperToothAt` reconstructs the world position from the scene DEPTH
+ *      + inverse view-projection and samples a TRIPLANAR world-space tooth so the granulation
+ *      travels WITH the road/ground (no screen-space swim); sky/cleared-depth pixels fall back
+ *      to the screen-space tooth (`tPaper` if supplied, else a procedural 3-octave fbm).
  *   5. DENSITY-GATED BLEED — a cheap 4-tap box gather across found edges, mixed back in by
  *      `density*0.4` so colour bleeds further where the wash is heavy and stays crisp where
  *      it is thin: `col = mix(col, bleed, density*0.4)`.
  *
  * Chroma is deliberately untouched — this is a VALUE/pigment operation (the §8 law:
- * "granulate VALUE not hue"); there is no chroma jitter. The paper height field is sampled
- * in screen UV (frame-anchored) so it does not "shower-door" scroll with the geometry; the
- * final SubstratePaperPass owns the authoritative sheet, this one only needs a tooth to
- * settle pigment into.
+ * "granulate VALUE not hue"); there is no chroma jitter. The granulation tooth is sampled in
+ * WORLD space (triplanar, geometry-locked) so it sticks to and travels with the surfaces
+ * instead of "shower-door" sliding over them; the final SubstratePaperPass owns the
+ * authoritative (also world-locked) sheet, this one only needs a tooth to settle pigment into.
  *
  * Holds one frame-state value (`time`, advanced by the renderer) for the slow wobble; every
  * other parameter is a tunable uniform. `tPaper` is OPTIONAL: leave it null (the default)
@@ -48,6 +51,12 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
  *   tDiffuse     — input colour (wired by EffectComposer automatically)
  *   tPaper       — optional cold-press paper height texture; null → procedural fallback
  *   usePaper     — 0 = procedural fbm tooth (default), 1 = sample tPaper instead
+ *   tDepth       — scene DepthTexture (RAW device depth) for the world-locked tooth reconstruction
+ *   uInvViewProj — inverse of the SHAKEN camera view-projection (depth → world unproject)
+ *   uCameraPos   — shaken camera world position (distance-based grain-frequency compensation)
+ *   uWorldGrainScale — world-space tooth lattice frequency (cells per world unit ×)
+ *   uWorldDistRef    — reference camera→surface distance where the world tooth ≈ the screen tooth
+ *   useWorldGrain — 1 = geometry-locked triplanar world tooth (default); 0 = legacy screen tooth
  *   resolution   — drawing-buffer size in pixels (width*min(dpr,2), height*min(dpr,2))
  *   time         — seconds, advanced by the renderer so the wet wobble drifts
  *   paperScale   — paper-tooth frequency multiplier (valleys per screen); higher = finer
@@ -71,6 +80,8 @@ export function createWatercolourPigmentPass(opts: {
   granulation?: number
   bleedRadius?: number
   pigmentGamma?: number
+  worldGrainScale?: number
+  worldDistRef?: number
 } = {}): ShaderPass {
   return new ShaderPass({
     uniforms: {
@@ -80,6 +91,17 @@ export function createWatercolourPigmentPass(opts: {
       // never samples tPaper (so an unbound sampler is never read).
       tPaper: { value: null },
       usePaper: { value: 0 },
+      // GEOMETRY-LOCKED grain inputs (ThreeScene wires these each frame). The granulation
+      // tooth is sampled in WORLD space (triplanar) from depth + the inverse view-projection
+      // so it travels WITH the road/ground instead of swimming in screen space. Sky pixels
+      // (rawDepth==far) fall back to the screen-space tooth. useWorldGrain=0 keeps the legacy
+      // screen tooth.
+      tDepth: { value: null as THREE.Texture | null },
+      uInvViewProj: { value: new THREE.Matrix4() },
+      uCameraPos: { value: new THREE.Vector3() },
+      uWorldGrainScale: { value: opts.worldGrainScale ?? 1.7 },
+      uWorldDistRef: { value: opts.worldDistRef ?? 26.0 },
+      useWorldGrain: { value: 1 },
       resolution: { value: opts.resolution ?? [1920, 1080] },
       time: { value: 0 },
       paperScale: { value: opts.paperScale ?? 2.2 },
@@ -109,6 +131,12 @@ export function createWatercolourPigmentPass(opts: {
       uniform sampler2D tDiffuse;
       uniform sampler2D tPaper;
       uniform float usePaper;
+      uniform sampler2D tDepth;
+      uniform mat4  uInvViewProj;
+      uniform vec3  uCameraPos;
+      uniform float uWorldGrainScale;
+      uniform float uWorldDistRef;
+      uniform float useWorldGrain;
       uniform vec2  resolution;
       uniform float time;
       uniform float paperScale;
@@ -173,6 +201,60 @@ export function createWatercolourPigmentPass(opts: {
         return paperFbm(uv * aspect * paperScale * 22.0);
       }
 
+      // TRIPLANAR WORLD-SPACE paper height: sample the SAME paperFbm tooth on the three world
+      // axis-planes and blend by the (cubed, normalised) surface normal, so the granulation
+      // tooth is projected ONTO the surface and travels WITH it (no screen-space swim). The
+      // world frequency folds in a ref/dist compensation so the on-screen tooth stays ~fine.
+      float paperHeightWorld(vec3 wp, vec3 n, float freqScale) {
+        vec3 an = abs(n);
+        vec3 w = an * an * an;
+        w /= max(w.x + w.y + w.z, 1e-4);
+        vec3 q = wp * freqScale;
+        float hx = paperFbm(q.zy);
+        float hy = paperFbm(q.xz);
+        float hz = paperFbm(q.xy);
+        return hx * w.x + hy * w.y + hz * w.z;
+      }
+
+      // Resolve the paper-tooth height at this fragment, GEOMETRY-LOCKED where there is scene
+      // geometry: reconstruct the world position from RAW device depth + the inverse view-
+      // projection (per-fragment divide), derive the world normal from screen-space derivatives,
+      // and sample the triplanar world tooth. Sky / cleared depth (== far) cannot be unprojected,
+      // so fall back to the screen-space tooth (the camera-centred sky dome is screen-stable).
+      float paperToothAt(vec2 fragUv, vec2 sampleUv) {
+        float hScreen = paperHeight(sampleUv);
+        float rawDepth = texture2D(tDepth, fragUv).r;
+        if (useWorldGrain < 0.5 || rawDepth >= 0.9999) {
+          return hScreen;
+        }
+        vec4 ndc    = vec4(fragUv * 2.0 - 1.0, rawDepth * 2.0 - 1.0, 1.0);
+        vec4 worldH = uInvViewProj * ndc;
+        vec3 wp     = worldH.xyz / worldH.w;
+        vec3 ddx = dFdx(wp);
+        vec3 ddy = dFdy(wp);
+        vec3 nrm = normalize(cross(ddx, ddy) + vec3(1e-6));
+        float dist  = max(length(wp - uCameraPos), 1e-3);
+        // Distance comp capped at 1.0 (never boost near freq above base — boosting it streaks the
+        // near grazing tarmac, see SubstratePaperPass). Far gets a hair finer; footprint cap +
+        // grazing fallback own the band-limiting.
+        float fscaleTarget = uWorldGrainScale * clamp(uWorldDistRef / dist, 0.6, 1.0);
+        float fscale = fscaleTarget;
+        // ANALYTIC ANTI-ALIAS (mip-style band-limit, see SubstratePaperPass): cap the world
+        // frequency to ~Nyquist on screen so the grazing-angle ground tooth never moirés/aliases.
+        float footprint = max(length(ddx), length(ddy));
+        float fcap = 0.5 / max(footprint, 1e-5);
+        fscale = min(fscale, fcap);
+        float hWorld = paperHeightWorld(wp, nrm, fscale);
+        // GRAZING-ANGLE FALLBACK (see SubstratePaperPass): at the extreme grazing tarmac lip /
+        // horizon, where a pixel's world footprint exceeds a grain cell and the band-limited world
+        // lookup can only streak, cross-fade to the stable screen tooth (those pixels sit near the
+        // vanishing point and barely move on screen, so no visible swim). The bulk near→mid road
+        // stays world-locked.
+        float cellsPerPixel = footprint * fscaleTarget;
+        float screenMix = smoothstep(0.32, 0.75, cellsPerPixel);
+        return mix(hWorld, hScreen, screenMix);
+      }
+
       void main() {
         vec2 texel = 1.0 / resolution;
 
@@ -226,7 +308,7 @@ export function createWatercolourPigmentPass(opts: {
         // there, scaled by how much pigment is present (density). Gate by a LUMA BELL peaking
         // at ~0.45 so the tooth bites in the mid washes and fades out in paper-white and in
         // the dense darks (a Gaussian bell on luma, width ~0.30).
-        float h = paperHeight(uv);
+        float h = paperToothAt(vUv, uv);
         // R-FINAL P2: RE-PIVOT the luma bell from peak 0.40 to 0.62 / width 0.30. After P1
         // restored the value range, 60-70% of the frame now lives in the BRIGHT washes (~0.6-0.8)
         // — but the old bell peaked at 0.40, below where the picture sits, so the tooth never

@@ -17,8 +17,8 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
  *                      pools and dries darker where the paper dips; gated by a luma BELL so
  *                      it bites in mid washes and fades out in paper-white and dense darks
  *                      (granulation in a blown highlight or a black reads as dirt).
- *   2. TOOTH LIGHT   — a faint SIGNED raking light computed from the analytic height
- *                      GRADIENT (gradient = surface normal). Peaks catch the warm light,
+ *   2. TOOTH LIGHT   — a faint SIGNED raking light computed from the SCREEN-SPACE GRADIENT of
+ *                      the height field (gradient = surface normal). Peaks catch the warm light,
  *                      valleys fall into a cool micro-shadow (~0.04 strength). This is what
  *                      sells "paper fibre" rather than "noise texture".
  *   3. MICRO-DISTORT — nudge the colour-fetch UV by the height gradient so the already-
@@ -27,36 +27,65 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
  *
  * The result is composited over a warm-cream sheet (`#EDE7D8`) with **Pegtop soft-light**
  * (`softLight(b,s) = (1-2s)*b*b + 2s*b`) — harmony-preserving: multiply-only goes muddy,
- * additive can't darken, overlay clips. paperStrength ~0.16. Keep granDensity in 0.18–0.35
- * and paperStrength in 0.12–0.22; over-application (>0.4 / >0.3) reads as **dirt, not paper**.
+ * additive can't darken, overlay clips. paperStrength ~0.16. Keep granDensity in 0.18–0.40
+ * and paperStrength in 0.12–0.22; over-application reads as **dirt, not paper**.
  *
- * FRAME-ANCHORED (the #1 paper risk): the height field is sampled from `gl_FragCoord` /
- * resolution, i.e. screen-static. It is NOT tied to scene geometry, so it does not scroll
- * with the road ("shower-door" death), AND it is fully TIME-FREE — the old slow `time` re-seed
- * drift was removed so the tooth never crawls (drifting granulation reads as "eye floaters").
- * `time` remains as an inert uniform only. The finite-difference gradient is taken from the
- * NOISE FIELD itself (not from tDiffuse), so the tooth-light and micro-distortion describe the
- * paper, not the image content.
+ * GEOMETRY-LOCKED (world-space) GRAIN — the #1 paper fix. The grain used to be sampled in
+ * SCREEN space (from gl_FragCoord/resolution), so on a moving 3D scene the road/ground slid
+ * UNDERNEATH a screen-pinned grain layer — the print "swam"/shower-doored over the surfaces
+ * (the "eye floaters"). Freezing the time-animation did NOT fix that, because the grain was
+ * still locked to the screen, not the geometry. This pass now reconstructs each fragment's
+ * WORLD position from the scene DEPTH + the inverse view-projection of the shaken camera
+ * (the same reconstruction VelocitySmear/AerialPerspective do — RAW device depth, because
+ * linearised depth collapses to ~const in this close chase view) and samples the print grain
+ * as TRIPLANAR world-space noise: three axis-aligned 2D paper-height projections blended by
+ * the surface normal (derived from screen-space derivatives of the reconstructed world
+ * position, so no view→world matrix is needed). The grain is therefore ANCHORED to the world
+ * surfaces — the road's grain travels WITH the road, the ground's with the ground, scaling
+ * with distance like real print/tooth printed ON the surface (near a touch coarser, far
+ * finer — correct texture perspective). It is also fully TIME-FREE: world-space sampling is
+ * inherently non-boiling, so paused = no boil and MOVING = grain travels with the surfaces.
+ *
+ * SKY / far background (rawDepth ~= far / cleared): world-pos reconstruction blows up there
+ * (the unproject diverges to the far plane), so sky pixels are detected (max depth) and fall
+ * back to the original SCREEN-SPACE paper coordinate. The sky dome is camera-centred (it
+ * barely moves relative to the camera), so screen-space is stable there and the sky does not
+ * swim either.
+ *
+ * The grain CHARACTER is unchanged from the prior round (heavy, fine, near-isotropic offset-
+ * print speckle): paperScale / paperAniso / granDensity / paperLight all carry the same
+ * tuned feel — only the SAMPLING SPACE changed from screen to world. `uWorldGrainScale` maps
+ * the world-space lattice frequency so it reads as the same fine print speckle on-screen at
+ * the typical chase distance.
  *
  * Display-space LDR: runs after OutputPass like every painterly pass; all maths are
  * perceptual (luma bell, soft-light) and would misbehave on linear HDR.
  *
  * Uniforms (per STYLE_SPEC §3 PASS 9):
- *   tDiffuse       — input colour (auto-wired by EffectComposer)
- *   resolution     — drawing-buffer pixel size (vec2; width*min(dpr,2), height*min(dpr,2)); .set() in resize()
- *   paperScale     — paper tooth frequency in tiles across the screen (bigger = finer grain)
- *   paperAngle     — felt-grain rotation in radians (cold-press is anisotropic; ~17° = 0.30 rad)
- *   paperStrength  — soft-light sheet opacity, 0.12–0.22 (default 0.16). >0.3 = dirt.
- *   granDensity    — granulation (pigment-settle) strength, 0.18–0.35 (default 0.26). >0.4 = dirt.
- *   distortAmt     — UV micro-distortion amount in UV units (~0.0015; edges crawl into the tooth)
- *   grad_eps       — finite-difference step for the height gradient, in UV (~1px)
- *   paperLight     — tooth raking-light strength (~0.04; peaks warm / valleys cool)
- *   lightDir3      — raking light direction (vec2 in paper space; only x,y used, z ignored for slope)
- *   toothFlatness  — softens the height→slope response so the tooth-light isn't harsh (~0.6)
- *   paperTint      — the warm-cream substrate colour the image sits on (#EDE7D8)
- *   warmTint       — colour the PEAKS are pushed toward by the tooth-light (warm paper highlight)
- *   coolTint       — colour the VALLEYS are pushed toward (cool micro-shadow in the tooth)
- *   time           — seconds; drives only the slow paper re-seed, NOT a per-frame boil
+ *   tDiffuse        — input colour (auto-wired by EffectComposer)
+ *   tDepth          — scene DepthTexture (RAW perspective device depth) for world reconstruction
+ *   tNormal         — view-normal G-buffer (retained for reference; the triplanar blend weights
+ *                     are taken from the screen-space derivative of the reconstructed world pos)
+ *   uInvViewProj    — inverse of the SHAKEN camera view-projection (depth → world unproject)
+ *   uCameraPos      — shaken camera world position (distance-based grain-frequency compensation)
+ *   uWorldGrainScale— world-space grain lattice frequency (cells per world unit ×; bigger = finer)
+ *   uWorldDistRef   — reference camera→surface distance at which the world grain ≈ the on-screen
+ *                     fine speckle; nearer surfaces read a touch coarser, far ones finer
+ *   useWorldGrain   — 1 = geometry-locked triplanar world grain (default); 0 = legacy screen grain
+ *   resolution      — drawing-buffer pixel size (vec2); .set() in resize()
+ *   paperScale      — paper tooth frequency in tiles across the screen (bigger = finer grain)
+ *   paperAngle      — felt-grain rotation in radians (cold-press is anisotropic; ~17° = 0.30 rad)
+ *   paperStrength   — soft-light sheet opacity, 0.12–0.22 (default 0.16). >0.3 = dirt.
+ *   granDensity     — granulation (pigment-settle) strength, 0.18–0.40 (default 0.26). >0.4 = dirt.
+ *   distortAmt      — UV micro-distortion amount in UV units (~0.0015; edges crawl into the tooth)
+ *   grad_eps        — finite-difference step for the screen-space height gradient, in UV (~1px)
+ *   paperLight      — tooth raking-light strength (~0.04; peaks warm / valleys cool)
+ *   lightDir3       — raking light direction (vec2 in screen space; only x,y used for the slope)
+ *   toothFlatness   — softens the height→slope response so the tooth-light isn't harsh (~0.6)
+ *   paperTint       — the warm-cream substrate colour the image sits on (#EDE7D8)
+ *   warmTint        — colour the PEAKS are pushed toward by the tooth-light (warm paper highlight)
+ *   coolTint        — colour the VALLEYS are pushed toward (cool micro-shadow in the tooth)
+ *   time            — inert (retained for back-compat); the grain is static/time-free
  */
 export function createSubstratePaperPass(opts: {
   resolution?: [number, number]
@@ -73,6 +102,8 @@ export function createSubstratePaperPass(opts: {
   paperTint?: [number, number, number]
   warmTint?: [number, number, number]
   coolTint?: [number, number, number]
+  worldGrainScale?: number
+  worldDistRef?: number
 } = {}): ShaderPass {
   // Destructure with tuple-typed defaults so the Vector ctors get exact arities (a
   // spread of `opts.x ?? [..]` widens to number[] and fails strict TS; these don't).
@@ -88,14 +119,28 @@ export function createSubstratePaperPass(opts: {
   return new ShaderPass({
     uniforms: {
       tDiffuse: { value: null },
+      // World-reconstruction inputs (ThreeScene wires these each frame; see header).
+      tDepth: { value: null as THREE.Texture | null },
+      tNormal: { value: null as THREE.Texture | null },
+      uInvViewProj: { value: new THREE.Matrix4() },
+      uCameraPos: { value: new THREE.Vector3() },
+      // World grain frequency (lattice cells per world unit, ×). Tuned so the on-screen
+      // speckle at the typical chase distance reads as the same fine print as the screen grain.
+      uWorldGrainScale: { value: opts.worldGrainScale ?? 1.7 },
+      // Reference camera→surface distance at which the world grain matches the fine screen
+      // speckle; the grain is scaled by uWorldDistRef/dist so near surfaces are a touch coarser
+      // and far ones finer (correct texture perspective), clamped to a tasteful band.
+      uWorldDistRef: { value: opts.worldDistRef ?? 26.0 },
+      useWorldGrain: { value: 1 },
       // Drawing-buffer resolution (vec2); placeholder 1080p, ThreeScene .set()s it in resize().
       resolution: { value: new THREE.Vector2(res[0], res[1]) },
       paperScale: { value: opts.paperScale ?? 2.6 },
       paperAngle: { value: opts.paperAngle ?? 0.297 }, // ~17 degrees
       // R4 BRUSHWORK: anisotropic stretch of the tooth ALONG the felt-grain angle. 1.0 = round
       // (isotropic) tooth; >1 stretches the noise into directional brush/scumble streaks so the
-      // flat fields read as BRUSHED gouache (ref 02), not airbrushed. Keeps the paper frame-
-      // anchored (no shower-door) — it's the SAMPLE that's stretched, not scrolled.
+      // flat fields read as BRUSHED gouache (ref 02), not airbrushed. In world-grain mode it is
+      // applied INSIDE each triplanar plane along a fixed world axis, so the stretch sticks to
+      // the surface (no shower-door) — it's the SAMPLE that's stretched, not scrolled.
       paperAniso: { value: opts.paperAniso ?? 2.6 },
       paperStrength: { value: opts.paperStrength ?? 0.16 },
       granDensity: { value: opts.granDensity ?? 0.26 },
@@ -121,6 +166,13 @@ export function createSubstratePaperPass(opts: {
 
       varying vec2 vUv;
       uniform sampler2D tDiffuse;
+      uniform sampler2D tDepth;
+      uniform sampler2D tNormal;
+      uniform mat4  uInvViewProj;
+      uniform vec3  uCameraPos;
+      uniform float uWorldGrainScale;
+      uniform float uWorldDistRef;
+      uniform float useWorldGrain;
       uniform vec2  resolution;
       uniform float paperScale;
       uniform float paperAngle;
@@ -181,26 +233,46 @@ export function createSubstratePaperPass(opts: {
         return h / sum;
       }
 
-      // Map screen UV -> frame-anchored, rotated paper-space sample coordinate.
-      // Built from gl_FragCoord/resolution (NOT scene geometry) => screen-static "tooth".
-      // 'time' adds an almost-imperceptible slow drift = a fresh sheet, never a per-frame boil.
-      vec2 paperCoord(vec2 fragUv) {
-        // Aspect-correct so the tooth is round, not stretched on widescreen.
-        float aspect = resolution.x / max(resolution.y, 1.0);
-        vec2 p = vec2(fragUv.x * aspect, fragUv.y);
+      // Apply the felt-grain ANISOTROPY (rotate + stretch along the grain) to a 2D paper
+      // coordinate, so the brushed/scumble character is identical in the screen- and world-
+      // space branches. Round at paperAniso==1, directional streaks at >1.
+      vec2 anisoPaper(vec2 p) {
         float ca = cos(paperAngle);
         float sa = sin(paperAngle);
-        p = mat2(ca, -sa, sa, ca) * p;             // felt-grain anisotropy rotation
-        // R4: stretch the noise ALONG the grain (x after rotation) so the tooth becomes
-        // directional brush/scumble streaks instead of a round dot field. Dividing the
-        // along-grain coordinate makes the lattice repeat slower in that direction = elongated
-        // pigment fingers; the across-grain axis stays fine, so strokes read as bristle marks.
-        p.x /= max(paperAniso, 0.25);
-        p *= paperScale * 64.0;                     // tiles across screen -> lattice units
-        // FLOATER FIX: the slow re-seed drift (time*0.013) is REMOVED so the paper tooth is
-        // 100% frame-anchored and NEVER moves — any drift of the granulation field reads as
-        // crawling grain (floaters). The time uniform is retained as inert for back-compat.
+        p = mat2(ca, -sa, sa, ca) * p;        // felt-grain rotation
+        p.x /= max(paperAniso, 0.25);          // stretch ALONG the grain -> directional fingers
         return p;
+      }
+
+      // --- SCREEN-SPACE paper coordinate (legacy / sky fallback) --------------------------
+      // Frame-anchored, rotated paper-space sample built from gl_FragCoord/resolution (NOT
+      // scene geometry). Used for the SKY (camera-centred dome → screen-stable) and when
+      // useWorldGrain is off. Aspect-corrected so the tooth is round, not stretched on wide.
+      vec2 paperCoordScreen(vec2 fragUv) {
+        float aspect = resolution.x / max(resolution.y, 1.0);
+        vec2 p = vec2(fragUv.x * aspect, fragUv.y);
+        p = anisoPaper(p);
+        p *= paperScale * 64.0;                 // tiles across screen -> lattice units
+        return p;                               // TIME-FREE: 100% frame-anchored, never boils
+      }
+
+      // --- TRIPLANAR WORLD-SPACE paper height ---------------------------------------------
+      // Sample the SAME 2D paperHeight field on the three world axis-planes (YZ, XZ, XY) and
+      // blend by the (squared, normalised) surface normal so the grain is projected ONTO the
+      // surface with no stretching on slopes — exactly the geometry-lock the swim needed. The
+      // aniso/rotation is applied INSIDE each plane along a fixed world axis so the brushed
+      // character travels with the surface. freqScale folds in the distance compensation.
+      float paperHeightWorld(vec3 wp, vec3 n, float freqScale) {
+        vec3 an = abs(n);
+        // Slightly sharpen the blend so the dominant plane wins (less cross-plane haze), then
+        // normalise so the three weights sum to 1 (energy-preserving height).
+        vec3 w = an * an * an;
+        w /= max(w.x + w.y + w.z, 1e-4);
+        vec3 q = wp * freqScale;
+        float hx = paperHeight(anisoPaper(q.zy)); // plane facing world X (project onto Z,Y)
+        float hy = paperHeight(anisoPaper(q.xz)); // plane facing world Y (project onto X,Z)
+        float hz = paperHeight(anisoPaper(q.xy)); // plane facing world Z (project onto X,Y)
+        return hx * w.x + hy * w.y + hz * w.z;
       }
 
       // --- soft-light ---------------------------------------------------------------
@@ -211,79 +283,127 @@ export function createSubstratePaperPass(opts: {
       }
 
       void main() {
-        // Frame-anchored paper sample coordinate (screen-static).
         vec2 fragUv = gl_FragCoord.xy / resolution;
-        vec2 pc = paperCoord(fragUv);
 
-        // Central paper height + finite-difference GRADIENT of the NOISE FIELD (not the
-        // image): gradient == surface normal slope, which drives BOTH the tooth-light and
-        // the UV micro-distortion. Step is in UV, converted into paper-lattice units so a
-        // single eps stays ~1px regardless of paperScale.
-        float aspect = resolution.x / max(resolution.y, 1.0);
-        float epsLat = grad_eps * paperScale * 64.0 * max(aspect, 1.0);
-        float h  = paperHeight(pc);
-        float hx = paperHeight(pc + vec2(epsLat, 0.0));
-        float hy = paperHeight(pc + vec2(0.0, epsLat));
-        // Slope of the height field; softened by toothFlatness so the tooth-light is gentle.
-        vec2 grad = vec2(hx - h, hy - h) / max(epsLat, 1e-5);
-        grad *= toothFlatness;
+        // --- Resolve the PAPER HEIGHT field h (world-locked where there is geometry) ----------
+        // World branch: reconstruct this fragment's world position from RAW device depth + the
+        // inverse view-projection of the shaken camera (per-fragment perspective divide), derive
+        // the geometric world normal from screen-space derivatives of that world position (no
+        // view→world matrix needed), and sample the print grain as TRIPLANAR world-space noise.
+        // The grain is then ANCHORED to the surface and travels with it (no shower-door swim).
+        // Sky / cleared depth (== far) cannot be unprojected, so fall back to the screen-space
+        // coordinate (the sky dome is camera-centred → stable, no swim).
+        float rawDepth = texture2D(tDepth, fragUv).r;
+        bool isSky = rawDepth >= 0.9999 || useWorldGrain < 0.5;
 
-        // (3) MICRO-DISTORTION — fetch the painted image through a UV nudged along the
-        // paper slope, so painted edges crawl into the tooth instead of breaking on pixels.
-        // Convert the lattice-space gradient back to UV-ish (undo aspect on x).
-        vec2 distUv = vec2(grad.x / max(aspect, 1.0), grad.y) * distortAmt;
+        // Screen-space paper coordinate (used directly for sky, and as the grazing-angle/far
+        // fallback the world grain cross-fades into — both stable, no swim).
+        float hScreen = paperHeight(paperCoordScreen(fragUv));
+
+        float h;
+        if (isSky) {
+          h = hScreen;
+        } else {
+          vec4 ndc    = vec4(fragUv * 2.0 - 1.0, rawDepth * 2.0 - 1.0, 1.0);
+          vec4 worldH = uInvViewProj * ndc;
+          vec3 wp     = worldH.xyz / worldH.w;            // per-fragment divide
+          // World-position derivatives across the 2x2 quad: the geometric world normal AND the
+          // per-pixel world FOOTPRINT (how much world space one screen pixel covers).
+          vec3 ddx = dFdx(wp);
+          vec3 ddy = dFdy(wp);
+          vec3 nrm = normalize(cross(ddx, ddy) + vec3(1e-6));
+          // Distance compensation: scale the world frequency by ref/dist so the on-screen speckle
+          // stays ~constant (near a hair coarser, far a hair finer — correct texture perspective),
+          // clamped to a NARROW band so close tarmac doesn't go blocky.
+          float dist  = max(length(wp - uCameraPos), 1e-3);
+          // Distance comp band capped at 1.0 (NEVER boost the near frequency above base): boosting
+          // it is what made the near grazing tarmac — where the per-pixel footprint is already
+          // largest — run past Nyquist and STREAK. Near stays at base freq; far gets a hair finer.
+          // The footprint cap + grazing fallback below own the grazing/far band-limiting.
+          float fscaleTarget = uWorldGrainScale * clamp(uWorldDistRef / dist, 0.6, 1.0);
+          float fscale = fscaleTarget;
+          // ANALYTIC ANTI-ALIAS (mip-style band-limit): the ground is viewed at a grazing angle,
+          // so a fixed world frequency projects to a runaway SCREEN frequency in the depth
+          // direction and MOIRÉS/aliases against the pixel grid. Cap fscale so the grain never
+          // exceeds ~Nyquist on screen — fscale * worldFootprint <= NYQ cells/pixel. Grazing/far
+          // surfaces therefore use a slightly coarser (but stable, non-swimming) cell while near
+          // face-on surfaces keep the full fine print. This is exactly how a mipmapped texture
+          // behaves, and it kills most of the triplanar grazing-angle moiré without swim.
+          float footprint = max(length(ddx), length(ddy));      // world units per screen pixel
+          const float NYQ = 0.5;
+          float fcap = NYQ / max(footprint, 1e-5);
+          fscale = min(fscale, fcap);
+          float hWorld = paperHeightWorld(wp, nrm, fscale);
+
+          // GRAZING-ANGLE FALLBACK: when one pixel's world footprint approaches/exceeds a grain
+          // CELL (footprint * fscale → ~Nyquist), the world lookup is maximally band-limited and a
+          // single isotropic 2D noise can't represent the extreme anisotropic footprint without
+          // residual directional streaks. There — and only there (the near grazing tarmac lip + the
+          // horizon) — cross-fade to the STABLE screen-space grain. Those pixels sit near the
+          // vanishing point / move little on screen, so screen-locked grain there does NOT visibly
+          // swim (same rationale as the sky fallback). The bulk near→mid road, where the swim was
+          // obvious, stays fully WORLD-LOCKED. cellsPerPixel is the on-screen grain rate; fade in the
+          // screen fallback as it passes ~0.5 (Nyquist). Keyed off the UNCAPPED target frequency so
+          // the worst grazing (where the cap pins hard) drives the mix fully to the screen grain.
+          float cellsPerPixel = footprint * fscaleTarget;
+          float screenMix = smoothstep(0.32, 0.75, cellsPerPixel);
+          h = mix(hWorld, hScreen, screenMix);
+        }
+
+        // SCREEN-SPACE gradient of the (world-locked) height field via hardware derivatives:
+        // dFdx(h)/dFdy(h) is exactly the per-screen-pixel finite difference of the height field
+        // that the tooth-light and UV micro-distortion both want (both operate in screen/UV
+        // space), and it works identically for the world and sky branches with no view→world
+        // matrix. A fixed GRAD_GAIN brings the per-pixel slope of a fine field into the same
+        // gentle range the old explicit finite-difference produced; toothFlatness softens it
+        // further and the clamp bounds a high-frequency spike. grad_eps/time are now inert.
+        const float GRAD_GAIN = 9.0;
+        vec2 grad = vec2(dFdx(h), dFdy(h)) * GRAD_GAIN * toothFlatness;
+        grad = clamp(grad, vec2(-1.0), vec2(1.0));
+
+        // (3) MICRO-DISTORTION — fetch the painted image through a UV nudged along the paper
+        // slope, so painted edges crawl into the tooth instead of breaking on pixels.
+        vec2 distUv = grad * distortAmt;
         vec3 col = texture2D(tDiffuse, vUv + distUv).rgb;
 
         // --- (1) GRANULATION: subtractive + desaturating pigment-settle in valleys ----
         // Centre the height around 0 so peaks (>0) and valleys (<0) are signed.
         float hSigned = h - 0.5;
         // Pigment pools in the VALLEYS (low height) -> settle increases as height drops.
-        // SHARPENED (pow > 1) so the granulation reads as discrete pools settling into the
-        // tooth (real watercolour granulation) rather than a uniform fine veil over everything.
         float settle = clamp(0.5 - hSigned, 0.0, 1.0); // 0 at peaks, ->1 in deep valleys
-        // V2 CORRECTION 2: flatten the valley-pooling (1.8 -> 1.15) so the (now much finer) grain
-        // is an EVEN fine print speckle across the frame, not discrete watercolour pools clumping
-        // into the tooth. Combined with the higher paperScale this reads as flat comic-print grain.
+        // V2 CORRECTION 2: flatten the valley-pooling so the (fine) grain is an EVEN fine print
+        // speckle across the frame, not discrete watercolour pools clumping into the tooth.
         settle = pow(settle, 1.15);
-        // R-FINAL P2: RE-PIVOT the luma bell to peak ~0.62 / width 0.30 (was 0.40/0.20). With P1's
-        // restored value range the bulk of the frame now sits in the bright washes (~0.6-0.8); the
-        // tooth must BITE there (ref 02's bright sky carries visible cold-press tooth) instead of
-        // in a thin mid band that no longer holds much of the picture. Widened so the tooth reads
-        // across the bright field continuously. Matched to the WatercolourPigment bell.
+        // Luma bell — the tooth must BITE in the bright/mid washes (ref 02's bright sky carries
+        // visible cold-press tooth). Matched to the WatercolourPigment bell.
         float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
         float bell = exp(-pow((luma - 0.58) / 0.24, 2.0));
         float gran = granDensity * settle * bell;
         // Subtractive: darken toward the local value (pigment drying denser).
         col *= (1.0 - gran);
-        // Desaturating: pull the granulated patch slightly toward its own luma (pigment
-        // settling kills a little chroma in the valley — value noise, hue ~unchanged). R-FINAL P2
-        // softens this (0.5 -> 0.25): at the higher granDensity the 0.5 factor was washing the
-        // whole frame toward neutral gray (median sat crashed below the spec's 10-14% floor); the
-        // tooth must be a VALUE noise, keeping the field's tint (spec §8 "granulate VALUE not hue").
+        // Desaturating: pull the granulated patch slightly toward its own luma (VALUE noise,
+        // hue ~unchanged — spec §8 "granulate VALUE not hue").
         col = mix(col, vec3(luma), gran * 0.25);
 
         // --- (2) TOOTH LIGHTING: faint SIGNED raking light from the height gradient -----
-        // Slopes facing the light (rake > 0) catch a WARM micro-highlight and brighten;
-        // slopes facing away (rake < 0) fall into a COOL micro-shadow and darken. This is
-        // the SIGNED tooth-light: it adds on the lit side and subtracts on the shade side,
-        // so the cold-press fibre reads as a lit surface, not a uniform brightening haze.
+        // Slopes facing the light (rake > 0) catch a WARM micro-highlight; slopes facing away
+        // (rake < 0) fall into a COOL micro-shadow. SIGNED: adds on the lit side, subtracts on
+        // the shade side, so the fibre reads as a lit surface, not a uniform brightening haze.
         vec2 lDir = normalize(lightDir3.xy + vec2(1e-5));
         float rake = clamp(dot(grad, lDir), -1.0, 1.0); // signed: + toward light, - away
-        // Pick the warm (peak) or cool (valley) hue by sign, but bias it RELATIVE to the
-        // warm-cream sheet so the tint is a hue *direction*, not a big DC brightening.
+        // Bias the hue RELATIVE to the warm-cream sheet so the tint is a hue *direction*.
         vec3 toothHue = (rake >= 0.0 ? warmTint : coolTint) - paperTint;
-        // Signed scalar light + the hue direction => peaks warm-up, valleys cool-down.
         col += (vec3(rake) + toothHue * abs(rake)) * paperLight;
 
         // --- composite: Pegtop SOFT-LIGHT the paper sheet over the painted image --------
-        // Build the per-pixel paper layer: warm-cream tint modulated by the height field so
-        // the sheet itself carries a faint tooth (lighter on peaks, darker in valleys).
+        // The sheet itself carries a faint tooth (lighter on peaks, darker in valleys).
         vec3 sheet = paperTint * (0.92 + 0.16 * hSigned);
         vec3 lit   = pegtopSoftLight(col, sheet);
         col = mix(col, lit, paperStrength);
 
         // --- folded 1/255 hashed dither (takes over FilmGrain's debanding role) ---------
-        // Two summed hashes -> triangular (TPDF-ish) noise, folded to ~±0.5 LSB at 8-bit.
+        // Two summed hashes -> triangular (TPDF-ish) noise, folded to ~±0.5 LSB at 8-bit. The
+        // dither is a per-pixel debanding device (NOT image grain), so it stays SCREEN-space.
         float d0 = hash12(gl_FragCoord.xy);
         float d1 = hash12(gl_FragCoord.xy + 19.19);
         float dither = (d0 + d1 - 1.0) / 255.0;

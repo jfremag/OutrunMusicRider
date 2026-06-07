@@ -521,6 +521,13 @@ export class ThreeScene {
   private hasPrevViewProj = false
   // Scratch view-projection matrices reused each frame (allocation-free).
   private curViewProj = new THREE.Matrix4()
+  // Shared inverse of this frame's SHAKEN view-projection, computed ONCE per frame after the
+  // aux pass captures curViewProj and fed to every depth→world reconstruction (VelocitySmear,
+  // and the GEOMETRY-LOCKED grain passes WatercolourPigment + SubstratePaper) so their world
+  // unprojection is identical and allocation-free. Paired with the shaken camera world position
+  // (uCameraPos) for the grain's distance-based frequency compensation.
+  private invViewProj = new THREE.Matrix4()
+  private shakenCameraPos = new THREE.Vector3()
 
   // P4 — scratch state for the per-frame velocity-smear FLOW direction derivation (the screen-
   // space direction of the track rushing past, injected as a drag floor). Reused each frame so
@@ -878,8 +885,21 @@ export class ThreeScene {
       edgeStrength: 0.55,
       wobbleAmp: 0.0012,
       wobbleSpeed: 0.08,
-      bleedRadius: 0.9
+      bleedRadius: 0.9,
+      // GEOMETRY-LOCK: world-space tooth frequency (cells per world unit) + the reference
+      // camera→surface distance at which it reads as the fine on-screen speckle. Tuned with the
+      // SubstratePaper grain so the two tooth layers agree spatially. The granulation tooth is
+      // now sampled in world space (triplanar) so it travels with the road/ground (no swim).
+      // The frequency is HIGH (world units are metres-scale: the road is ~7.5u wide and fills
+      // much of the screen near the car, so a fine on-screen speckle needs many cells/unit).
+      worldGrainScale: 20.0,
+      worldDistRef: 30.0
     })
+    // Feed the geometry-lock inputs: the scene RAW-depth texture (world reconstruction) shared
+    // with the smear/aerial passes; the inverse view-projection + camera position are refreshed
+    // every frame in renderComposite (placeholder identity until then is harmless — the tooth
+    // simply reads world-space until the first real matrix, never swims).
+    this.pigmentPass.uniforms.tDepth.value = this.sceneDepthTexture
 
     // PASS 6 — PaintGradeLUT (PALETTE LOCK). Explicitly build the gouache ramp via paintRamp
     // (the factory would default to the same, but constructing it here makes the palette-lock
@@ -1080,8 +1100,24 @@ export class ThreeScene {
       // V2 C3: align the (now very faint) tooth-light tints to the new palette — warm-beige peaks,
       // cool sage-green/mauve valleys — so the residual grain hue is in-key, not steel-violet.
       warmTint: [0.85, 0.80, 0.69],  // warm beige peak highlight
-      coolTint: [0.58, 0.60, 0.56]   // cool sage-green/mauve micro-shadow valley
+      coolTint: [0.58, 0.60, 0.56],  // cool sage-green/mauve micro-shadow valley
+      // GEOMETRY-LOCK (the swim fix): the HEAVY print grain is now sampled in WORLD space
+      // (triplanar) from depth + the inverse view-projection, so it sticks to and travels WITH
+      // the 3D surfaces (road/ground) instead of swimming over them in screen space. The
+      // character (heavy, fine, near-isotropic offset-print) is unchanged — only the sampling
+      // space moved. worldGrainScale maps the world lattice frequency to the on-screen fine
+      // speckle at the reference chase distance (worldDistRef); near a touch coarser, far finer.
+      // Matched to the WatercolourPigment tooth so the two grain layers agree spatially. HIGH
+      // frequency: world units are metres-scale (the road is ~7.5u wide), so the fine on-screen
+      // print speckle needs many lattice cells per world unit.
+      worldGrainScale: 20.0,
+      worldDistRef: 30.0
     })
+    // Feed the geometry-lock inputs (RAW-depth + view normals share the smear/aerial G-buffers).
+    // uInvViewProj + uCameraPos are refreshed every frame in renderComposite from the SHAKEN
+    // transform (identity placeholder until then is harmless: world-space, just not yet aligned).
+    this.substratePaperPass.uniforms.tDepth.value = this.sceneDepthTexture
+    this.substratePaperPass.uniforms.tNormal.value = this.normalTarget.texture
 
     // CRISP: a subtle unsharp-mask AFTER the smear (on the painted CONTENT) and BEFORE the paper
     // grain, so it crisps the painted forms toward ref 02's print-sharpness WITHOUT amplifying the
@@ -2345,14 +2381,32 @@ export class ThreeScene {
     // shaken VP (the smear unprojects depth with it); uPrevViewProj holds the PREVIOUS frame's
     // shaken VP (cached after the previous render). On the first frame (no prev) or a seek/
     // large-Δ frame, force uReset=1 so a stale/absent prev-matrix can't drag the whole screen.
+    // Invert this frame's shaken VP ONCE and reuse it for every depth→world reconstruction
+    // (the smear AND the two geometry-locked grain passes), and capture the shaken camera world
+    // position (the shake offset is currently applied to camera.position) for the grain's
+    // distance-based frequency compensation. Both are allocation-free scratch.
+    this.invViewProj.copy(this.curViewProj).invert()
+    this.shakenCameraPos.copy(this.camera.position)
+
     const smearU = this.velocitySmearPass.uniforms
-    ;(smearU.uInvCurViewProj.value as THREE.Matrix4).copy(this.curViewProj).invert()
+    ;(smearU.uInvCurViewProj.value as THREE.Matrix4).copy(this.invViewProj)
     if (this.hasPrevViewProj) {
       ;(smearU.uPrevViewProj.value as THREE.Matrix4).copy(this.prevViewProj)
     } else {
       ;(smearU.uPrevViewProj.value as THREE.Matrix4).copy(this.curViewProj)
     }
     smearU.uReset.value = smearReset || !this.hasPrevViewProj ? 1 : 0
+
+    // --- GEOMETRY-LOCKED GRAIN view-projection: feed the SAME shared inverse VP + shaken camera
+    // position to the two world-space grain passes so the heavy print grain unprojects to the
+    // exact world surfaces the colour frame just rendered and travels WITH them (no screen-space
+    // swim). tDepth/tNormal were wired once at construction (they are owned, stable textures).
+    const pigU = this.pigmentPass.uniforms
+    ;(pigU.uInvViewProj.value as THREE.Matrix4).copy(this.invViewProj)
+    ;(pigU.uCameraPos.value as THREE.Vector3).copy(this.shakenCameraPos)
+    const paperU = this.substratePaperPass.uniforms
+    ;(paperU.uInvViewProj.value as THREE.Matrix4).copy(this.invViewProj)
+    ;(paperU.uCameraPos.value as THREE.Vector3).copy(this.shakenCameraPos)
 
     // --- P4: derive the screen-space TRACK-FLOW direction for the injected smear drag. Project a
     // point ~FLOW_LOOKAHEAD units ahead down the centerline AND the car's own position into clip
