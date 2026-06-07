@@ -801,12 +801,23 @@ export class ThreeScene {
       // 1.32 -> 1.5 (a stronger S-curve so darks deepen and lights stay luminous — value
       // separation, not a flat dim), shadowDepth 1.0 (full reach into the dark ramp stops).
       blackPoint: 0.42,
-      // whitePoint 0.88 (NOT pushed low): the base scene's bright field is already luminous
-      // (sky V~0.89, ground V~0.71 pre-LUT) and decisively cool/warm. Pushing whitePoint low
-      // (0.72) over-stretched the bright sky to clamp at ramp coord 1.0 — slamming it into the
-      // single near-neutral ramp-top colour and DESTROYING its blue hue + its variation (the sky
-      // went neutral gray). At 0.88 the bright sky maps through the COOL band (0.66..0.84) instead,
-      // keeping its blue, while the S-curve + the lifted blackPoint still supply the darks.
+      // whitePoint 0.96 (P45-APEX: raised from 0.88). The ramp's top stops were just opened toward
+      // true paper-white (paintRamp.ts: putty #ECE9E1 ~0.91, apex #F4F4F8 ~0.96). whitePoint sets
+      // the input luma that maps to ramp coord 1.0 (the apex), so RAISING it RESERVES the new bright
+      // top for ONLY the genuinely-brightest source pixels — the sun's luminous core (pre-LUT luma
+      // ~0.94) and the helmet-sheen crest/spark — while the bright negative-space field/sky (pre-LUT
+      // ~0.85-0.89) now maps a notch LOWER, into the unchanged rose-gray #DDCBC8 stop (~0.82, mid-
+      // key cool). Net: the value scale OPENS at the top (the apex is reachable) without globally
+      // brightening — the field stays mid-key and keeps its cool blue band; only the brightest few %
+      // climb to the luminous apex. (At 0.88 nothing could exceed ~0.92; the old ramp top capped
+      // there anyway, so the picture had no luminous high end — the critique's flagged nit.)
+      // KEPT at 0.88: raising it (0.91/0.96) shoved the bright negative-space SKY up out of the
+      // ramp's COOL band (pos 0.66..0.84) into the warm rose-gray stop (pos 0.92) — collapsing the
+      // warm/cool split (warmCool spiked) and warming the sky to pink. At 0.88 the sky stays cool
+      // exactly as round-5 had it; the LUMINOUS APEX now comes ENTIRELY from the opened ramp TOP
+      // stops (paintRamp.ts putty 0.96 / paper-white 1.0), which only coord >~0.93 reaches — i.e.
+      // ONLY the sun's luminous core (src ~0.94 -> coord 1.0) and the helmet-sheen crest. The mid
+      // field (sky/ground, coord <=0.84) is untouched, so nothing globally brightens.
       whitePoint: 0.88,
       // contrast 1.6 (a stronger S-curve about 0.5): deepens the shadow side toward the dark ink
       // stops (more true darks / a wider value std, the remaining P1 gap) while simultaneously

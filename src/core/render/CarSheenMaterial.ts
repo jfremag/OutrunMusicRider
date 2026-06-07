@@ -342,13 +342,36 @@ export function injectCarSheen(
         outgoingLight = mix(outgoingLight, sheenCol, cov);
         outgoingLight += catchLights;
 
-        // RAZOR SPARKS: the ONLY near-white on the car. Gate to the top ~2% of (spec*fresnel) on
-        // high-curvature silhouettes. Use the *un-attenuated* specular peak (ndh, not the broad
-        // width-shaped lobe) so the gate can actually reach the razor [0.985,1.0] window where
-        // surface/light/grazing all align — keeping sparks rare (<2%) but possible. additive #F6F7F9.
-        float sparkTerm = ndh * fres;                            // spec peak * fresnel, 0..1
-        float spark = smoothstep(0.985, 1.0, sparkTerm);         // top ~2% only
-        outgoingLight += uSparkColor * spark * 0.9;
+        // HERO CATCH-LIGHT (P45-APEX): ONE small, crisp, off-centre near-white glint — the single
+        // luminous focal accent on the canopy, the hero's bright apex. The previous gate keyed on
+        // (ndh*fres): fresnel ~0 except at extreme grazing, so on this convex canopy read from a
+        // chase angle the product never reached [0.985,1.0] and the spark NEVER FIRED — leaving the
+        // canopy a soft cream PUDDLE with no glint (the critique's nit). This re-gate keys on a
+        // TIGHT high-exponent specular hotspot about an OFF-CENTRE half-vector that reliably lands
+        // on the canopy crest, so the spark actually reads as one crisp catch-light. It is gated to
+        // sit WHERE the broad sheen already lives (cov) so it is the bright peak OF the sheen, not a
+        // stray dot, and kept to the top ~1-2% by the smoothstep window. Additive paper-white
+        // (#F6F7F9). It is added AFTER the sheen's 0.90 value cap, so this tiny spot is the one place
+        // on the car allowed past the cap into the near-paper-white apex — surgical, no bloom.
+        // The catch-light is gated to the TOP SLIVER OF THE SHEEN ITSELF (the lobe-coverage crest),
+        // exactly per spec ("the top ~1-2% of the sheen"). This is the robust read: the broad lobe
+        // coverage (cov) is guaranteed to peak on the camera-facing canopy crown, so smoothstep'ing
+        // its very top reliably lands ONE bright spot ON the canopy at every chase angle — the prior
+        // tight half-vector specular (pow of N dot H) depended on an exact normal alignment the dome
+        // never quite hit from the chase camera, so it produced only a soft cream puddle and never a
+        // glint (the critique's nit). A mild off-centre half-vector specular only SHAPES it (tightens
+        // the spot + nudges it off the dead-centre of the crown) so it reads as a crisp off-centre
+        // glint rather than a centred ring.
+        vec3  sparkH = normalize(sL + sV + vec3(0.12, 0.07, 0.0)); // off-centre half-vector (shaping)
+        // A TIGHT off-centre specular (exponent 80) is the PRIMARY shape of the glint: it falls to ~0
+        // within a few degrees of one orientation, so it concentrates the spark into ONE small spot on
+        // the canopy crown (and, having a single preferred normal, it does NOT also light the wheel-pod
+        // tops, whose normals differ) rather than washing the whole dome. The cov crest is only a
+        // PRESENCE gate (the spot must sit on the lit sheen, never on a shadow flank).
+        float sparkShape = pow(clamp(dot(sN, sparkH), 0.0, 1.0), 80.0);
+        float sparkCrest = smoothstep(0.86, 0.99, cov);          // narrow: only the very lobe peak
+        float spark = clamp(sparkShape * sparkCrest, 0.0, 1.0);  // tight spot ∩ lit crest -> one glint
+        outgoingLight += uSparkColor * spark * 1.35;             // additive; pushes the spot to ~paper-white
       }
       #include <opaque_fragment>`
     )

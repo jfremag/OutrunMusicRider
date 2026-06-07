@@ -85,16 +85,24 @@ const DEFAULT_STOPS: RampStop[] = [
   { pos: 0.84, hex: 0xc4cadd, label: 'lit steel-blue (#4) — cool band high' },
   // Rose-gray field — the WARM desaturated counterweight, a narrow warm note near the highlight cap
   // (the warm half of the split). Brightened to #DDCBC8 (luma ~0.82) so the ramp stays luminance-
-  // MONOTONIC between the cool-band-high stop (~0.79) and the putty cap (~0.84).
+  // MONOTONIC between the cool-band-high stop (~0.79) and the putty cap (~0.84). This is roughly
+  // where the bright negative-space sky/field lands (kept put), so the field stays mid-key.
   { pos: 0.92, hex: 0xddcbc8, label: 'rose-gray field (#5)' },
-  // Paper putty — the warm "white" substitute / gouache highlight cap. Sits just under the very top.
-  { pos: 0.96, hex: 0xd9d6ce, label: 'paper putty highlight (#1)' },
-  // Sheen Peak — the COOL blue-violet highlight cap (STYLE_SPEC §2 #10: "Helmet-shine core tints
-  // here"). Placed at the very top so ONLY the brightest hero pixels — the helmet sheen crest and
-  // the sun's achromatic-to-cool core (§5) — resolve COOL rather than being warmed into putty by
-  // the luminance lock. Luma (~0.85) sits just above putty so the ramp stays monotonic. This is
-  // what lets the broad rolling sheen survive the palette lock as a cool feature, not a warm glaze.
-  { pos: 1.0, hex: 0xd7d7e6, label: 'sheen peak cool highlight (#10)' }
+  // Paper putty — the warm "white" substitute / gouache highlight. P45-APEX: lifted from #D9D6CE
+  // (~0.84) to #ECE9E1 (luma ~0.91) so the value scale OPENS at the top — the lightest paper/sky
+  // highlights now resolve to a genuinely bright putty instead of the old capped ~0.84. Sits just
+  // under the paper-white apex; the field at pos 0.92 below it is unchanged, so only the brightest
+  // few % (those that map above coord ~0.94) climb into this brighter putty — the field stays put.
+  { pos: 0.96, hex: 0xece9e1, label: 'paper putty highlight (#1) — opened apex' },
+  // Paper-white APEX — the COOL near-paper-white highlight cap (STYLE_SPEC §2 #10 "Helmet-shine
+  // core tints here", lifted to true paper-white). P45-APEX: was #D7D7E6 (~0.85), which CAPPED the
+  // whole frame at ~0.92 with 0% of pixels above it (the critique's flagged nit) — the ramp itself
+  // physically could not emit a luminous high end. Raised to #F4F4F8 (luma ~0.96) so ONLY the very
+  // brightest hero pixels — the sun's achromatic-to-cool core (§5) and the helmet-sheen spark — can
+  // resolve to near-paper-white and give the frame its missing luminous APEX, WITHOUT lifting the
+  // field (which lands at/below the 0.92 rose-gray stop). Keeps a faint cool blue-violet tint so the
+  // apex reads as cool paper light, not a neutral CG white; stays monotonic above the putty stop.
+  { pos: 1.0, hex: 0xf4f4f8, label: 'paper-white apex cool highlight (#10) — luminous top' }
 ]
 
 /** Unpack a 0xRRGGBB integer into a normalised sRGB triplet (display-space). */
