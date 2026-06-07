@@ -440,6 +440,9 @@ export class ThreeScene {
   private skyMesh: THREE.Mesh | null = null
   private sunMesh: THREE.Mesh | null = null
   private groundMesh: THREE.Mesh | null = null
+  // The dominant warm KEY light — the cast-shadow source; followed to the car each frame so its
+  // shadow camera tracks the visible road on the infinite track.
+  private directionalLight!: THREE.DirectionalLight
   private beatIndicator: THREE.Sprite | null = null
   private beatIndicatorMaterial: THREE.SpriteMaterial | null = null
   private trebleMeshes: THREE.Object3D[] = []
@@ -558,6 +561,12 @@ export class ThreeScene {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     // Clear to the steel-violet field colour so any gap reads as paper field, not black.
     this.renderer.setClearColor(HARMONY.steelVioletField.getHex(), 1)
+    // CAST SHADOWS for real 3D depth (user: "respect the 3D"). Soft shadow maps — the car + swords
+    // cast onto the road/ground, modelling depth on the otherwise flat planes and giving ref 02's
+    // dramatic light-and-shadow. The key light + its shadow camera follow the car each frame (see
+    // updateCamera) so the shadows work on the infinite scrolling track.
+    this.renderer.shadowMap.enabled = true
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
 
     // ACES filmic tone mapping + sRGB output. OutputPass performs the tone-map / colour-
     // space conversion at the end of the composer chain (the LDR boundary the painterly
@@ -721,8 +730,20 @@ export class ThreeScene {
     // a warm lit side) that re-arms the whole downstream stack at once — the master fix. Lit
     // surfaces go bright/warm; faces turned from it fall to the dim cool fill above (the darks).
     const directionalLight = new THREE.DirectionalLight(LIGHT_KEY_WARM, 1.75)
-    directionalLight.position.set(-6, 13, 9)
+    directionalLight.position.set(-8, 11, 9) // a touch more raking so cast shadows have length
+    directionalLight.castShadow = true
+    directionalLight.shadow.mapSize.set(2048, 2048)
+    directionalLight.shadow.camera.near = 1
+    directionalLight.shadow.camera.far = 140
+    directionalLight.shadow.camera.left = -50
+    directionalLight.shadow.camera.right = 50
+    directionalLight.shadow.camera.top = 50
+    directionalLight.shadow.camera.bottom = -50
+    directionalLight.shadow.bias = -0.0006
+    directionalLight.shadow.normalBias = 0.05
     this.scene.add(directionalLight)
+    this.scene.add(directionalLight.target)
+    this.directionalLight = directionalLight
 
     // A soft warm catch near the car so the hero body lifts off the field — trimmed (0.45 -> 0.30)
     // so it tints the near body warm without flat-filling away the form shadow P1 just restored.
@@ -1300,6 +1321,7 @@ export class ThreeScene {
     ground.rotation.x = -Math.PI / 2
     ground.position.y = -0.2
     ground.layers.set(LAYER_DEFAULT)
+    ground.receiveShadow = true
     this.groundMesh = ground
     this.scene.add(ground)
   }
@@ -1962,6 +1984,7 @@ export class ThreeScene {
     })
 
     this.roadMesh = new THREE.Mesh(roadGeometry, roadMaterial)
+    this.roadMesh.receiveShadow = true
     this.roadMesh.layers.set(LAYER_DEFAULT)
     this.scene.add(this.roadMesh)
 
@@ -2877,6 +2900,17 @@ export class ThreeScene {
     const forwardSmooth = 0.15
 
     this.smoothedCarPosition.lerp(carPos, positionSmooth)
+    // Follow the cast-shadow key light to the car so its shadow camera tracks the visible road on
+    // the infinite track (fixed offset keeps the warm raking angle).
+    if (this.directionalLight) {
+      this.directionalLight.position.set(
+        this.smoothedCarPosition.x - 8,
+        this.smoothedCarPosition.y + 11,
+        this.smoothedCarPosition.z + 9
+      )
+      this.directionalLight.target.position.copy(this.smoothedCarPosition)
+      this.directionalLight.target.updateMatrixWorld()
+    }
     this.smoothedCarForward.lerp(carForward, forwardSmooth).normalize()
 
     const targetCarMatrix = new THREE.Matrix4().lookAt(
