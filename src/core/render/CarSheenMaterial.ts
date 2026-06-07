@@ -313,8 +313,12 @@ export function injectCarSheen(
 
         // Reflected catch-lights: a cool grazing sliver on the silhouette PLUS a faint warm sienna
         // hint on the lit shoulder — a hint of a reflected world (ref 02's chrome catches both the
-        // cool sky and a warm ground bounce), not a flat matte. Kept low so they read as reflections.
-        vec3  catchLights = uCatchCool * (fres * 0.10) + uCatchWarm * (broadCore * wrapped * 0.05);
+        // cool sky and a warm ground bounce), not a flat matte. ralph(iter6): the cool fresnel sliver
+        // is lifted 0.10 -> 0.18 so the rounded camera-facing cowl EDGES catch more reflected bright
+        // sky — the strongest cheap "polished chrome" cue (a dimensional metal form reflecting its
+        // environment), turning the dark-blob silhouette into a light-catching hero edge. The warm
+        // ground-bounce hint is also nudged up a hair (0.05 -> 0.07) for the reflected-world read.
+        vec3  catchLights = uCatchCool * (fres * 0.18) + uCatchWarm * (broadCore * wrapped * 0.07);
 
         // BODY: KEEP the BRDF-lit 3D FORM (light side / shadow side) so the car reads as a
         // DIMENSIONAL body, and LIFT its base value so it is a luminous dusky chrome — NOT the flat

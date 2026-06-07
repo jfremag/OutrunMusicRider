@@ -711,25 +711,35 @@ export class ThreeScene {
     // not the overall lift. Dropped 1.45 -> 0.35 so it only keeps the shadow side luminous; the
     // oblique directional below supplies the actual key + form shadow. (Too high here re-floods
     // the scene back to the flat mid-key wash that starved every pass.)
+    // ralph(iter6) PRIORITY-6: hemisphere cool FILL trimmed 0.6 -> 0.5 so the shadow side falls a
+    // touch deeper (widening the lit-vs-shadow value spread the stronger key + contrast LUT need for
+    // dramatic 3D modelling) while still keeping up-facing shadow fields a luminous cool sage (never
+    // black).
     const hemiLight = new THREE.HemisphereLight(
       LIGHT_SKY_COOL,    // cool steel-violet sky term -> luminous cool shadow on up-facing fields
       LIGHT_GROUND_WARM, // COOL steel-blue ground bounce -> cool underside (cool-shadow half)
-      0.6
+      0.5
     )
     this.scene.add(hemiLight)
 
-    // R-FINAL P1: a DIM cool steel-violet ambient floor (0.55 -> 0.22). It must NOT lift the whole
-    // scene (that was the round-1 flat-flood); it only guarantees the deepest shadow side reads as
-    // a luminous cool steel-violet rather than crushing to black — the cool half of the split.
-    const ambientLight = new THREE.AmbientLight(LIGHT_AMBIENT_COOL, 0.28)
+    // R-FINAL P1: a DIM cool steel-violet ambient floor. It must NOT lift the whole scene (that was
+    // the round-1 flat-flood); it only guarantees the deepest shadow side reads as a luminous cool
+    // steel-violet rather than crushing to black — the cool half of the split.
+    // ralph(iter6) PRIORITY-6: 0.28 -> 0.24 so the form-shadow darks deepen for dramatic modelling.
+    const ambientLight = new THREE.AmbientLight(LIGHT_AMBIENT_COOL, 0.24)
     this.scene.add(ambientLight)
 
-    // R-FINAL P1: the oblique warm sienna KEY is now the DOMINANT light (0.85 -> 1.6). A strong
-    // raking N·L manufactures the per-pixel value spread (form shadow + a full value range +
-    // a warm lit side) that re-arms the whole downstream stack at once — the master fix. Lit
-    // surfaces go bright/warm; faces turned from it fall to the dim cool fill above (the darks).
-    const directionalLight = new THREE.DirectionalLight(LIGHT_KEY_WARM, 1.75)
-    directionalLight.position.set(-8, 11, 9) // a touch more raking so cast shadows have length
+    // R-FINAL P1: the oblique warm sienna KEY is the DOMINANT light. A strong raking N·L
+    // manufactures the per-pixel value spread (form shadow + a full value range + a warm lit
+    // side) that re-arms the whole downstream stack at once — the master fix. Lit surfaces go
+    // bright/warm; faces turned from it fall to the dim cool fill above (the darks).
+    // ralph(iter6) PRIORITY-6 (DIRECTIONAL DRAMA): 1.75 -> 2.15. The composition read FLAT/empty
+    // with a weak key — the car/road had no real Lambert form-shadow modelling. A stronger key
+    // deepens the warm lit side and the form-shadow falloff (so the car/road gain dimensional
+    // modelling) and lengthens the cast shadows for compositional drama. Paired with the slightly
+    // dimmer cool fill below so the lit-vs-shadow value SPREAD widens (the darks ref-02 drama needs).
+    const directionalLight = new THREE.DirectionalLight(LIGHT_KEY_WARM, 2.15)
+    directionalLight.position.set(-9, 10, 9) // raking low+side so cast shadows have dramatic length
     directionalLight.castShadow = true
     directionalLight.shadow.mapSize.set(2048, 2048)
     directionalLight.shadow.camera.near = 1
@@ -960,13 +970,18 @@ export class ThreeScene {
       accentSatGate: 0.16,
       accentPreserve: 0.85,
       accentBoost: 0.55,
-      // V2 CORRECTION 4 (contrast / darks-as-accent): blackPoint 0.33 + shadowDepth 1.0 push the
+      // V2 CORRECTION 4 (contrast / darks-as-accent): blackPoint + shadowDepth push the
       // genuinely darkest forms (under-car, the dusky-purple car shadow side, sword shadow, the
       // ground-in-deep-shadow band) DOWN into the ramp ink stops -> true punched darks (darkFrac
       // toward ref 02's ~0.10). The lit sage field sits above the black point so it stays a muted
-      // mid-green; a strong contrast S-curve (1.7) widens the value separation (globalStd) so the
+      // mid-green; a strong contrast S-curve widens the value separation (globalStd) so the
       // darks read as bold ACCENTS against the luminous field, not a flat dim.
-      blackPoint: 0.345,
+      // ralph(iter6) PRIORITY-4 (RESTORE FULL VALUE RANGE — the washed-out/flat critique): the iter4
+      // mid-key COMPRESSION (whitePoint 0.985 + soft contrast 1.32 + shadowDepth 0.72) over-flattened
+      // the frame into a narrow high-key band with NO punched darks and no luminous high — exactly
+      // ref-02's MISSING dramatic value structure. blackPoint 0.345 -> 0.30 lets the genuinely dark
+      // focal forms (under-car, car/sword shadow sides) drop into the deep ink stops.
+      blackPoint: 0.3,
       // whitePoint 0.96 (P45-APEX: raised from 0.88). The ramp's top stops were just opened toward
       // true paper-white (paintRamp.ts: putty #ECE9E1 ~0.91, apex #F4F4F8 ~0.96). whitePoint sets
       // the input luma that maps to ramp coord 1.0 (the apex), so RAISING it RESERVES the new bright
@@ -984,25 +999,26 @@ export class ThreeScene {
       // stops (paintRamp.ts putty 0.96 / paper-white 1.0), which only coord >~0.93 reaches — i.e.
       // ONLY the sun's luminous core (src ~0.94 -> coord 1.0) and the helmet-sheen crest. The mid
       // field (sky/ground, coord <=0.84) is untouched, so nothing globally brightens.
-      // ralph(iter4) PRIORITY-4 (MID-KEY COMPRESSION): whitePoint RAISED 0.90 -> 0.985. (The task brief
-      // suggested LOWERING toward 0.84, but the LUT math + this ramp make that BACKWARDS: a lower white
-      // point makes the bright sky's lookup COORD reach ~1.0 sooner, landing it on the ramp's near-WHITE
-      // apex (#F6F3EA, ~245) — a BRIGHTER, more blown sky. Confirmed by the iter3 history note above.)
-      // The bright sky (pre-LUT luma ~0.87) at wp=0.90 mapped to coord ~0.95 → the cream stop (~222) — a
-      // blown near-white wall. RAISING wp to 0.985 widens the [black,white] span so that same sky maps to
-      // coord ~0.82 → the LUMINOUS COOL-CREAM/sage stop #CCC6AC (~199 ≈ the ref's ~190), pulling the sky
-      // DOWN off the apex while RESERVING the near-white apex for ONLY the genuinely brightest pixels (sun
-      // core / helmet sheen, pre-LUT >0.95). Net: the blown ~222 sky drops toward ~190, collapsing the
-      // sky-vs-ground spread into ref 02's tight ~150-190 luminous field with the chrome hero as the focus.
+      // ralph(iter6) PRIORITY-4: whitePoint KEPT at 0.985 (baseline). A measurement-driven decision:
+      // LOWERING it (toward the brief's 0.92) brightened the bright negative-space SKY (V 0.71 -> 0.77+
+      // — WASHED OUT, the WRONG direction) because the sky's pre-LUT luma (~0.85) then mapped higher up
+      // the ramp. The LUMINOUS HIGH must come from the SUN/sheen ONLY, never the sky. The sun core was
+      // brightened to ~0.96 + the disc enlarged; even at wp=0.985 it maps to coord ~0.96 → the ramp's
+      // cream/apex stops (the real luminous high), while the sky (pre-LUT ~0.85) maps to coord ~0.80 →
+      // the cool-cream stop and STAYS mid-key/cool exactly as baseline. So the value-range comes ENTIRELY
+      // from the deepened DARKS below (shadowDepth/blackPoint/contrast) + the luminous sun, NOT from
+      // lifting the sky — restoring ref-02's dark-to-bright range without the washed-out sky regression.
       whitePoint: 0.985,
-      // ralph(iter4) PRIORITY-4: contrast SOFTENED 1.7 -> 1.32 and shadowDepth 0.93 -> 0.72. The strong
-      // 1.7 S-curve + deep shadowDepth was crushing the BROAD ground toward the dark ink stops, which
-      // (with the blown sky) produced the cheap two-zone split. Softening both LIFTS the mid/far ground
-      // back toward its muted mid-key value (~150) so the whole field reads as ref 02's unified luminous
-      // band — while the genuinely darkest FOCAL forms (under-car, the car/sword shadow side) still
-      // reach the ink stops as punched accents (just no longer dragging the entire ground plane down).
-      contrast: 1.32,
-      shadowDepth: 0.72,
+      // ralph(iter6) PRIORITY-4: contrast 1.32 -> 1.48 and shadowDepth 0.72 -> 0.84 (a MODEST raise,
+      // per the brief). The iter4 softening had killed the value SEPARATION (the flat/washed-out
+      // critique). A firmer S-curve about the 0.5 pivot + the deeper shadowDepth let the genuinely
+      // darkest FOCAL forms (under-car, car shadow side) reach the ramp's deep ink stops as PUNCHED
+      // darks — the rich near-foreground dark-to-bright structure of ref 02. Kept modest (0.84 not 0.9)
+      // so it does NOT drag the emissive crimson swords' darker faces into muddy ink (they must stay
+      // RED at all distances). The aerial far-band lift (lift 0.12) still holds the DISTANT ground
+      // luminous so this bites in the near foreground without a two-zone split.
+      contrast: 1.48,
+      shadowDepth: 0.84,
       // POSTERIZE OFF (user: "don't apply flat effects that obfuscate depth"). The ~7-level
       // posterize crushed the smooth value gradients into flat plateaus, destroying the 3D
       // light-and-shadow form modelling — keep the smooth value range so volume/depth read as 3D.
@@ -1349,18 +1365,24 @@ export class ThreeScene {
     // NO scanline bands, NO magenta corona, NO glow/bloom. A low-contrast value lift that
     // dissolves into the sky wash. Normal-blended, matte, soft-edged. Composed off-centre in
     // a later wave (B5). The mottle/granulation lands in the post stack.
-    const sunGeometry = new THREE.PlaneGeometry(380, 380, 1, 1)
+    // ralph(iter6) PRIORITY-6: a LARGER luminous sun anchor (380 -> 420). A bigger, brighter disc is
+    // the single strongest cue that the bright sky reads as LIT AIR (not a dead pale wall) and gives
+    // the empty negative space a clear compositional light source for the eye to read. Kept modest
+    // (420 not 460) so the enlarged disc anchors the negative space without over-bleeding the whole
+    // upper sky toward white (a washed-out regression).
+    const sunGeometry = new THREE.PlaneGeometry(420, 420, 1, 1)
     const sunMaterial = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
       blending: THREE.NormalBlending,
       uniforms: {
-        // R-FINAL P1: brighten the disc core toward the warm-cream "white" (#F2EFE6, luma ~0.94)
-        // so it is the frame's LUMINOUS high-value anchor (ref 02's bright wet bloom of light) and
-        // actually clears the LUT whitePoint into the light ramp stops — supplies lightFrac>0 and
-        // the top of the value range, balancing the restored darks. Still a soft wet disc, no glow.
-        coreColor: { value: new THREE.Color(0xf6efdf) },         // bright warm-cream luminous core
-        edgeColor: { value: new THREE.Color(0xe9dcc2) }          // warm cream rim — dissolves into the low-sun key glow
+        // R-FINAL P1 / ralph(iter6): brighten the disc core to near paper-white (#FAF4E6, luma ~0.96)
+        // so it is the frame's LUMINOUS high-value ANCHOR (ref 02's bright wet bloom of light) and —
+        // now that the LUT whitePoint dropped to 0.93 — clears it into the ramp's APEX stops (the
+        // genuinely luminous high), supplying the top of the value range that balances the restored
+        // darks and reads as a lit sky. The selective bloom then gives it a wet glow. Still a soft disc.
+        coreColor: { value: new THREE.Color(0xfaf4e6) },         // near paper-white luminous core
+        edgeColor: { value: new THREE.Color(0xece0c6) }          // warm cream rim — dissolves into the low-sun key glow
       },
       vertexShader: `
         varying vec2 vUv;
