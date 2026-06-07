@@ -200,34 +200,39 @@ export function createAerialPerspectivePass(opts: {
         // (1) WASH toward the pale haze colour — the dominant "distance dissolves into field".
         col = mix(col, uHazeColor, uHazeStrength * w);
 
-        // (4) HORIZON-BAND HAZE (depth-independent seam dissolve). In this low chase view the far
-        // ground packs BEYOND the depth far plane (raw → ~1.0), so the depth-keyed wash above can't
-        // reach the rows right under the horizon and a hard dark-ground / light-sky seam remained.
-        // This adds a SCREEN-SPACE atmospheric band: walk a few taps UP from this fragment; the more
-        // SKY (cleared/far depth) sits just above, the closer this fragment is to the horizon line,
-        // so wash it harder toward the sky-matched haze colour. The band fades out below the horizon
-        // (taps find ground, not sky), and is HARD-GATED to FAR fragments only (this fragment's own
-        // raw depth must be near the far plane) so the FOREGROUND HERO (car) and the near road —
-        // which can be silhouetted against the sky from this low angle and would otherwise be washed
-        // into the ground — are never touched. Only the genuinely distant near-horizon ground is
-        // veiled. This melts the seam regardless of the degenerate far-ground depth.
+        // (4) HORIZON-BAND HAZE (SMOOTH screen-space seam dissolve, NO hard depth gate). In this low
+        // chase view the far ground packs BEYOND the depth far plane (raw → ~1.0), so the depth-keyed
+        // wash above can't reach the rows right under the horizon and a hard dark-ground / light-sky
+        // seam remained. The old build keyed the band off a hard raw-depth far-gate
+        // (smoothstep(0.992,0.9985,rawDepth)) AND hard-excluded the car — both produced a visible
+        // STEP sitting right on the horizon (geometry above vs below the line treated differently).
+        // This replaces it with a SMOOTH screen-space horizon falloff: walk MANY taps UP from this
+        // fragment and measure the (feathered) fraction that are sky. That fraction is a smooth
+        // distance-BELOW-the-horizon-line gradient (1 right under the line → 0 deep in the
+        // foreground) with NO step. The car is NO LONGER excluded — hazeColor IS the bright sky, so a
+        // form silhouetted against the sky hazes CONSISTENTLY whether it is above or below the line
+        // (the swords/car read identical across the seam). The band still fades to 0 well down the
+        // frame where no sky sits above, so the near foreground keeps its full painted value.
         if (uHorizonHaze > 0.001) {
           float skyAbove = 0.0;
-          for (int i = 1; i <= 6; i++) {
-            float dy = uHorizonBand * (float(i) / 6.0);
+          float wA = 0.0;
+          for (int i = 1; i <= 12; i++) {
+            float fi = float(i) / 12.0;
+            float dy = uHorizonBand * fi;
             float rd = texture2D(tDepth, vec2(vUv.x, vUv.y + dy)).r;
-            skyAbove += step(0.9997, rd);                 // 1 if that tap is sky
+            // Weight nearer taps more so the gradient is strongest right at the line and dissolves
+            // smoothly downward — a continuous falloff, never a hard band edge.
+            float w = 1.0 - fi;
+            skyAbove += step(0.9997, rd) * w;
+            wA += w;
           }
-          skyAbove /= 6.0;                                // fraction of upward taps that are sky
-          // Feather the proximity into a smooth gradient that is strongest right at the horizon and
-          // falls off gently downward (a power curve so the band's lower edge dissolves, not steps).
-          float horizonW = smoothstep(0.08, 1.0, skyAbove);
+          skyAbove /= max(wA, 1e-4);                      // smooth fraction of upward sky (0..1)
+          // Smooth proximity gradient (a soft gamma so the lower edge dissolves, not steps). NO
+          // far-gate, NO car-exclusion — the wash is driven purely by this smooth screen-space
+          // measure so it dissolves the seam continuously for every form crossing the horizon.
+          float horizonW = smoothstep(0.04, 0.9, skyAbove);
           horizonW *= horizonW;
-          // HARD FAR-GATE: only fragments that are themselves FAR (near-horizon ground, raw depth
-          // → far plane) get the band wash. The car/near road sit at much lower raw depth, so this
-          // gate is 0 for them — they keep their full painted value (the wash bug fix).
-          float farGate = smoothstep(0.992, 0.9985, rawDepth);
-          col = mix(col, uHazeColor, uHorizonHaze * horizonW * farGate);
+          col = mix(col, uHazeColor, uHorizonHaze * horizonW);
         }
 
         gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);

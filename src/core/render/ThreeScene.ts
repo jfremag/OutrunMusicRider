@@ -443,8 +443,6 @@ export class ThreeScene {
   // The dominant warm KEY light — the cast-shadow source; followed to the car each frame so its
   // shadow camera tracks the visible road on the infinite track.
   private directionalLight!: THREE.DirectionalLight
-  private beatIndicator: THREE.Sprite | null = null
-  private beatIndicatorMaterial: THREE.SpriteMaterial | null = null
   private trebleMeshes: THREE.Object3D[] = []
   private swordTemplate: THREE.Object3D | null = null
   private swordTemplatePromise: Promise<THREE.Object3D | null> | null = null
@@ -762,8 +760,9 @@ export class ThreeScene {
     this.particlePool.points.layers.enable(HERO_LAYER)
     this.scene.add(this.particlePool.points)
 
-    // Create the immersion-preserving beat indicator (a glowing sprite, not HUD text)
-    this.createBeatIndicator()
+    // (The on-screen 3D beat-indicator sprite was DELETED — it read as a stray flat rose square
+    // lower-right now that bloom is gone, and the HUD already shows the locked BPM + beat ring, so
+    // the 3D metronome was redundant and off-brand for a Tesla-premium frame.)
 
     // Soft contact shadow under the kart (grounds it; drives the jump-height read).
     this.createContactShadow()
@@ -880,11 +879,16 @@ export class ThreeScene {
     this.kuwaharaPass = createAnisotropicKuwaharaPass({
       texel: fullTexel,
       tensorTexel: halfTexel,
-      radius: 3,
+      // R-FINAL: radius 3 -> 8 so even the GENTLE value gradients of the flats (sky/ground) form
+      // LONG directional gouache strokes that are actually VISIBLE — the flats read as brushwork,
+      // not flat CG. anisoExp 0.5 -> 0.4 lifts the tiny anisotropy of those near-flat fields harder
+      // so the kernel elongates into a stroke there (the flats were dead because A ≈ 0). Cost is
+      // bounded by LOOP_R=9 (the ellipse rejection keeps in-budget face-on regions cheap).
+      radius: 8,
       sharpness: KUWAHARA_Q_REST,
       eccentricityClamp: 0.52,
       anisoGain: 2.0,
-      anisoExp: 0.5,
+      anisoExp: 0.4,
       strokeBias: 0.42
     })
     this.kuwaharaPass.uniforms.tTensor.value = this.tensorTargetA.texture
@@ -904,7 +908,11 @@ export class ThreeScene {
       // field on the fast scene; keep only a faint hint.
       granulation: 0.08,
       edgeStrength: 0.55,
-      wobbleAmp: 0.0012,
+      // R-FINAL: wobble ZEROED (was 0.0012). Even a tiny static UV tremor warps every silhouette a
+      // hair, reading as a hand-drawn WOBBLE on the car/sword outlines — off-brand for a Tesla-
+      // premium frame. Zero it so the forms stay PRECISE; the Kuwahara strokes + edge ink carry the
+      // painterly read without any quivering edges.
+      wobbleAmp: 0.0,
       wobbleSpeed: 0.08,
       bleedRadius: 0.9,
       // GEOMETRY-LOCK: world-space tooth frequency (cells per world unit) + the reference
@@ -994,13 +1002,12 @@ export class ThreeScene {
       tensorTexel: halfTexel,
       cameraNear: this.camera.near,
       cameraFar: DEPTH_FAR,
-      // LOST-AND-FOUND, mostly LOST: the global ink was a thick, near-uniform black toon outline at
-      // 1:1 (the critique). inkGain 2.9 -> 1.25 and edgeDilate 2.0 -> 1.1 so the FOUND strokes are
-      // thin, soft, sparse calligraphic accents on only the highest-contrast contours — most
-      // silhouettes simply dissolve (ref 02), no cartoon outline. The breakup gate still drops the
-      // ink on most of each contour's length.
+      // CLEAN PRECISE CALLIGRAPHY: the ink must read as deliberate accent strokes, not a fat
+      // scribble. edgeDilate 1.1 -> 1.0 so the stroke is a CRISP 1px-width contour, not a fattened
+      // smear; inkGain held at 1.25 so a FOUND stroke is a confident deep accent. The coherence-
+      // driven taper (in-shader) now decides found/lost, so strokes run along real contours only.
       inkGain: 1.25,
-      edgeDilate: 1.1,
+      edgeDilate: 1.0,
       // R3: raise the GEOMETRIC edge thresholds so only BIG depth/normal steps ink. The now-large
       // hero kart has an open frame (seat/engine/struts) whose many fine interior depth+normal
       // steps were inking into a busy black tangle that fought the helmet sheen. Higher thresholds
@@ -1009,19 +1016,18 @@ export class ThreeScene {
       // interior reads mostly LOST (spec §4: body contours lost, sheen the one found mark).
       normalThresh: 0.55,
       depthThresh: 1.1,
-      // R-FINAL: lower the saliency band (default 0.04..0.20 -> 0.03..0.14) so a few more of the
-      // road/ground VALUE edges qualify and ink as distributed dark accents — adding punched-dark
-      // mass + local contrast across the mid-field (not just on the hero/sword silhouettes), the
-      // last push toward ref 02's dark fraction. The slow breakup still keeps it lost-and-found.
-      salLo: 0.03,
-      salHi: 0.14,
-      // HERO SILHOUETTE — a SUBTLE, broken, lost-and-found line (mostly LOST), NOT a heavy outline.
-      // heroInkGain 3.5 -> 1.3 and heroDilate 3.2 -> 1.6 so the kart's outer shaded edge gets only a
-      // faint, thin, broken accent where the breakup field allows — most of the silhouette is lost
-      // (the dark painted body + subtle cool sheen carry the read, not an ink line). lightDir2D is the
-      // key light projected to screen (up-left) so what little ink lands sits on the shaded side.
+      // R-FINAL: RAISE the saliency band (0.03..0.14 -> 0.07..0.26) so ONLY genuinely strong
+      // contours qualify — faint wash speckle and low-contrast noise no longer ink, killing the
+      // sketchy amateur scribble on near-flat fields. The strongest road/car/sword contours still
+      // clear the band and ink as clean, sparse accents.
+      salLo: 0.07,
+      salHi: 0.26,
+      // HERO SILHOUETTE — a SUBTLE, CRISP, broken accent (mostly LOST), NOT a heavy outline. heroDilate
+      // 1.6 -> 1.0 so the kart's outer-edge stroke is a crisp brush line, not a fattened smear;
+      // heroInkGain held at 1.3 so what lands on the shaded side is a confident-but-thin accent. The
+      // coherence taper keeps it found-here/lost-there. lightDir2D is the key light projected to screen.
       heroInkGain: 1.3,
-      heroDilate: 1.6,
+      heroDilate: 1.0,
       lightDir2D: [-0.55, 0.84]
     })
     this.painterlyEdgePass.uniforms.tTensor.value = this.tensorTargetA.texture
@@ -1096,8 +1102,15 @@ export class ThreeScene {
       // depth far plane, so the depth wash above can't reach the rows right under the horizon). This
       // screen-space band hugs the horizon line and washes the near-horizon ground up toward the
       // sky-matched haze colour, melting the hard ground/sky value step into an atmospheric blend.
-      horizonHaze: 0.72,
-      horizonBand: 0.05
+      // STRENGTHENED (0.72 -> 0.86): the near-horizon ground now washes nearly to the sky value so
+      // the hard ground/sky seam fully DISSOLVES into the atmospheric veil (ref 02's lost horizon).
+      // The smooth 12-tap falloff still fades it to 0 down-frame, so the near foreground is untouched.
+      horizonHaze: 0.86,
+      // WIDENED (0.05 -> 0.11): the band now drives a SMOOTH 12-tap screen-space falloff below the
+      // detected horizon line (no hard far-gate), so it must reach far enough down-frame to grade
+      // the seam out gradually rather than hugging a thin strip. The weighted taps keep the wash
+      // strongest right at the line and dissolving downward.
+      horizonBand: 0.11
     })
     this.aerialPass.uniforms.tDepth.value = this.sceneDepthTexture
 
@@ -1339,96 +1352,6 @@ export class ThreeScene {
     }
   }
 
-  /**
-   * Builds the beat indicator: a soft cyan radial-glow sprite pinned to the
-   * bottom-right of the view. It is parented to the camera (not the scene) so it
-   * stays a fixed on-screen element while remaining a 3D, bloom-affected glow —
-   * deliberately NOT HUD text, to preserve synthwave immersion. Each beat the
-   * controller records, the sprite punches up in scale + opacity then auto-fades,
-   * giving the viewer confirmation that the visuals are rhythm-locked. The glow
-   * texture is generated procedurally so no asset download is required.
-   */
-  private createBeatIndicator(): void {
-    const size = 128
-    const canvas = document.createElement('canvas')
-    canvas.width = size
-    canvas.height = size
-    const ctx = canvas.getContext('2d')
-    if (ctx) {
-      const gradient = ctx.createRadialGradient(
-        size / 2,
-        size / 2,
-        0,
-        size / 2,
-        size / 2,
-        size / 2
-      )
-      // Soft dusty-rose mark (harmony accent #A96276), not a cyan neon glow.
-      gradient.addColorStop(0, 'rgba(169, 98, 118, 0.95)')
-      gradient.addColorStop(0.4, 'rgba(169, 98, 118, 0.6)')
-      gradient.addColorStop(1, 'rgba(169, 98, 118, 0)')
-      ctx.fillStyle = gradient
-      ctx.fillRect(0, 0, size, size)
-    }
-
-    const texture = new THREE.CanvasTexture(canvas)
-    texture.colorSpace = THREE.SRGBColorSpace
-
-    const material = new THREE.SpriteMaterial({
-      map: texture,
-      color: HARMONY.roseMagentaAccent,
-      transparent: true,
-      opacity: 0.0,
-      depthTest: false,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      toneMapped: false
-    })
-
-    const sprite = new THREE.Sprite(material)
-    // Place in the bottom-right corner of the near view plane. Parenting to the
-    // camera keeps it screen-locked; the small z keeps it in front of everything.
-    sprite.position.set(0.62, -0.42, -1)
-    sprite.scale.set(0.12, 0.12, 0.12)
-    sprite.renderOrder = 999
-    sprite.frustumCulled = false
-    // Foreground element -> the smear sharp-mask layer (no NEON_LAYER; there is no bloom).
-    sprite.layers.enable(HERO_LAYER)
-
-    this.beatIndicator = sprite
-    this.beatIndicatorMaterial = material
-    this.camera.add(sprite)
-    // The camera must be in the scene graph for its child sprite to render.
-    this.scene.add(this.camera)
-  }
-
-  /**
-   * Pulses the beat-indicator glow from the beat-sync envelope. Scales 1.0->~1.3
-   * and opacity ~0.5->1.0 on a beat onset, then auto-fades, so the viewer can see
-   * the rhythm is locked without any immersion-breaking UI text.
-   */
-  private updateBeatIndicator(gameState: GameState): void {
-    if (!this.beatIndicator || !this.beatIndicatorMaterial) return
-
-    const beatAgeMs = performance.now() - gameState.car.lastBeatTime
-    const strength = gameState.car.beatStrength
-    const PULSE_MS = 320
-
-    // Beat selectivity (iteration 6): the indicator glows ONLY on strong beats, turning
-    // it into a visual metronome that confirms the system is rhythm-locked to the
-    // important moments (kicks/snares) and not flickering on every hi-hat.
-    let pulse = 0
-    if (gameState.car.beatFires && Number.isFinite(beatAgeMs) && beatAgeMs >= 0 && beatAgeMs < PULSE_MS) {
-      const d = beatAgeMs / PULSE_MS
-      pulse = (1 - d) * (1 - d) * strength
-    }
-
-    const baseScale = 0.1
-    const scale = baseScale * (1.0 + pulse * 0.3)
-    this.beatIndicator.scale.set(scale, scale, scale)
-    // Idle glow ~0.18 so it reads as a persistent synthwave element; punches to ~1.
-    this.beatIndicatorMaterial.opacity = 0.18 + pulse * 0.82
-  }
 
   /**
    * Builds the soft contact-shadow pool laid flat on the road beneath the kart. A radial-
@@ -2394,9 +2317,6 @@ export class ThreeScene {
       this.camera.updateProjectionMatrix()
     }
 
-    // --- Rhythm-locked beat indicator (bottom-right corner element).
-    this.updateBeatIndicator(gameState)
-
     // --- Treble pulse (Watercolour Speed restyle): the controller sets a one-frame
     // trebleFires pulse the instant the audio clock crosses a high-frequency transient.
     // Emit the pigment-spatter flick here (centrally, so every render path consumes it
@@ -2558,9 +2478,11 @@ export class ThreeScene {
     // comet tail can physically reach further. uStrength is eased so the drag breathes.
     const smearU = this.velocitySmearPass.uniforms
     smearU.uSpeedMul.value = car.speedMultiplier
-    // R4: a slightly higher rest master + drop boost so the wet drag is confidently present at
-    // speed (ref 02's bold streak) while still easing back toward a short drag when quiet.
-    const smearTarget = THREE.MathUtils.clamp(0.95 + dropIntensity * 0.4, 0, 1.5)
+    // The wet drag is a SUBTLE directional value-drag toward the horizon in the FAR road — NEVER a
+    // hard dark streak / shadow under the car. Lower rest master (0.6) + a modest drop boost so it
+    // breathes on emotional peaks without ever pooling a dark comet near the hero (the near-depth
+    // floor + dilated car-mask halo in the pass keep it off the tarmac around the car).
+    const smearTarget = THREE.MathUtils.clamp(0.6 + dropIntensity * 0.35, 0, 1.2)
     this.smoothedSmearStrength += (smearTarget - this.smoothedSmearStrength) * SMEAR_DRIVE_EASE
     smearU.uStrength.value = this.smoothedSmearStrength
     smearU.uBeatKick.value = beatPulse * SMEAR_BEAT_KICK_MAX

@@ -103,7 +103,7 @@ export function createVelocitySmearPass(opts: {
       // near tarmac stays readable and the drag grows toward the horizon; blendFloor/Knee set how
       // little velocity is needed for the wet field to become visible (decoupled from the |v|
       // hard clamp, which the old build wrongly used as the blend opacity → near-invisible smear).
-      uLengthGain: { value: opts.lengthGain ?? 3.8 },
+      uLengthGain: { value: opts.lengthGain ?? 2.5 },
       uDepthFloor: { value: opts.depthFloor ?? 0.5 },
       uDepthNear: { value: opts.depthNear ?? 0.88 },
       uBlendFloor: { value: opts.blendFloor ?? 0.4 },
@@ -261,11 +261,31 @@ export function createVelocitySmearPass(opts: {
         flowVel       *= uStrength * uVelocityScale * (1.0 - clamp(uReset, 0.0, 1.0));
         velocity      += flowVel;
 
-        // Hero car kept SHARP via the HERO_LAYER mask — the one crisp found anchor. Smooth the
-        // mask edge so the car silhouette doesn't get a hard cut.
+        // Hero car kept SHARP via the HERO_LAYER mask — the one crisp found anchor. A PROTECTIVE
+        // SHARP HALO surrounds the hero, not just its silhouette: dilate the mask by sampling a
+        // small ring of neighbours (max-combined) so the kill region grows a few px AROUND the car,
+        // and WIDEN the smoothstep so the transition feathers. This stops the wet drag from pooling
+        // a dark comet on the tarmac DIRECTLY around/under the car (the silhouette-tight mask let
+        // the smear bite right up to the body, dragging the road into a shadow smudge).
         float carMask = texture2D(tCarMask, vUv).r;
-        float sharp   = smoothstep(0.05, 0.5, carMask);
+        vec2  hpx = uTexelSize * 3.0;                     // halo dilation radius (~3 px)
+        carMask = max(carMask, texture2D(tCarMask, vUv + vec2(hpx.x, 0.0)).r);
+        carMask = max(carMask, texture2D(tCarMask, vUv - vec2(hpx.x, 0.0)).r);
+        carMask = max(carMask, texture2D(tCarMask, vUv + vec2(0.0, hpx.y)).r);
+        carMask = max(carMask, texture2D(tCarMask, vUv - vec2(0.0, hpx.y)).r);
+        carMask = max(carMask, texture2D(tCarMask, vUv + hpx).r);
+        carMask = max(carMask, texture2D(tCarMask, vUv - hpx).r);
+        carMask = max(carMask, texture2D(tCarMask, vUv + vec2(hpx.x, -hpx.y)).r);
+        carMask = max(carMask, texture2D(tCarMask, vUv + vec2(-hpx.x, hpx.y)).r);
+        float sharp   = smoothstep(0.02, 0.7, carMask);  // widened feather -> sharp HALO
         velocity     *= (1.0 - sharp);
+
+        // NEAR-DEPTH FLOOR: kill the smear on the CLOSEST tarmac under the car (where the dark comet
+        // pools). Keyed off RAW depth — the nearest road sits at the very top of the raw-depth range
+        // in this chase view, so suppress velocity entirely where rawDepth < ~0.985 (the near tarmac
+        // band right under/ahead of the kart). The smear should read as motion in the FAR road only.
+        float nearKeep = smoothstep(0.982, 0.988, rawDepth);
+        velocity      *= nearKeep;
 
         // HARD-CLAMP |velocity| so nothing (a depth-edge spike, a stale matrix slipping past
         // uReset) can drag the frame across itself.

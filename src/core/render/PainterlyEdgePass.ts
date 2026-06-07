@@ -528,24 +528,22 @@ export function createPainterlyEdgePass(opts: {
         // faint speckle still needs the luma-contrast band to qualify.
         float saliency = max(lumaSal, smoothstep(0.15, 0.45, candidate));
 
-        // 2) FLOW COHERENCE (anisotropy) as a soft ATTENUATOR (floor 0.45, not 0). Low-coherence
-        //    wet zones ink a little LESS; high-coherence true contours ink full.
-        float cohGate = mix(0.45, 1.0, smoothstep(cohLo, cohHi, coherence));
+        // 2) FLOW COHERENCE (anisotropy) — now the PRIMARY lost-and-found driver (was a weak
+        //    attenuator). A clean directional contour has HIGH coherence; a noisy, non-oriented
+        //    region has low coherence. Inking ONLY where coherence is high makes every surviving
+        //    stroke a DELIBERATE calligraphic mark that runs ALONG a real contour — never the
+        //    sketchy scribble the random fbm breakup produced. The band keys off cohLo/cohHi.
+        float cohGate = smoothstep(cohLo, cohHi, coherence);
 
-        // 3) STATIC BREAKUP NOISE — the lost-and-found engine. A FRAME-ANCHORED fbm sampled in
-        //    screen UV. FLOATER FIX: the old uTime crawl made masked edge segments drift, swim,
-        //    and strobe frame-to-frame (the eye-floaters complaint). The time term is REMOVED
-        //    so the found/lost pattern is FIXED in the frame — the SAME edge is inked where the
-        //    field is high and lost where it is low, but that boundary never moves.
-        //    Threshold ~0.42 calm so a healthy MINORITY (~35-45%) of the salient length survives.
-        vec2 aspect = vec2(uResolution.x / uResolution.y, 1.0);
-        vec2 np = vUv * aspect * noiseScale;
-        float n = breakupFbm(np);
-        // Music WIDENS the threshold window so MORE ink survives on drops (never a strength
-        // strobe). Lower threshold => more of the field passes => more found ink.
-        float breakThresh = mix(0.42, 0.30, clamp(uMusic, 0.0, 1.0)); // calm -> drop
-        // Soft step so the found/lost boundary is feathered (a brush lifting), not a hard cut.
-        float breakup = smoothstep(breakThresh - 0.14, breakThresh + 0.14, n);
+        // 3) COHERENCE-DRIVEN TAPER (replaces the random fbm breakup). Instead of a noise field
+        //    randomly chopping strokes (the amateur scribble), the lost-and-found is driven by how
+        //    well-ORIENTED the contour is: where the flow is strongly coherent the stroke is FOUND
+        //    (clean ink), where it weakens the stroke is LOST. A gentle gamma + a small floor keep
+        //    the strongest contours confidently present while genuinely weak/disoriented edges fade,
+        //    so the inking reads as precise, intentional calligraphy. Music lifts the floor a touch
+        //    on drops (the painter pressing harder) — a value change, never a strobe.
+        float taperFloor = mix(0.0, 0.25, clamp(uMusic, 0.0, 1.0));
+        float breakup = clamp(taperFloor + (1.0 - taperFloor) * pow(cohGate, 1.4), 0.0, 1.0);
 
         // 4) DEPTH FADE — soft ATTENUATOR toward the far distance (sky excluded), floor 0.35 so
         //    mid-distance road still inks. Near = full, sky (ld -> 1) = fully out.
@@ -555,20 +553,25 @@ export function createPainterlyEdgePass(opts: {
           depthFade = mix(1.0, 0.35, smoothstep(0.20, 0.80, ld));
           // Hard-exclude the true background (sky / far plane) entirely.
           depthFade *= 1.0 - smoothstep(0.90, 0.985, ld);
-          // HORIZON SEAM FIX: in this grazing chase view the LINEARISED depth collapses to ~0 for
-          // the whole scene, so the ld-based far-exclusion above never fires on the FAR GROUND at
-          // the horizon — and the huge ground/sky depth step there inks a crude dark line ALONG the
-          // horizon (a hard seam). Keying off the RAW device depth instead (which DOES span to ~0.97
-          // at the horizon line in this view) fades the ink out across the far-ground band so the
-          // horizon dissolves into the aerial haze instead of being underlined. Near/mid ground
-          // (raw < ~0.95) is untouched, so its value edges still ink normally.
+          // HORIZON SEAM FIX (WIDE FEATHER): in this grazing chase view the LINEARISED depth
+          // collapses to ~0 for the whole scene, so the ld-based far-exclusion above never fires on
+          // the FAR GROUND at the horizon — and the huge ground/sky depth step there inks a crude
+          // dark line ALONG the horizon (a hard seam). Keying off the RAW device depth instead
+          // (which DOES span toward the far plane at the horizon in this view) fades the ink out
+          // across the far-ground band. WIDENED to a broad 0.90..0.999 ramp (was a tight
+          // 0.945..0.975 step) so a blade's ink does NOT abruptly cut where it crosses the horizon —
+          // its dark accent eases out gradually with distance, reading IDENTICAL above and below the
+          // line. Near/mid ground (raw < ~0.90) is untouched, so its value edges still ink normally.
           float rawD = texture2D(tDepth, vUv).r;
-          depthFade *= 1.0 - smoothstep(0.945, 0.975, rawD);
+          depthFade *= 1.0 - smoothstep(0.90, 0.999, rawD);
         }
 
-        // Combine. Saliency AND breakup are the load-bearing lost-and-found pair; coherence and
-        // depthFade only attenuate. This knocks the candidates down to a sparse, confident set.
-        float gate = saliency * breakup * cohGate * depthFade;
+        // Combine. SALIENCY (is there a real contour) x the COHERENCE-DRIVEN TAPER (is it a clean
+        // oriented stroke worth inking) are the load-bearing pair; depthFade only attenuates toward
+        // the far distance. The breakup term already carries the coherence presence, so cohGate is
+        // NOT multiplied again here (that would square coherence and starve the ink). This yields a
+        // sparse, CLEAN, contour-aligned set of calligraphic accents — no random scribble.
+        float gate = saliency * breakup * depthFade;
         float e = clamp(candidate * gate * uStrength * uInkGain, 0.0, 1.0);
 
         // --- R-FINAL P3: HERO-SILHOUETTE shadow-side found stroke ------------------------------

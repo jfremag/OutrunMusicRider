@@ -109,7 +109,7 @@ export function createAnisotropicKuwaharaPass(opts: {
       // ---- Compile-time constants (GLSL ES 1.00: loop bounds must be literals) -------
       // The square neighbourhood scanned each frame is fixed at [-7, 7]; samples that
       // fall outside the (smaller, runtime-sized) ellipse are rejected with continue.
-      const int   LOOP_R    = 7;       // matches the radius=6 default with margin
+      const int   LOOP_R    = 9;       // R-FINAL: longer strokes (radius ~8) for visible brushwork in the flats
       const int   N_SECTORS = 8;       // 8 angular sectors of the ellipse
       const float MAX_ECC   = 8.0;     // R4: allow longer strokes (was 6) for brush sweep
       const float PI        = 3.14159265358979;
