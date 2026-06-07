@@ -117,9 +117,10 @@ const DEFAULTS = {
   dir: new THREE.Vector3(0.35, 0.30, 1.0).normalize(),
   /** LOW exponent -> a broad rolling lobe (NOT a tight CG glint). */
   width: 6.0,
-  /** Base lobe intensity; driven up on the beat by `updateCarSheen`. A confident resting sheen so
-   *  the broad cool roll on the rounded forms is the hero read that out-glows the dark frame core. */
-  strength: 1.05,
+  /** Base lobe intensity; driven a touch up on the beat by `updateCarSheen`. A QUIET resting glaze
+   *  — the subtle cool roll sits just above the dark body, never a bright crest (the value cap +
+   *  the in-shader coverage scale keep it a whisper). */
+  strength: 0.7,
   /** Generous half-Lambert wrap so the broad lobe bleeds well past the terminator like wet paint. */
   wrap: 0.75
 }
@@ -265,114 +266,68 @@ export function injectCarSheen(
         // the brightest crest. Combine so the band is broad (not pow(ndh,6) alone — that was too
         // tight + double-attenuated the contribution below).
         float broadCore = pow(ndh, uSheenWidth);                                   // wide spec crest
-        // P5: a BROAD luminous rolling band — now that the lobe sweeps one continuous camera-facing
-        // cowl (not scattered wheel caps) we want the WRAPPED hemisphere gradient to OWN a large
-        // soft swathe of the form (the bright cool sheen covers ~40-50% of the chrome reference),
-        // with the specular core adding the brightest crest on top. Squaring the wrap concentrates
-        // it toward the light-facing crown (a clear directional roll, dark flanks) while the higher
-        // floor + crest keep the band confidently bright. Still low-exponent/wrapped — never a glint.
-        float band = wrapped * wrapped;                                            // broad soft swathe
-        float lobe = clamp(band * (0.55 + 1.05 * broadCore) + band * 0.25, 0.0, 1.0);
+        // A BROAD, smooth COOL roll across the UPPER body — the subtle sheen of the chrome rider
+        // (ref 02), NOT a bright filled bowl. The band is ANCHORED to the surface's UP-FACING-ness
+        // (view-space normal .y) so the whole top of the cowl catches a soft cool film and the
+        // side/down flanks (incl. the wheels) stay dark; the half-Lambert wrap biases that roll
+        // toward the light side so it is a directional sheen, not a flat cap. A wide specular core
+        // only adds a gentle crest. None is a BRDF/mirror term. This replaces the old wrapped^2 band
+        // that landed blotchy from the chase angle and the cov→1 fill that dumped a cream puddle.
+        float upFace = smoothstep(-0.15, 0.95, sN.y);                              // top of the cowl
+        float band = clamp(upFace * (0.55 + 0.55 * wrapped), 0.0, 1.0);            // broad upper roll
+        float lobe = clamp(band * (0.70 + 0.40 * broadCore), 0.0, 1.0);
 
-        // Fresnel for the grazing catch-lights + the razor spark gate (silhouette emphasis).
+        // Fresnel for the faint grazing cool sliver (silhouette breath only — NO spark).
         float fres = pow(1.0 - clamp(dot(sN, sV), 0.0, 1.0), 3.0);
 
-        // Low-frequency desaturating mottle: a value-noise wash across the lobe (~+-0.05 in
-        // value) so the sheen is a hand-laid wash, not a clean CG gradient. FLOATER FIX: the
-        // uTime*0.05 crawl was removed so the mottle is STATIC, frame-anchored to gl_FragCoord —
-        // a fixed hand-laid texture, never a per-frame boil (drifting sheen reads as a floater).
+        // Low-frequency mottle: a value-noise wash so the sheen reads as a hand-laid wash, not a CG
+        // gradient. STATIC (frame-anchored to gl_FragCoord — no per-frame boil). VERY low amplitude
+        // so it never carves the concentric "tree-ring" bowl the old strong lobe produced.
         float mottle = sheenNoise(gl_FragCoord.xy * 0.012) - 0.5; // ~[-0.5, 0.5], static
 
-        // COVERAGE: how strongly the broad sheen owns this fragment, 0..1. Strength widens AND
-        // deepens the band (a louder beat = a bigger, brighter roll), mottle breaks its edge so it
-        // is a hand-laid wash. This single term drives BOTH the colour ramp and how much the body
-        // is overpainted, so the lobe is applied ONCE (the old code multiplied lobe*strength into
-        // the colour AND again into the contribution, double-attenuating the shine into nothing).
-        float cov = clamp(lobe * uSheenStrength + mottle * 0.10, 0.0, 1.0);
-        // The brightness ramp s lifts faster than coverage so even the broad mid-band of the lobe
-        // reads as a luminous cool sheen (a gentle ramp left the whole band dim/dark-gray).
-        float s = clamp(pow(cov, 0.6), 0.0, 1.0);
+        // COVERAGE: how strongly the SUBTLE cool sheen owns this fragment, 0..1. A broad soft roll,
+        // NOT a fill: the lobe×strength is scaled DOWN and capped below 1 so the cool sheen glazes the
+        // upper body as a clearly-lighter-than-the-dark-body band (so it survives the Kuwahara/LUT
+        // flatten) without ever filling the form into a bright cream bowl. mottle only feathers it.
+        float cov = clamp(lobe * uSheenStrength * 0.42 + mottle * 0.03, 0.0, 0.45);
+        // A gentle ramp — one smooth cool roll, not a hard luminous crest.
+        float s = clamp(pow(cov, 0.85), 0.0, 1.0);
 
-        // SIENKIEWICZ MOVE: as s rises, hue-lerp toward ~232deg (steel-blue), multiply saturation
-        // by (1 - 0.6*s), and HARD-CAP value at ~0.90 -> the lobe cools+desaturates as it
-        // brightens and NEVER reaches white.
+        // SIENKIEWICZ MOVE (subtle): a COOL blue-violet glaze. Hue leans firmly toward ~232deg
+        // (steel-blue), saturation stays modest, VALUE is hard-CAPPED well below white (~0.78) so the
+        // sheen whispers — no cream/white splotch, no spark.
         vec3  baseHsv = sheenRgb2hsv(uSheenColor);
         float targetHue = 232.0 / 360.0;                         // steel-blue target hue
-        float hue = mix(baseHsv.x, targetHue, s);                // cool toward 232deg as it lifts
-        // P5: BOOST the base saturation toward the steel-blue accent as the band brightens (instead
-        // of desaturating it to ~0) so the bright crest reads as a clearly COOL blue-violet sheen,
-        // NOT a desaturated near-white blob (the ref-chrome peaks are blue, never white). A small
-        // desaturate factor keeps it from going chalky, but the floor is well above zero.
-        float sat = clamp(baseHsv.y * (1.0 + 1.6 * s), 0.06, 0.20);
-        // P5: a luminous broad band, but cap the crest a touch BELOW the 0.90 ceiling so the peak
-        // reads as a bright cool sheen rather than tipping into white; flanks fall to the dark body
-        // via low coverage below. (ref chrome's brightest sheen sits ~0.82-0.85, not paper-white.)
-        // A LOWER floor (0.50) with a steeper rise so the bright crest concentrates on the light-
-        // facing crown (a clear directional ROLL) and side/down-facing flanks (e.g. the wheels)
-        // stay darker and read as part of the body, not four competing bright blocks.
-        float val = min(baseHsv.z, 0.85) * (0.50 + 0.42 * s);   // luminous cool crest, darker flanks
-        val += mottle * 0.05;                                    // +-0.05 value variance (mottle)
-        val = clamp(val, 0.0, 0.90);                             // HARD value cap (never white)
+        float hue = mix(baseHsv.x, targetHue, 0.6 + 0.4 * s);    // firmly cool blue-violet
+        float sat = clamp(baseHsv.y * (1.0 + 1.2 * s), 0.08, 0.22);
+        // A clearly-lighter-than-body cool film, capped below white. Floor 0.55 so the broad mid-band
+        // reads as a cool sheen (survives the flatten); ceiling 0.78 so even the crest never tips to
+        // a bright cream/white puddle from any camera angle (the critique's core complaint).
+        float val = min(baseHsv.z, 0.60) * (0.42 + 0.22 * s);   // DARK cool roll, darker flanks
+        val += mottle * 0.025;                                   // tiny value variance (mottle)
+        val = clamp(val, 0.0, 0.55);                             // HARD cap — stays BELOW the LUT warm-cream stops so the sheen reads as a cool dark glaze, never a cream/white splotch
         vec3 sheenCol = sheenHsv2rgb(vec3(hue, clamp(sat, 0.0, 1.0), val));
 
-        // Faint reflected scene catch-lights — scene COLOUR at low saturation, not a mirror:
-        // a cool sliver on the grazing edge + a warm hint biased to the lit side. P5: gate the warm
-        // hint to the DIMMER flanks (×(1-s)) so it never washes the bright cool crown toward a warm
-        // white hotspot — the crest stays a pure cool sheen — and trim both weights so they read as
-        // slivers, not a central bloom that breaks the value cap.
-        float litSide = clamp(ndl * 0.5 + 0.5, 0.0, 1.0);
-        vec3  catchLights =
-            uCatchCool * (fres * 0.06) +                         // cool grazing reflection sliver
-            uCatchWarm * (litSide * lobe * (1.0 - s) * 0.035);   // warm hint on the dim lit flanks only
+        // The ONLY reflected catch-light: a FAINT cool grazing sliver on the silhouette. The warm
+        // (cream) catch-light is REMOVED entirely — it was the source of the warm-cream splotch.
+        vec3  catchLights = uCatchCool * (fres * 0.035);         // cool grazing reflection sliver only
 
-        // BODY BASE: settle the un-sheened body to a CONFIDENT, READABLE violet-gray a notch above
-        // the deep body (#2C2A38 ×1.55). P5: CLAMP the lit base DOWN to this violet (min) as well as
-        // up (max) so the strong warm directional KEY cannot punch a bright warm hotspot through the
-        // body where the sheen coverage dips (the old code only raised a floor with max(), so a hot
-        // Lambert highlight on the cowl crown bled through a mottle dip as a warm-white blob). Now
-        // the body is a flat violet base and the COOL SHEEN is the only thing that brightens it — so
-        // the crown reads as one clean cool rolling band, the interior stays lost, and hue+sat live
-        // into the shadow. Contours read mostly LOST (spec §4); the sheen crest is the found mark.
-        vec3 bodyBase = uDeepBody * 1.55;
-        outgoingLight = mix(outgoingLight, bodyBase, 0.82);
+        // BODY BASE: settle the body to a deep, READABLE violet-gray (#2C2A38 ×1.35 — DARKER than the
+        // old ×1.55 so the dome interior reads as a dark painted form, not a pale bowl). Clamp the lit
+        // base toward this violet (mix) so the warm directional key cannot punch a bright hotspot
+        // through the body — the body is a flat dark violet and the subtle cool sheen is the only
+        // thing that lifts it. The form stays a deliberate dark hero; contours read mostly LOST.
+        vec3 bodyBase = uDeepBody * 1.35;
+        outgoingLight = mix(outgoingLight, bodyBase, 0.85);
 
-        // OVERPAINT the body with the broad cool sheen where coverage is high — like wet paint laid
-        // over the form — so the lobe DOMINATES the upper/facing surface as the hero feature rather
-        // than glazing faintly over an already-dark body. LERP the (now flat-violet) base toward the
-        // (value-capped) sheen colour by coverage; the cap guarantees the sheen never reaches white.
+        // GLAZE the subtle cool sheen over the upper body where coverage is high — a thin wash, NOT a
+        // replacement. cov peaks low and the sheen value is capped low, so this is a quiet cool roll
+        // over a dominant dark body — the broad, soft, desaturated cool sheen of the chrome rider (no
+        // hard glint, no cream, no white dot).
         outgoingLight = mix(outgoingLight, sheenCol, cov);
         outgoingLight += catchLights;
-
-        // HERO CATCH-LIGHT (P45-APEX): ONE small, crisp, off-centre near-white glint — the single
-        // luminous focal accent on the canopy, the hero's bright apex. The previous gate keyed on
-        // (ndh*fres): fresnel ~0 except at extreme grazing, so on this convex canopy read from a
-        // chase angle the product never reached [0.985,1.0] and the spark NEVER FIRED — leaving the
-        // canopy a soft cream PUDDLE with no glint (the critique's nit). This re-gate keys on a
-        // TIGHT high-exponent specular hotspot about an OFF-CENTRE half-vector that reliably lands
-        // on the canopy crest, so the spark actually reads as one crisp catch-light. It is gated to
-        // sit WHERE the broad sheen already lives (cov) so it is the bright peak OF the sheen, not a
-        // stray dot, and kept to the top ~1-2% by the smoothstep window. Additive paper-white
-        // (#F6F7F9). It is added AFTER the sheen's 0.90 value cap, so this tiny spot is the one place
-        // on the car allowed past the cap into the near-paper-white apex — surgical, no bloom.
-        // The catch-light is gated to the TOP SLIVER OF THE SHEEN ITSELF (the lobe-coverage crest),
-        // exactly per spec ("the top ~1-2% of the sheen"). This is the robust read: the broad lobe
-        // coverage (cov) is guaranteed to peak on the camera-facing canopy crown, so smoothstep'ing
-        // its very top reliably lands ONE bright spot ON the canopy at every chase angle — the prior
-        // tight half-vector specular (pow of N dot H) depended on an exact normal alignment the dome
-        // never quite hit from the chase camera, so it produced only a soft cream puddle and never a
-        // glint (the critique's nit). A mild off-centre half-vector specular only SHAPES it (tightens
-        // the spot + nudges it off the dead-centre of the crown) so it reads as a crisp off-centre
-        // glint rather than a centred ring.
-        vec3  sparkH = normalize(sL + sV + vec3(0.12, 0.07, 0.0)); // off-centre half-vector (shaping)
-        // A TIGHT off-centre specular (exponent 80) is the PRIMARY shape of the glint: it falls to ~0
-        // within a few degrees of one orientation, so it concentrates the spark into ONE small spot on
-        // the canopy crown (and, having a single preferred normal, it does NOT also light the wheel-pod
-        // tops, whose normals differ) rather than washing the whole dome. The cov crest is only a
-        // PRESENCE gate (the spot must sit on the lit sheen, never on a shadow flank).
-        float sparkShape = pow(clamp(dot(sN, sparkH), 0.0, 1.0), 80.0);
-        float sparkCrest = smoothstep(0.86, 0.99, cov);          // narrow: only the very lobe peak
-        float spark = clamp(sparkShape * sparkCrest, 0.0, 1.0);  // tight spot ∩ lit crest -> one glint
-        outgoingLight += uSparkColor * spark * 1.35;             // additive; pushes the spot to ~paper-white
+        // NOTE: the old near-white "hero spark" glint is DELETED — it dumped a white dot into the
+        // canopy. The sheen now whispers and the form stays a clean dark painted hero.
       }
       #include <opaque_fragment>`
     )
@@ -392,12 +347,12 @@ export function injectCarSheen(
 // Per-frame update
 // ---------------------------------------------------------------------------------------------
 
-/** Lower bound the lobe never drops below — the shine is always confidently present (R3: the broad
- *  cool roll is the HERO read on the rounded forms, so it rests luminous, not faint). */
-const SHEEN_BASE = 0.95
-/** Upper clamp on the driven lobe strength (kept below a bloom-flash level; the value cap in-shader
- *  still guarantees the crest never reaches white however hard this is driven). */
-const SHEEN_MAX = 1.6
+/** Lower bound the lobe never drops below. The sheen is a SUBTLE broad cool glaze (not a hero
+ *  crest), so it rests quiet; the in-shader coverage scale + low value cap keep it a whisper. */
+const SHEEN_BASE = 0.7
+/** Upper clamp on the driven lobe strength. Kept low so even on the beat the sheen only breathes
+ *  a touch brighter — never a bloom flash (the in-shader value cap still holds it below white). */
+const SHEEN_MAX = 1.05
 /** Smoothing factor — fast attack, soft settle (matches the codebase's lerp feel). */
 const SHEEN_EASE = 0.3
 
@@ -428,9 +383,10 @@ export function updateCarSheen(entry: CarSheenMaterial, drivers: CarSheenDrivers
   const beat = THREE.MathUtils.clamp(drivers.beatStrength ?? 0, 0, 1)
   const centroid = THREE.MathUtils.clamp(drivers.spectralCentroid ?? 0, 0, 1)
 
-  // The breathing target (saturation/value pulse of the existing hue, never a colour/bloom flash).
+  // The breathing target (a small value pulse of the existing cool hue, never a colour/bloom flash).
+  // Modest beat/centroid contributions so the subtle sheen only swells a touch on the beat.
   const target = THREE.MathUtils.clamp(
-    SHEEN_BASE + beat * 0.5 + centroid * 0.25,
+    SHEEN_BASE + beat * 0.22 + centroid * 0.12,
     0,
     SHEEN_MAX
   )
