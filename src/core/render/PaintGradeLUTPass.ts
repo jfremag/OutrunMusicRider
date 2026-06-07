@@ -81,7 +81,7 @@ export function createPaintGradeLUTPass(opts: {
       //                  (0 = no extra darks; ~1 = full reach). Keeps the darks as ACCENTS.
       //   uWhitePoint  : luma at/above this maps to ramp 1 (the bright field stays luminous).
       uBlackPoint: { value: opts.blackPoint ?? 0.34 },
-      uWhitePoint: { value: opts.whitePoint ?? 0.92 },
+      uWhitePoint: { value: opts.whitePoint ?? 0.90 },
       uContrast: { value: opts.contrast ?? 1.22 },
       uShadowDepth: { value: opts.shadowDepth ?? 1.0 },
       // V2 C4 accent pop knobs (defaults are no-ops if the integrator doesn't set them).

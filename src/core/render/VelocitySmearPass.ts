@@ -256,8 +256,13 @@ export function createVelocitySmearPass(opts: {
         // present even on near tarmac and GROW toward the off-centre horizon — a gouache speed
         // painting. Scaled by uSpeedMul (drops accelerate the car → a longer streak), the strength
         // master, framerate scale, and zeroed on reset (a stale frame must not drag the screen).
-        float flowRamp = smoothstep(0.5, 1.0, rawDepth);          // widened depth ramp (mid→far)
-        vec2  flowVel  = uFlowDir * uFlowGain * (0.25 + 0.75 * flowRamp) * uSpeedMul;
+        // ralph(iter3): GATE THE FLOW DRAG PAST THE CAR. The injected drag was biting the near tarmac
+        // directly behind the kart into a dark wake (the 0.25 near-floor dragged even the closest road).
+        // Start the ramp WELL PAST the car (0.90, above the ~0.987 near-tarmac band stays inside it but
+        // the floor is removed) and zero the floor so the drag is ~0 on near tarmac and only GROWS toward
+        // the off-centre horizon — a clean road around the hero, wet drag only in the distance.
+        float flowRamp = smoothstep(0.90, 0.998, rawDepth);       // drag confined to mid→far ground
+        vec2  flowVel  = uFlowDir * uFlowGain * flowRamp * uSpeedMul;
         flowVel       *= uStrength * uVelocityScale * (1.0 - clamp(uReset, 0.0, 1.0));
         velocity      += flowVel;
 
@@ -294,7 +299,12 @@ export function createVelocitySmearPass(opts: {
         // of the raw-depth range in this chase view. The keep band is RAISED so the whole near-tarmac
         // band right under the kart (which sits at raw ~0.987) is fully protected and only the FAR
         // road past the car carries the wet drag — no dark wake pools on the ground around the hero.
-        float nearKeep = smoothstep(0.986, 0.992, rawDepth);
+        // ralph(iter3): WIDENED the protected near band 0.986..0.992 -> 0.988..0.996 so the whole stretch
+        // of road directly behind the kart (which sits at raw ~0.987 and ramped UP toward the horizon for
+        // a few car-lengths) is fully held crisp — the wet drag now only engages on the FAR road, so no
+        // dark wake pools on the tarmac behind the hero. Combined with the gated flow ramp above the near
+        // road around the car is clean.
+        float nearKeep = smoothstep(0.988, 0.996, rawDepth);
         velocity      *= nearKeep;
 
         // HARD-CLAMP |velocity| so nothing (a depth-edge spike, a stale matrix slipping past

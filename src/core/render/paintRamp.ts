@@ -93,11 +93,15 @@ const DEFAULT_STOPS: RampStop[] = [
   // Grayish-GREEN field HIGH (~#9AA38C) — the same sage field, upper band; the field plateaus
   // here so a wide swath of the value scale is the muted green. Luminance still climbing.
   { pos: 0.72, hex: 0x9aa38c, label: 'sage field high (#9AA38C)' },
-  // Warm BEIGE (~#C9B89A) — the field warms to beige toward the light (green -> beige glide).
-  // This is where the brighter ground/horizon and lit fields land: warm, desaturated, muted.
-  { pos: 0.84, hex: 0xc9b89a, label: 'warm beige (#C9B89A)' },
-  // Warm BEIGE light (~#D8CBAE) — the upper beige; the lit negative space / bright field.
-  { pos: 0.91, hex: 0xd8cbae, label: 'warm beige light (#D8CBAE)' },
+  // ralph(iter3): upper-mid stops COOLED + BRIGHTENED #C9B89A -> #CCC6AC (priority-6). The sky/bright
+  // field lands here; the old warm beige made the sky read as a DINGY beige wall. Cooling it (lifting
+  // green/blue toward the yellow so it is a luminous cool-cream, not amber) and brightening it a notch
+  // makes the bright sky band read LUMINOUS-COOL — ref 02's luminous mid-key — without leaving the
+  // muted harmony. Luminance still rises monotonically into the cream/apex.
+  { pos: 0.84, hex: 0xccc6ac, label: 'luminous cool-cream (was warm beige #C9B89A)' },
+  // ralph(iter3): #D8CBAE -> #DDDAC6 — the upper sky/lit negative-space band, cooled + brightened to a
+  // luminous cool cream so the bright sky reads luminous, not dingy beige.
+  { pos: 0.91, hex: 0xdddac6, label: 'luminous cool-cream light (was #D8CBAE)' },
   // Light cream (~#E6DCC4) — the warm "white" substitute / gouache highlight putty. The
   // brightest field/sky resolves to this luminous warm cream.
   { pos: 0.96, hex: 0xe6dcc4, label: 'light cream highlight (#E6DCC4)' },

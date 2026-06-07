@@ -148,9 +148,9 @@ const BURST_COLOR_HOT = new THREE.Color(0xa96276) // rose-magenta accent -> warm
 // trick). The shadow is a flat plane with a soft radial-violet alpha; as verticalOffset rises it
 // SHRINKS, SOFTENS (lower opacity) and drifts so the gap is unmistakable.
 const SHADOW_BASE_RADIUS = 1.7        // grounded half-size of the shadow ellipse (world units, ~kart footprint)
-const SHADOW_LENGTH_SCALE = 1.35      // stretch along the kart's forward axis (an ellipse, not a disc)
+const SHADOW_LENGTH_SCALE = 1.08      // ralph(iter3): shortened 1.35 -> 1.08 so the contact pool is a soft near-ROUND disc, not a comet streaking back along forward (the dark wake under/behind the kart was the elongated shadow, not just the smear)
 const SHADOW_GROUND_LIFT = 0.05       // height above the road surface to avoid z-fighting (world units)
-const SHADOW_BASE_OPACITY = 0.42      // grounded peak opacity — softened (was 0.62) so the shadow reads as a clean soft contact pool, not a hard dark block that combines with any drag into a smudge
+const SHADOW_BASE_OPACITY = 0.34      // ralph(iter3): softened 0.42 -> 0.34 so the contact pool is a clean soft shadow that cannot compound with the velocity smear into a muddy dark wake
 const SHADOW_COLOR = new THREE.Color(0x241d2d) // deep dusky-violet (NOT black) — in the mauve-shadow harmony
 // Jump-height response: over this lift (world units) the shadow shrinks/fades to its airborne floor.
 const SHADOW_LIFT_FALLOFF = 4.5       // verticalOffset at which the shadow reaches its smallest/faintest
@@ -977,9 +977,13 @@ export class ThreeScene {
       // stops (paintRamp.ts putty 0.96 / paper-white 1.0), which only coord >~0.93 reaches — i.e.
       // ONLY the sun's luminous core (src ~0.94 -> coord 1.0) and the helmet-sheen crest. The mid
       // field (sky/ground, coord <=0.84) is untouched, so nothing globally brightens.
-      // V2 C4: whitePoint 0.85 so the brightest field/sun pixels reach the ramp's luminous warm-cream
-      // top stops -> restores the luminous APEX (lightFrac>0) the brief wants kept, balancing the darks.
-      whitePoint: 0.85,
+      // ralph(iter3): whitePoint OPENED 0.85 -> 0.90 (priority-6 value-range fix). At 0.85 the bright
+      // sky/horizon (pre-LUT luma ~0.85-0.89) was already saturating the ramp's cream/apex stops, so the
+      // whole upper value band collapsed onto the same washed cream — a low-contrast, two-zone, muddy
+      // frame. Raising the white point STRETCHES that bright band back across the cream->apex stops so the
+      // luminous sky reaches true paper-white at its brightest while the mid-key field sits a notch lower
+      // (real luminous depth restored). Darks stay punched via the unchanged blackPoint + contrast 1.7.
+      whitePoint: 0.90,
       // V2 C4: contrast 1.7 (strong S-curve about 0.5) for value SEPARATION — deep darks + luminous
       // lights. shadowDepth 0.88 so the genuinely darkest forms (under-car, sword/car shadow sides)
       // reach the ink stops (the punched darks ref 02 has) while the BROAD shadow-side ground blends
@@ -1079,9 +1083,12 @@ export class ThreeScene {
     this.aerialPass = createAerialPerspectivePass({
       cameraNear: this.camera.near,
       cameraFar: DEPTH_FAR,
-      // Pale cool green-beige haze — EXACTLY the sky horizon-band colour (#CCCCBA) so the far ground
-      // washes into the same value the sky sits at right at the horizon line, dissolving the seam.
-      hazeColor: new THREE.Color(0xccccba),
+      // ralph(iter3): haze BRIGHTENED + cooled #CCCCBA -> #D6D8C8 (priority-6). The old target was a
+      // dingy beige that dragged the whole distance toward a muddy low-luminance band; lifting it toward
+      // the LUMINOUS cool sky value (brighter, a hair cooler/greener than beige) means distance now
+      // dissolves into a luminous-cool veil that reads as deep atmospheric space (ref 02), not dinge.
+      // Kept just under the post-grade sky luminance so the far ground washes INTO the sky, not past it.
+      hazeColor: new THREE.Color(0xd6d8c8),
       // The HERO CAR sits at raw depth ~0.987 in this chase view, so the depth wash band MUST start
       // ABOVE it (else the car is fully washed into the ground — a regression that hid it). The far
       // ground / horizon packs to raw ~0.997..1.0, so the wash band 0.990..0.997 catches the far

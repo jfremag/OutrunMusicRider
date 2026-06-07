@@ -240,19 +240,14 @@ export function createAerialPerspectivePass(opts: {
           // Smooth proximity gradient (a soft gamma so the lower edge dissolves, not steps).
           float horizonW = smoothstep(0.04, 0.9, skyAbove);
           horizonW *= horizonW;
-          // HERO EXCLUSION (sword/car seam fix): the swords/car must read CONSISTENT across the
-          // horizon line. The screen-space band only washes the part of a blade BELOW the line, so a
-          // blade crossing the horizon got a value/haze STEP at the seam. Suppress the band on
-          // HERO_LAYER forms (a small dilation so the whole silhouette + a px of edge is spared) so a
-          // blade hazes only by its OWN depth (handled above, continuous along its length) — no seam.
-          float heroMask = texture2D(tCarMask, vUv).r;
-          vec2  mpx = uTexelSize * 1.5;
-          heroMask = max(heroMask, texture2D(tCarMask, vUv + vec2(mpx.x, 0.0)).r);
-          heroMask = max(heroMask, texture2D(tCarMask, vUv - vec2(mpx.x, 0.0)).r);
-          heroMask = max(heroMask, texture2D(tCarMask, vUv + vec2(0.0, mpx.y)).r);
-          heroMask = max(heroMask, texture2D(tCarMask, vUv - vec2(0.0, mpx.y)).r);
-          float heroKeep = 1.0 - smoothstep(0.1, 0.6, heroMask);
-          col = mix(col, uHazeColor, uHorizonHaze * horizonW * heroKeep);
+          // ralph(iter3) SWORD HORIZON SEAM: the old heroKeep SUPPRESSED this screen-space band on the
+          // blade/car — but the mask-edge feather itself stepped the haze right at the silhouette, and
+          // it meant the blade was treated specially across the line. Now that uHazeColor IS the bright
+          // sky (fix 1), a silhouette-against-sky and a silhouette-against-ground both haze toward the
+          // SAME bright target, so the band is REMOVED as a special case: the blade hazes purely by its
+          // OWN depth (steps 1-3 above, continuous along its length) PLUS this depth-independent band
+          // exactly like everything else, so it reads identical above vs below the line with no seam.
+          col = mix(col, uHazeColor, uHorizonHaze * horizonW);
         }
 
         gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);

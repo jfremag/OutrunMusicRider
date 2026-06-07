@@ -553,17 +553,22 @@ export function createPainterlyEdgePass(opts: {
           depthFade = mix(1.0, 0.35, smoothstep(0.20, 0.80, ld));
           // Hard-exclude the true background (sky / far plane) entirely.
           depthFade *= 1.0 - smoothstep(0.90, 0.985, ld);
-          // HORIZON SEAM FIX (WIDE FEATHER): in this grazing chase view the LINEARISED depth
-          // collapses to ~0 for the whole scene, so the ld-based far-exclusion above never fires on
-          // the FAR GROUND at the horizon — and the huge ground/sky depth step there inks a crude
-          // dark line ALONG the horizon (a hard seam). Keying off the RAW device depth instead
-          // (which DOES span toward the far plane at the horizon in this view) fades the ink out
-          // across the far-ground band. WIDENED to a broad 0.90..0.999 ramp (was a tight
-          // 0.945..0.975 step) so a blade's ink does NOT abruptly cut where it crosses the horizon —
-          // its dark accent eases out gradually with distance, reading IDENTICAL above and below the
-          // line. Near/mid ground (raw < ~0.90) is untouched, so its value edges still ink normally.
+          // RAW-DEPTH FAR-GROUND fade: in this grazing chase view the LINEARISED depth collapses to ~0
+          // for the whole scene, so the ld-based far-exclusion above never fires on the FAR GROUND at
+          // the horizon — and the huge ground/sky depth step there would ink a crude dark line ALONG
+          // the horizon. Keying off RAW device depth (which DOES span toward the far plane at the
+          // horizon in this view) fades the ground ink out across the far-ground band.
           float rawD = texture2D(tDepth, vUv).r;
-          depthFade *= 1.0 - smoothstep(0.90, 0.999, rawD);
+          float groundFade = 1.0 - smoothstep(0.90, 0.999, rawD);
+          // ralph(iter3) SWORD HORIZON SEAM: the raw-depth ramp above is tuned for the FLAT far GROUND;
+          // applying it to a vertical BLADE crossing the horizon stepped the blade's ink at the seam
+          // (its pixels straddle the ramp's steep knee). Drive the HERO (blade/car) ink fade off the
+          // blade's OWN LINEAR depth instead — a smooth monotonic distance fade that eases the dark
+          // accent out continuously and reads IDENTICAL above vs below the line. Non-hero ground keeps
+          // the raw-depth far-ground fade. heroMask 1 on the blade -> use the linear fade; 0 -> ground.
+          float heroM = (useHeroMask > 0.5) ? texture2D(tHeroMask, vUv).r : 0.0;
+          float heroFade = mix(1.0, 0.30, smoothstep(0.015, 0.10, ld)); // blade's own-depth ease (smooth)
+          depthFade *= mix(groundFade, heroFade, clamp(heroM, 0.0, 1.0));
         }
 
         // Combine. SALIENCY (is there a real contour) x the COHERENCE-DRIVEN TAPER (is it a clean
