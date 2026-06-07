@@ -937,7 +937,7 @@ export class ThreeScene {
       // V2 CORRECTION 4 (accent pop): on highly-saturated SOURCE pixels (the crimson sword + the
       // rich car body) preserve much more chroma (0.85) and boost saturation, so the accents stay
       // VIVID through the palette lock while the muted field (low source sat) is untouched.
-      accentSatGate: 0.28,
+      accentSatGate: 0.16,
       accentPreserve: 0.85,
       accentBoost: 0.55,
       // V2 CORRECTION 4 (contrast / darks-as-accent): blackPoint 0.33 + shadowDepth 1.0 push the
@@ -1083,7 +1083,7 @@ export class ThreeScene {
       // Reduced (0.96 -> 0.55) so the far band keeps form/detail + depth instead of washing to a
       // flat pale band (user: respect the 3D). The horizon-band haze below still softens the seam.
       hazeStrength: 0.55,
-      desat: 0.55,
+      desat: 0.15,
       contrast: 0.52,
       lift: 0.05,
       pivot: 0.6,
@@ -2160,7 +2160,7 @@ export class ThreeScene {
               // side / painterly-edge anchor, NOT the old 0.35 that dulled it to dark maroon). The
               // LUT accent-preserve + boost (gated to this high source saturation) keep it reading
               // vivid through the palette lock; ACES + the LUT hold the lit face a luminous crimson.
-              material.color.copy(new THREE.Color(0xc0392b)).lerp(new THREE.Color(0x7a1f1a), 0.15)
+              material.color.copy(new THREE.Color(0xdb3b2e))
             } else {
               // Hilt / guard -> desaturated violet-gray, in the harmony.
               material.color.lerp(HARMONY.bodyShadowViolet, 0.6)
@@ -2175,6 +2175,14 @@ export class ThreeScene {
             material.transparent = false
             if (material instanceof THREE.MeshPhysicalMaterial) {
               material.transmission = 0
+            }
+            // BLADE: a LOW self-illumination so it reads as a confident menacing RED at ALL
+            // distances and lighting angles — never a dark grey silhouette that melts into the
+            // horizon and only "pops" red up close. Kept low (lit value ~0.5) so it stays BELOW
+            // the selective-bloom threshold (~0.80): NO neon glow, just a consistently red obstacle.
+            if (isBlade) {
+              material.emissive.copy(new THREE.Color(0xdb3b2e))
+              material.emissiveIntensity = 0.4
             }
             material.needsUpdate = true
           }

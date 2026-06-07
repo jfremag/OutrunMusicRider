@@ -312,13 +312,14 @@ export function injectCarSheen(
         // (cream) catch-light is REMOVED entirely — it was the source of the warm-cream splotch.
         vec3  catchLights = uCatchCool * (fres * 0.035);         // cool grazing reflection sliver only
 
-        // BODY BASE: settle the body to a deep, READABLE violet-gray (#2C2A38 ×1.35 — DARKER than the
-        // old ×1.55 so the dome interior reads as a dark painted form, not a pale bowl). Clamp the lit
-        // base toward this violet (mix) so the warm directional key cannot punch a bright hotspot
-        // through the body — the body is a flat dark violet and the subtle cool sheen is the only
-        // thing that lifts it. The form stays a deliberate dark hero; contours read mostly LOST.
-        vec3 bodyBase = uDeepBody * 1.35;
-        outgoingLight = mix(outgoingLight, bodyBase, 0.85);
+        // BODY: KEEP the BRDF-lit 3D FORM (light side / shadow side) so the car reads as a
+        // DIMENSIONAL dusky blue-violet body — NOT the flat pitch-black blob the old hard overpaint
+        // (mix 0.85 toward a near-black) crushed it into (it fell BELOW the palette-LUT black point
+        // ~0.345 and was clipped to pure black). Tint cool-violet but keep most of the lit form,
+        // and FLOOR it above the LUT black point so the shadow side never crushes to black.
+        vec3 dusky = uDeepBody * 5.0;                      // readable dusky blue-violet (~0.42 luma)
+        outgoingLight = mix(outgoingLight, dusky, 0.42);   // keep ~58% of the lit FORM shading
+        outgoingLight = max(outgoingLight, dusky * 0.95);  // floor — never crush to black
 
         // GLAZE the subtle cool sheen over the upper body where coverage is high — a thin wash, NOT a
         // replacement. cov peaks low and the sheen value is capped low, so this is a quiet cool roll
