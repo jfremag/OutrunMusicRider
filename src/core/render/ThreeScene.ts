@@ -3007,7 +3007,7 @@ export class ThreeScene {
       CAMERA_JUMP_HEIGHT_MAX,
       this.carVerticalOffset * CAMERA_JUMP_HEIGHT
     )
-    const cameraHeight = 1.25 + jumpHeightBoost
+    const cameraHeight = 0.9 + jumpHeightBoost
     const baseCameraOffset = this.smoothedCarForward
       .clone()
       .multiplyScalar(-cameraDistance)
