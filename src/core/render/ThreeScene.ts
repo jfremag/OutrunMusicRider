@@ -76,7 +76,7 @@ const FOV_DROP_PUNCH = 6 // extra degrees at full drop intensity (cinematic expa
 // extra FOV is a complementary widening bound to the SAME normalized depth excess, so the
 // two always move in concert. On the rising edge of the focus flag the camera orbit angle
 // is snapped square (one frame) so the car is framed head-on during the moment.
-const BASE_CAMERA_DISTANCE = 4.2 // resting chase distance behind the car (units) — pulled in (was 8) so the kart commands the frame as the hero subject (~1/3 frame height)
+const BASE_CAMERA_DISTANCE = 3.7 // resting chase distance behind the car (units) — pulled in further (was 4.2) so the kart commands the frame as the hero focal subject; still clears lane changes
 const FOV_DROP_BOOST_MAX = 7 // extra degrees of FOV at full camera pull-back (6-8° band)
 const CAMERA_DEPTH_LERP = 0.12 // per-frame ease of the applied depth toward cameraDepthScale
 
@@ -150,7 +150,7 @@ const BURST_COLOR_HOT = new THREE.Color(0xa96276) // rose-magenta accent -> warm
 const SHADOW_BASE_RADIUS = 1.7        // grounded half-size of the shadow ellipse (world units, ~kart footprint)
 const SHADOW_LENGTH_SCALE = 1.35      // stretch along the kart's forward axis (an ellipse, not a disc)
 const SHADOW_GROUND_LIFT = 0.05       // height above the road surface to avoid z-fighting (world units)
-const SHADOW_BASE_OPACITY = 0.62      // grounded peak opacity (deep-violet, soft-edged)
+const SHADOW_BASE_OPACITY = 0.42      // grounded peak opacity — softened (was 0.62) so the shadow reads as a clean soft contact pool, not a hard dark block that combines with any drag into a smudge
 const SHADOW_COLOR = new THREE.Color(0x241d2d) // deep dusky-violet (NOT black) — in the mauve-shadow harmony
 // Jump-height response: over this lift (world units) the shadow shrinks/fades to its airborne floor.
 const SHADOW_LIFT_FALLOFF = 4.5       // verticalOffset at which the shadow reaches its smallest/faintest
@@ -887,8 +887,13 @@ export class ThreeScene {
       radius: 8,
       sharpness: KUWAHARA_Q_REST,
       eccentricityClamp: 0.52,
-      anisoGain: 2.0,
-      anisoExp: 0.4,
+      // PREMIUM-CLEAN PASS: lower anisoGain (2.0 -> 1.6) and RAISE anisoExp (0.4 -> 0.62) so the
+      // kernel only elongates on GENUINE contours (real edges keep their directional stroke) but
+      // the near-flat fields (sky/ground), where A≈0, no longer get over-amplified into wavy
+      // directional smear that reads as hand-tremor waviness. The result is clean broad washes over
+      // flat fields with brushwork that still bends along the forms — precise, not jittery.
+      anisoGain: 1.6,
+      anisoExp: 0.62,
       strokeBias: 0.42
     })
     this.kuwaharaPass.uniforms.tTensor.value = this.tensorTargetA.texture
@@ -1113,6 +1118,11 @@ export class ThreeScene {
       horizonBand: 0.11
     })
     this.aerialPass.uniforms.tDepth.value = this.sceneDepthTexture
+    // HERO_LAYER mask (same sharp-mask the smear consumes) so the horizon-band wash is suppressed
+    // on the swords/car — a blade hazes only by its OWN depth and reads consistent across the
+    // horizon line (no haze/ink seam where it crosses). + the texel for the small mask dilation.
+    this.aerialPass.uniforms.tCarMask.value = this.carMaskTarget.texture
+    this.aerialPass.uniforms.uTexelSize.value = new THREE.Vector2(fullTexel[0], fullTexel[1])
 
     // PASS 9 — SubstratePaper (FINAL): frame-anchored paper granulation + tooth-light +
     // micro-distort, Pegtop soft-light, folded dither (drawing-buffer resolution).
@@ -1238,8 +1248,16 @@ export class ThreeScene {
         // band warming toward a pale green-beige so the sky glides green -> beige down to the
         // horizon (the ref-02 gradient). Bright enough (luma ~0.74) to keep the field luminous
         // through ACES + the LUT while staying muted/desaturated.
-        topColor: { value: new THREE.Color(0xb6c2ad) },    // luminous cool SAGE-GREEN sky upper
-        horizonColor: { value: new THREE.Color(0xccccba) } // pale green-BEIGE sky lower band (warms toward horizon)
+        // DIRECTIONAL DRAMA (Tesla-premium pass): the upper sky was a near-flat dead pale band.
+        // It now reads as a low-sun atmosphere — a deeper, cooler zenith DEEPENED at the top so the
+        // gaze travels DOWN toward the light, a warm horizon band, and a bright warm KEY GLOW that
+        // blooms outward from the off-centre sun direction (uSunDir, refreshed each frame to match
+        // the disc). The glow gives the empty negative space a sense of light, depth and direction.
+        topColor: { value: new THREE.Color(0x9aa896) },    // deeper cool SAGE-GREEN zenith (drama at the top)
+        horizonColor: { value: new THREE.Color(0xd2cfbd) }, // pale warm green-BEIGE horizon band
+        // Warm low-sun key glow that radiates from the sun direction across the sky.
+        sunGlowColor: { value: new THREE.Color(0xf3e3c4) }, // warm cream key-light bloom
+        uSunDir: { value: new THREE.Vector3(0.5, 0.18, -0.85).normalize() }
       },
       vertexShader: `
         varying vec3 vWorldPosition;
@@ -1253,10 +1271,32 @@ export class ThreeScene {
         varying vec3 vWorldPosition;
         uniform vec3 topColor;
         uniform vec3 horizonColor;
+        uniform vec3 sunGlowColor;
+        uniform vec3 uSunDir;
         void main() {
-          // Height 0 at the horizon, 1 at the zenith. A single soft vertical lerp.
-          float h = clamp(normalize(vWorldPosition).y * 0.5 + 0.5, 0.0, 1.0);
-          vec3 col = mix(horizonColor, topColor, smoothstep(0.0, 0.6, h));
+          vec3 dir = normalize(vWorldPosition);
+          // Height 0 at the horizon, 1 at the zenith. A soft vertical lerp biased so the brighter
+          // band concentrates LOW and the zenith DEEPENS — a real top-to-bottom gradient that pulls
+          // the gaze DOWN toward the light, so the upper frame is no longer dead-flat negative space.
+          float h = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+          vec3 col = mix(horizonColor, topColor, smoothstep(0.0, 0.85, h));
+          // DEEPEN THE ZENITH further (a graded atmosphere, drama at the very top of the frame).
+          col *= mix(1.0, 0.86, smoothstep(0.55, 1.0, h));
+
+          // WARM KEY GLOW: a wide, bright bloom of warm light radiating from the off-centre sun
+          // direction — the single strongest cue that the scene is lit by a low sun. Three coupled
+          // lobes (broad atmosphere → mid halo → bright near-sun core) so the sky has real
+          // directional depth and the empty upper-right reads as lit air, not a flat pale wall.
+          float sd = clamp(dot(dir, normalize(uSunDir)), 0.0, 1.0);
+          float glowBroad = pow(sd, 2.0);   // wide warm atmospheric wash
+          float glowMid   = pow(sd, 7.0);   // mid warm halo
+          float glowCore  = pow(sd, 28.0);  // bright near-sun core
+          float glow = clamp(glowBroad * 0.45 + glowMid * 0.55 + glowCore * 0.85, 0.0, 1.0);
+          // Keep a touch more warmth toward the horizon (a low sun grazes the horizon band) but let
+          // it reach UP to the disc too, so the bloom surrounds the sun instead of being clipped low.
+          float lowBias = 1.0 - smoothstep(0.6, 1.0, h);
+          col = mix(col, sunGlowColor, clamp(glow * (0.5 + 0.4 * lowBias), 0.0, 0.92));
+
           gl_FragColor = vec4(col, 1.0);
         }
       `
@@ -1280,8 +1320,8 @@ export class ThreeScene {
         // so it is the frame's LUMINOUS high-value anchor (ref 02's bright wet bloom of light) and
         // actually clears the LUT whitePoint into the light ramp stops — supplies lightFrac>0 and
         // the top of the value range, balancing the restored darks. Still a soft wet disc, no glow.
-        coreColor: { value: new THREE.Color(0xf2efe6) },         // bright warm-cream luminous core
-        edgeColor: { value: HARMONY.litSteelBlue.clone() }       // #4 dissolves into the cool sky band
+        coreColor: { value: new THREE.Color(0xf6efdf) },         // bright warm-cream luminous core
+        edgeColor: { value: new THREE.Color(0xe9dcc2) }          // warm cream rim — dissolves into the low-sun key glow
       },
       vertexShader: `
         varying vec2 vUv;
@@ -1376,10 +1416,12 @@ export class ThreeScene {
       // three.js `alphaMap` samples the texture's GREEN channel for opacity, so the alpha must live
       // in the colour value (white = opaque centre, black = transparent rim) — encoding it in the
       // canvas ALPHA channel instead would be ignored (the subtle bug that first hid the shadow).
+      // SOFTER falloff (smudge fix): a gentler, earlier-dissolving radial so the contact pool reads
+      // as a clean soft shadow that grades smoothly into the road, never a hard dark disc/block.
       const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2)
-      g.addColorStop(0.0, 'rgb(255,255,255)')
-      g.addColorStop(0.45, 'rgb(210,210,210)')
-      g.addColorStop(0.75, 'rgb(80,80,80)')
+      g.addColorStop(0.0, 'rgb(235,235,235)')
+      g.addColorStop(0.35, 'rgb(165,165,165)')
+      g.addColorStop(0.65, 'rgb(55,55,55)')
       g.addColorStop(1.0, 'rgb(0,0,0)')
       ctx.fillStyle = g
       ctx.fillRect(0, 0, size, size)
@@ -2185,6 +2227,8 @@ export class ThreeScene {
     ThreeScene.setVec2Uniform(this.painterlyEdgePass.uniforms.tensorTexel, halfTexel)
     // VelocitySmear: full-res texel for the noise/wobble sampling.
     ThreeScene.setVec2Uniform(this.velocitySmearPass.uniforms.uTexelSize, fullTexel)
+    // AerialPerspective: full-res texel for the hero-mask dilation (horizon-band seam fix).
+    ThreeScene.setVec2Uniform(this.aerialPass.uniforms.uTexelSize, fullTexel)
     // Unsharp-mask: full-res texel for the blur tap spacing.
     ThreeScene.setVec2Uniform(this.unsharpPass.uniforms.texel, fullTexel)
     // Selective bloom: resize its half-res bright/blur side-chain targets to the new buffer.
@@ -3299,6 +3343,15 @@ export class ThreeScene {
 
     this.sunMesh.position.copy(targetPos)
     this.sunMesh.quaternion.copy(this.camera.quaternion)
+
+    // Feed the sky dome's warm key-glow the live world-space direction TOWARD the sun (from the
+    // camera), so the atmospheric bloom always radiates from the disc and the low-sun light reads
+    // consistently as the camera rakes off-axis. Normalised; the dome shader handles the falloff.
+    if (this.skyMesh) {
+      const skyMat = this.skyMesh.material as THREE.ShaderMaterial
+      const sunDirU = skyMat.uniforms.uSunDir.value as THREE.Vector3
+      sunDirU.copy(targetPos).sub(this.camera.position).normalize()
+    }
   }
 }
 

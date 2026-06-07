@@ -76,6 +76,14 @@ export function createAerialPerspectivePass(opts: {
     uniforms: {
       tDiffuse: { value: null },
       tDepth: { value: null as THREE.Texture | null },
+      // HERO_LAYER mask (car + sword obstacles), wired by ThreeScene. Where it is lit the
+      // depth-independent HORIZON-BAND wash is SUPPRESSED so a blade/the car hazes uniformly along
+      // its OWN length (driven by its own depth) and reads identical above vs below the horizon —
+      // no ink/haze seam where a form crosses the line. Bound to a 1x1 black placeholder until the
+      // real mask target exists (a black mask => no hero, full horizon wash, unchanged behaviour).
+      tCarMask: { value: null as THREE.Texture | null },
+      // 1/resolution in drawing-buffer pixels (small hero-mask dilation). Refreshed in ThreeScene.resize().
+      uTexelSize: { value: new THREE.Vector2(1 / 1920, 1 / 1080) },
       uCameraNear: { value: opts.cameraNear ?? 0.1 },
       uCameraFar: { value: opts.cameraFar ?? 2000.0 },
       uHazeColor: { value: (opts.hazeColor ?? new THREE.Color(0xc4ccb8)).clone() },
@@ -122,6 +130,8 @@ export function createAerialPerspectivePass(opts: {
 
       uniform sampler2D tDiffuse;
       uniform sampler2D tDepth;
+      uniform sampler2D tCarMask;
+      uniform vec2  uTexelSize;
       uniform float uCameraNear;
       uniform float uCameraFar;
       uniform vec3  uHazeColor;
@@ -227,12 +237,22 @@ export function createAerialPerspectivePass(opts: {
             wA += w;
           }
           skyAbove /= max(wA, 1e-4);                      // smooth fraction of upward sky (0..1)
-          // Smooth proximity gradient (a soft gamma so the lower edge dissolves, not steps). NO
-          // far-gate, NO car-exclusion — the wash is driven purely by this smooth screen-space
-          // measure so it dissolves the seam continuously for every form crossing the horizon.
+          // Smooth proximity gradient (a soft gamma so the lower edge dissolves, not steps).
           float horizonW = smoothstep(0.04, 0.9, skyAbove);
           horizonW *= horizonW;
-          col = mix(col, uHazeColor, uHorizonHaze * horizonW);
+          // HERO EXCLUSION (sword/car seam fix): the swords/car must read CONSISTENT across the
+          // horizon line. The screen-space band only washes the part of a blade BELOW the line, so a
+          // blade crossing the horizon got a value/haze STEP at the seam. Suppress the band on
+          // HERO_LAYER forms (a small dilation so the whole silhouette + a px of edge is spared) so a
+          // blade hazes only by its OWN depth (handled above, continuous along its length) — no seam.
+          float heroMask = texture2D(tCarMask, vUv).r;
+          vec2  mpx = uTexelSize * 1.5;
+          heroMask = max(heroMask, texture2D(tCarMask, vUv + vec2(mpx.x, 0.0)).r);
+          heroMask = max(heroMask, texture2D(tCarMask, vUv - vec2(mpx.x, 0.0)).r);
+          heroMask = max(heroMask, texture2D(tCarMask, vUv + vec2(0.0, mpx.y)).r);
+          heroMask = max(heroMask, texture2D(tCarMask, vUv - vec2(0.0, mpx.y)).r);
+          float heroKeep = 1.0 - smoothstep(0.1, 0.6, heroMask);
+          col = mix(col, uHazeColor, uHorizonHaze * horizonW * heroKeep);
         }
 
         gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);

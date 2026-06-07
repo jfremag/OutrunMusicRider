@@ -273,7 +273,7 @@ export function injectCarSheen(
         // toward the light side so it is a directional sheen, not a flat cap. A wide specular core
         // only adds a gentle crest. None is a BRDF/mirror term. This replaces the old wrapped^2 band
         // that landed blotchy from the chase angle and the cov→1 fill that dumped a cream puddle.
-        float upFace = smoothstep(-0.15, 0.95, sN.y);                              // top of the cowl
+        float upFace = smoothstep(-0.35, 0.9, sN.y);                               // top + upper flanks of the cowl (broadened so more of the visible body catches the rolling sheen)
         float band = clamp(upFace * (0.55 + 0.55 * wrapped), 0.0, 1.0);            // broad upper roll
         float lobe = clamp(band * (0.70 + 0.40 * broadCore), 0.0, 1.0);
 
@@ -291,7 +291,7 @@ export function injectCarSheen(
         // DIMENSIONAL light-catching chrome form — not the dark glaze the over-corrected build made.
         // mottle only feathers it. Capped < 0.75 so the sheen is a strong roll over the form, never a
         // flat fill that erases the modelling.
-        float cov = clamp(lobe * uSheenStrength * 0.72 + mottle * 0.03, 0.0, 0.72);
+        float cov = clamp(lobe * uSheenStrength * 0.82 + mottle * 0.03, 0.0, 0.80);
         // A gentle ramp — a smooth luminous cool roll with a brighter crest toward full coverage.
         float s = clamp(pow(cov, 0.80), 0.0, 1.0);
 
@@ -303,10 +303,10 @@ export function injectCarSheen(
         float targetHue = 232.0 / 360.0;                         // steel-blue target hue
         float hue = mix(baseHsv.x, targetHue, 0.6 + 0.4 * s);    // firmly cool blue-violet
         float sat = clamp(baseHsv.y * (1.0 - 0.5 * s), 0.03, 0.18); // desaturate toward the crest (chrome)
-        // A luminous cool film: floor ~0.50 so the broad mid-band reads as a bright sheen (survives
-        // the flatten); the crest climbs toward 0.90 so the rolling highlight CATCHES light like
-        // polished metal (the hero read). Capped at 0.92 so it stays just shy of pure white.
-        float val = mix(0.50, 0.90, s);                          // luminous cool roll, bright crest
+        // A luminous cool film: floor ~0.58 (was 0.50) so the broad mid-band reads as a clearly
+        // bright rolling sheen that survives the Kuwahara/LUT flatten; the crest climbs toward 0.92
+        // so the rolling highlight CATCHES light like polished chrome (the dimensional hero read).
+        float val = mix(0.58, 0.92, s);                          // luminous cool roll, bright crest
         val += mottle * 0.03;                                    // small value variance (mottle)
         val = clamp(val, 0.0, 0.92);                             // cap just below white
         vec3 sheenCol = sheenHsv2rgb(vec3(hue, clamp(sat, 0.0, 1.0), val));
@@ -318,12 +318,13 @@ export function injectCarSheen(
 
         // BODY: KEEP the BRDF-lit 3D FORM (light side / shadow side) so the car reads as a
         // DIMENSIONAL body, and LIFT its base value so it is a luminous dusky chrome — NOT the flat
-        // near-black blob the old hard overpaint (mix 0.42 toward a dim dusky + a 0.95 dark floor)
-        // crushed it into. A brighter dusky base + a lighter floor seat the body well ABOVE the
-        // palette-LUT black point (~0.345) so the whole form reads as a lit dimensional hero.
-        vec3 dusky = uDeepBody * 7.2;                      // luminous dusky blue-violet (~0.60 luma)
-        outgoingLight = mix(outgoingLight, dusky, 0.30);   // keep ~70% of the lit FORM shading
-        outgoingLight = max(outgoingLight, dusky * 0.62);  // floor — a LIT shadow side, never black
+        // near-black blob it had become. TESLA-HERO LIFT: a brighter dusky base (×7.2 → ×8.6) and a
+        // higher floor (×0.62 → ×0.78) seat the WHOLE form well above the palette-LUT black point so
+        // even the shadow side reads as a LIT, light-catching metal flank — the hero is dimensional
+        // and luminous from every angle, never a dark silhouette.
+        vec3 dusky = uDeepBody * 8.6;                      // luminous dusky blue-violet (brighter body)
+        outgoingLight = mix(outgoingLight, dusky, 0.34);   // keep ~66% of the lit FORM shading
+        outgoingLight = max(outgoingLight, dusky * 0.78);  // floor — a clearly LIT flank, never dark
 
         // GLAZE the luminous cool sheen over the upper body where coverage is high — a confident wash
         // that lifts the form toward a light-catching chrome read while the BRDF modelling stays
