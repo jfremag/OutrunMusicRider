@@ -224,6 +224,17 @@ const HARMONY = {
   inkWarm: new THREE.Color(0x1e1b22)        // #17 found-edge dark accents (warm-side)
 }
 
+// --- LIGHT colours (NOT surface colours) --------------------------------------------------
+// A light's colour MULTIPLIES the surface albedo, so to lift the flat matte field/road to the
+// luminous MID-KEY of ref 02 (target lit value ~0.72–0.82) the lights must be NEAR-WHITE,
+// merely TINTED toward the harmony hues — a palette swatch used as a light colour would also
+// darken the result. These carry the warm-light / cool-shadow TEMPERATURE split at a high
+// level so the gouache reads through hue, not through a low key.
+const LIGHT_SKY_COOL = new THREE.Color(0xe7e6ee)    // hemisphere sky term — light steel-violet
+const LIGHT_GROUND_WARM = new THREE.Color(0xf0e3d6) // hemisphere ground bounce — light warm sienna
+const LIGHT_AMBIENT_COOL = new THREE.Color(0xd8d6e0) // ambient floor — soft cool, keeps shadows luminous
+const LIGHT_KEY_WARM = new THREE.Color(0xf2dcc6)    // directional key — light warm sienna form-shaper
+
 export class ThreeScene {
   private renderer: THREE.WebGLRenderer
   private scene: THREE.Scene
@@ -404,8 +415,13 @@ export class ThreeScene {
     // space conversion at the end of the composer chain (the LDR boundary the painterly
     // passes will sit after); we set it on the renderer so OutputPass picks it up.
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
+    // ACES is a filmic HDR curve that deliberately CRUSHES mids and rolls highlights; a
+    // gouache target is an LDR, mostly-mid-key image, so the default 1.2 exposure left the
+    // (already-luminous) field sitting too dark after the curve. Lift exposure so the mid
+    // washes land where ref 02 wants them (~0.72–0.82); ACES still gives the sun/sheen a soft
+    // non-clipping highlight roll-off, which suits the wet-paper "white" cap.
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping
-    this.renderer.toneMappingExposure = 1.2
+    this.renderer.toneMappingExposure = 1.55
 
     // Scene
     this.scene = new THREE.Scene()
@@ -503,19 +519,43 @@ export class ThreeScene {
     this.buildPainterlyChain(bufW, bufH, halfW, halfH)
 
     // Lighting (Watercolour Speed §4): form reads through the warm-light / cool-shadow
-    // TEMPERATURE axis, not through saturation. Cool steel-violet ambient fill is the
-    // shadow side; a desaturated warm sienna key is the light side.
-    const ambientLight = new THREE.AmbientLight(HARMONY.steelVioletField, 0.55)
+    // TEMPERATURE axis, not through saturation. The whole picture must read LUMINOUS and
+    // MID-KEY (ref 02) — light putty/rose, airy, mostly quiet light negative space — so the
+    // base lit value of the flat matte field/road has to land HIGH (target value ~0.72–0.82),
+    // not the muddy dark brown the old low key produced. Because a light's colour MULTIPLIES
+    // the surface albedo, lifting to a high key needs near-white TINTED lights (a palette
+    // swatch as a light colour would also dim the result); the hue still leans the
+    // warm-light / cool-shadow split, the LEVEL just sits where a gouache mid-key wants it.
+    //
+    // A HemisphereLight is the airy base: it lights up-facing surfaces (the ground/road,
+    // whose normals point +Y) strongly and EVENLY from a cool sky tint, falling to a warm
+    // ground bounce — exactly the soft, fill-dominant illumination of a flat gouache field,
+    // and it cures the old foreground-darkening (a near-horizontal key grazing an up-facing
+    // plane starved the near ground; only distance-fog was lifting the far field).
+    const hemiLight = new THREE.HemisphereLight(
+      LIGHT_SKY_COOL,    // cool light-tint sky term -> lifts up-facing field to a high mid
+      LIGHT_GROUND_WARM, // warm light-tint ground bounce -> the warm half of the split
+      1.45
+    )
+    this.scene.add(hemiLight)
+
+    // A gentle cool ambient floor on TOP of the hemisphere so even down-/side-facing faces
+    // never fall into the dark — keeps the key from browning the rose albedo by guaranteeing
+    // a luminous shadow side (cool steel-violet, the cool half of the temperature axis).
+    const ambientLight = new THREE.AmbientLight(LIGHT_AMBIENT_COOL, 0.55)
     this.scene.add(ambientLight)
 
-    // Desaturated warm sienna key, low on the horizon — the warm light of the split.
-    const directionalLight = new THREE.DirectionalLight(HARMONY.warmSienna, 1.1)
-    directionalLight.position.set(-6, 5, 12)
+    // Desaturated warm sienna KEY — now a gentle form-shaper, not the main lift. Raised HIGH
+    // (steeper N·L on the up-facing ground so the warm light actually reaches it instead of
+    // grazing) and dialled DOWN in level so it tints the light side warm without muddying the
+    // rose field to brown. The hemisphere carries the overall luminosity; this just models form.
+    const directionalLight = new THREE.DirectionalLight(LIGHT_KEY_WARM, 0.85)
+    directionalLight.position.set(-6, 13, 9)
     this.scene.add(directionalLight)
 
-    // A soft warm fill near the car (rose-gray) so the hero body lifts off the field
+    // A soft warm fill near the car (warm-tinted) so the hero body lifts off the field
     // without a saturated neon point light.
-    const pointLight = new THREE.PointLight(HARMONY.roseGrayField, 0.6, 120)
+    const pointLight = new THREE.PointLight(LIGHT_GROUND_WARM, 0.45, 120)
     pointLight.position.set(0, 5, 2)
     this.scene.add(pointLight)
 
@@ -1188,7 +1228,12 @@ export class ThreeScene {
     // petrol-teal #48677D in shadow), NEVER as bright neon grid lines here. The per-frame
     // road morph still recomputes clean normals (morphRoadToMusic) to feed that edge pass.
     const roadMaterial = new THREE.MeshStandardMaterial({
-      color: HARMONY.sandRoad.clone(),
+      // The sand bridge must read a touch LIGHTER and warmer than the rose-gray FIELD it
+      // crosses (ref 02: the road sits ~0.10 value above its surroundings, a pale warm
+      // ribbon), otherwise field and road merge into one flat value and the path stops
+      // reading. Lift the #C9B49E sand slightly toward the warm-cream sheet to get that
+      // separation while keeping it a desaturated sand, not a bright lane.
+      color: HARMONY.sandRoad.clone().lerp(HARMONY.warmCream, 0.28),
       roughness: 0.9,
       metalness: 0.0
     })

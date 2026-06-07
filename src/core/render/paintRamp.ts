@@ -74,10 +74,16 @@ const DEFAULT_STOPS: RampStop[] = [
   { pos: 0.14, hex: 0x2c2a38, label: 'deep body near-black (#9)' },
   // Body shadow violet — warmest/most-saturated dark of the form (Sienkiewicz inversion).
   { pos: 0.3, hex: 0x706675, label: 'body shadow violet (#8)' },
-  // Steel-violet field — DOMINANT neutral; the broad lower-mid of the value scale.
+  // Steel-violet field — DOMINANT neutral; anchors the lower-mid of the value scale.
   { pos: 0.52, hex: 0xa7a3b1, label: 'steel-violet field (#3)' },
-  // Rose-gray field — warm desaturated counterweight in the upper-mid.
-  { pos: 0.68, hex: 0xceb9b9, label: 'rose-gray field (#5)' },
+  // Lit steel-blue — the COOL upper-mid. This is the broad band most bright negative-space
+  // pixels (the airy sky + cool field, ref 02's largest quiet area, luma ~0.6–0.85) land in,
+  // so the luminous negative space reads COOL steel-violet like the reference rather than a
+  // warm rosy haze (the old ramp put warm rose-gray here and warmed the whole bright half).
+  { pos: 0.70, hex: 0xb8bbce, label: 'lit steel-blue (#4)' },
+  // Rose-gray field — the WARM desaturated counterweight, now a narrower note just under the
+  // highlight (the warm half of the split-complementary, kept from dominating the bright field).
+  { pos: 0.87, hex: 0xceb9b9, label: 'rose-gray field (#5)' },
   // Paper putty — lightest value; the "white" substitute, gouache highlight cap.
   { pos: 1.0, hex: 0xd9d6ce, label: 'paper putty highlight (#1)' }
 ]
