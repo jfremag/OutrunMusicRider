@@ -106,12 +106,15 @@ export interface CarSheenMaterial {
 
 const DEFAULTS = {
   /**
-   * View-space light direction the broad lobe wraps around. Biased UP-and-strongly-TOWARD-CAMERA
-   * (big +Z) so the "helmet shine" rolls across the body faces that FACE THE VIEWER — the way the
-   * chrome rider's sheen turns toward us in ref 02 — instead of only catching the few up-facing
-   * polys (which on this kart are the small wheel tops, not the body/cabin we want as the hero).
+   * View-space light direction the broad lobe wraps around. P5: re-aimed from the old sky-biased
+   * normalize(0.30,0.62,0.95) (which caught the up-facing wheel TOPS — four neutral caps, cool
+   * fraction ~6%) toward a CAMERA-FACING normalize(0.35,0.30,1.0): a small lateral bias, a modest
+   * UP, and a DOMINANT +Z so the broad "helmet shine" sweeps the VIEWER-FACING body/cowl — the
+   * way the chrome rider's sheen turns toward us in ref 02. Now that P5 adds a continuous rounded
+   * cowl hull over the open frame, the lobe rolls across ONE broad form facing the camera instead
+   * of scattering over the wheel blobs.
    */
-  dir: new THREE.Vector3(0.30, 0.62, 0.95).normalize(),
+  dir: new THREE.Vector3(0.35, 0.30, 1.0).normalize(),
   /** LOW exponent -> a broad rolling lobe (NOT a tight CG glint). */
   width: 6.0,
   /** Base lobe intensity; driven up on the beat by `updateCarSheen`. A confident resting sheen so
@@ -262,10 +265,14 @@ export function injectCarSheen(
         // the brightest crest. Combine so the band is broad (not pow(ndh,6) alone — that was too
         // tight + double-attenuated the contribution below).
         float broadCore = pow(ndh, uSheenWidth);                                   // wide spec crest
-        // Weight the crest MORE and keep a smaller flat floor so the band has a clear bright
-        // ROLLING crest with darker flanks (a directional roll, not uniform fill — uniform fill
-        // read as flat dark-gray). Still broad (low exponent), still wrapped, never a CG glint.
-        float lobe = clamp(wrapped * (0.30 + 1.25 * broadCore) * pow(wrapped, 0.4), 0.0, 1.0);
+        // P5: a BROAD luminous rolling band — now that the lobe sweeps one continuous camera-facing
+        // cowl (not scattered wheel caps) we want the WRAPPED hemisphere gradient to OWN a large
+        // soft swathe of the form (the bright cool sheen covers ~40-50% of the chrome reference),
+        // with the specular core adding the brightest crest on top. Squaring the wrap concentrates
+        // it toward the light-facing crown (a clear directional roll, dark flanks) while the higher
+        // floor + crest keep the band confidently bright. Still low-exponent/wrapped — never a glint.
+        float band = wrapped * wrapped;                                            // broad soft swathe
+        float lobe = clamp(band * (0.55 + 1.05 * broadCore) + band * 0.25, 0.0, 1.0);
 
         // Fresnel for the grazing catch-lights + the razor spark gate (silhouette emphasis).
         float fres = pow(1.0 - clamp(dot(sN, sV), 0.0, 1.0), 3.0);
@@ -291,31 +298,46 @@ export function injectCarSheen(
         vec3  baseHsv = sheenRgb2hsv(uSheenColor);
         float targetHue = 232.0 / 360.0;                         // steel-blue target hue
         float hue = mix(baseHsv.x, targetHue, s);                // cool toward 232deg as it lifts
-        float sat = baseHsv.y * (1.0 - 0.6 * s);                 // desaturate as it brightens
-        float val = min(baseHsv.z, 0.90) * (0.62 + 0.38 * s);   // cap ~0.90; brighter floor so the broad band stays luminous through the LUT
+        // P5: BOOST the base saturation toward the steel-blue accent as the band brightens (instead
+        // of desaturating it to ~0) so the bright crest reads as a clearly COOL blue-violet sheen,
+        // NOT a desaturated near-white blob (the ref-chrome peaks are blue, never white). A small
+        // desaturate factor keeps it from going chalky, but the floor is well above zero.
+        float sat = clamp(baseHsv.y * (1.0 + 1.6 * s), 0.06, 0.20);
+        // P5: a luminous broad band, but cap the crest a touch BELOW the 0.90 ceiling so the peak
+        // reads as a bright cool sheen rather than tipping into white; flanks fall to the dark body
+        // via low coverage below. (ref chrome's brightest sheen sits ~0.82-0.85, not paper-white.)
+        // A LOWER floor (0.50) with a steeper rise so the bright crest concentrates on the light-
+        // facing crown (a clear directional ROLL) and side/down-facing flanks (e.g. the wheels)
+        // stay darker and read as part of the body, not four competing bright blocks.
+        float val = min(baseHsv.z, 0.85) * (0.50 + 0.42 * s);   // luminous cool crest, darker flanks
         val += mottle * 0.05;                                    // +-0.05 value variance (mottle)
         val = clamp(val, 0.0, 0.90);                             // HARD value cap (never white)
         vec3 sheenCol = sheenHsv2rgb(vec3(hue, clamp(sat, 0.0, 1.0), val));
 
         // Faint reflected scene catch-lights — scene COLOUR at low saturation, not a mirror:
-        // a cool sliver on the grazing edge + a warm hint biased to the lit side. Tiny weights.
+        // a cool sliver on the grazing edge + a warm hint biased to the lit side. P5: gate the warm
+        // hint to the DIMMER flanks (×(1-s)) so it never washes the bright cool crown toward a warm
+        // white hotspot — the crest stays a pure cool sheen — and trim both weights so they read as
+        // slivers, not a central bloom that breaks the value cap.
         float litSide = clamp(ndl * 0.5 + 0.5, 0.0, 1.0);
         vec3  catchLights =
-            uCatchCool * (fres * 0.08) +                         // cool grazing reflection sliver
-            uCatchWarm * (litSide * lobe * 0.05);                // warm hint on the lit lobe
+            uCatchCool * (fres * 0.06) +                         // cool grazing reflection sliver
+            uCatchWarm * (litSide * lobe * (1.0 - s) * 0.035);   // warm hint on the dim lit flanks only
 
-        // DARKS first: lift the composed output FLOOR toward a violet-gray a notch ABOVE the deep
-        // body (#2C2A38 ×1.55) so the body's un-sheened interior (this kart's open frame: seat,
-        // engine, struts) settles at a CONFIDENT, READABLE violet-gray rather than near-black. This
-        // both keeps hue+sat alive into the shadow AND — crucially for THIS geometry — cuts the
-        // internal luma contrast that was making the edge pass ink every interior strut into a busy
-        // black tangle. With a lifted floor the body contours read mostly LOST (spec §4), leaving
-        // the bright sheen crest + the few strongest silhouette accents as the found marks.
-        outgoingLight = max(outgoingLight, uDeepBody * 1.55);
+        // BODY BASE: settle the un-sheened body to a CONFIDENT, READABLE violet-gray a notch above
+        // the deep body (#2C2A38 ×1.55). P5: CLAMP the lit base DOWN to this violet (min) as well as
+        // up (max) so the strong warm directional KEY cannot punch a bright warm hotspot through the
+        // body where the sheen coverage dips (the old code only raised a floor with max(), so a hot
+        // Lambert highlight on the cowl crown bled through a mottle dip as a warm-white blob). Now
+        // the body is a flat violet base and the COOL SHEEN is the only thing that brightens it — so
+        // the crown reads as one clean cool rolling band, the interior stays lost, and hue+sat live
+        // into the shadow. Contours read mostly LOST (spec §4); the sheen crest is the found mark.
+        vec3 bodyBase = uDeepBody * 1.55;
+        outgoingLight = mix(outgoingLight, bodyBase, 0.82);
 
         // OVERPAINT the body with the broad cool sheen where coverage is high — like wet paint laid
         // over the form — so the lobe DOMINATES the upper/facing surface as the hero feature rather
-        // than glazing faintly over an already-dark body. LERP the composed outgoingLight toward the
+        // than glazing faintly over an already-dark body. LERP the (now flat-violet) base toward the
         // (value-capped) sheen colour by coverage; the cap guarantees the sheen never reaches white.
         outgoingLight = mix(outgoingLight, sheenCol, cov);
         outgoingLight += catchLights;

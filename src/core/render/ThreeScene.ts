@@ -184,6 +184,20 @@ const SMEAR_DRIVE_EASE = 0.18 // ease of the smeared uStrength toward its musica
 // tab-throttle re-baseline (mirrors the controller's dt>0.5 @ 50 u/s ⇒ >25u jump): ZERO the
 // smear that frame so a stale prev view-projection can't drag the whole screen.
 const SMEAR_RESET_DISTANCE_JUMP = 25
+// P4 — how far down the centerline (world units) to project the FLOW look-ahead point. ~100u
+// (mid of the spec's 80-120) sits well out toward the off-centre vanishing point so the screen
+// vector from it to the car is a stable "world rushing past" direction, robust to local jitter.
+const FLOW_LOOKAHEAD = 100
+// P4 — ease of the smear FLOW direction toward its target each frame (glide through bends, never
+// snap the streak direction).
+const FLOW_DIR_EASE = 0.12
+// P4 — injected track-flow drag gain (UV per the depth-ramped, speed-scaled flow). REST is tuned
+// so the streak ≈ SMEAR_MAX_REST at the far ramp at speedMultiplier≈1; DROP opens it so the world
+// drags noticeably longer on emotional peaks (the world rushing past harder). Eased toward target.
+const FLOW_GAIN_REST = 0.055
+const FLOW_GAIN_DROP = 0.085
+// P4 — ease of uFlowGain toward its drop target (matches the smear strength ease feel).
+const FLOW_GAIN_EASE = 0.18
 
 // PainterlyEdge breakup WIDENS on drops (spec PASS 7: drops widen the breakup threshold so
 // MORE found ink appears — the painter pressing harder — never a strength strobe). Mapped
@@ -403,6 +417,8 @@ export class ThreeScene {
   private smoothedSmearStrength = 0
   private smoothedEdgeMusic = 0
   private smoothedHueShift = 0
+  // P4 — eased injected-flow gain (opens on drops so the world drags longer on peaks).
+  private smoothedFlowGain = FLOW_GAIN_REST
   // Previous-frame clamped car distance, to detect a seek/rewind/tab-throttle re-baseline
   // (a large jump) and ZERO the smear that frame. null until the first frame after a track
   // (re)load — that first frame is always treated as a reset.
@@ -414,6 +430,15 @@ export class ThreeScene {
   private hasPrevViewProj = false
   // Scratch view-projection matrices reused each frame (allocation-free).
   private curViewProj = new THREE.Matrix4()
+
+  // P4 — scratch state for the per-frame velocity-smear FLOW direction derivation (the screen-
+  // space direction of the track rushing past, injected as a drag floor). Reused each frame so
+  // the projection of the ahead-point + the car's clip position allocates nothing. uFlowDir is
+  // eased toward its target so the streak direction never snaps through sharp bends.
+  private flowAheadPoint = new THREE.Vector3()
+  private flowAheadClip = new THREE.Vector4()
+  private flowCarClip = new THREE.Vector4()
+  private smoothedFlowDir = new THREE.Vector2(0, 0)
 
   constructor(canvas: HTMLCanvasElement) {
     // Ensure canvas has dimensions
@@ -856,7 +881,11 @@ export class ThreeScene {
     // cameraFar TIGHTENED to DEPTH_FAR to match the depth capture.
     this.velocitySmearPass = createVelocitySmearPass({
       cameraNear: this.camera.near,
-      cameraFar: DEPTH_FAR
+      cameraFar: DEPTH_FAR,
+      // P4 — injected track-flow drag gain. Tuned so the streak length ≈ SMEAR_MAX_REST (~0.05-0.06
+      // UV) at the far depth ramp at speedMultiplier≈1; uSpeedMul (drops accelerate the car) + the
+      // strength master lengthen it on drops. Driven a touch on drops in updatePainterlyMusicDrivers.
+      flowGain: FLOW_GAIN_REST
     })
     this.velocitySmearPass.uniforms.uTexelSize.value = new THREE.Vector2(fullTexel[0], fullTexel[1])
     this.velocitySmearPass.uniforms.tDepth.value = this.sceneDepthTexture
@@ -1222,10 +1251,30 @@ export class ThreeScene {
     this.applyPaletteToModel(clone, true)
 
     target.add(clone)
+
+    // P5: drape ONE rounded cowl/canopy hull over the open kart frame so the broad cool sheen
+    // rolls across a single continuous body, not the four wheel-blobs + skull cockpit. Size it
+    // to the SCALED kart footprint: a touch narrower than the full track width (so the wheels
+    // still read at the flanks) and a low dome rising above the deck to cover the cockpit. The
+    // kart is `desiredLength` long in Z after scaling; width/height come from the scaled bounds.
+    const scaledW = size.x * scaleFactor
+    const scaledH = size.y * scaleFactor
+    this.addCarCanopy(target, {
+      // Span most of the kart length and a BROAD beam that reaches out over the wheel hubs, so
+      // the cowl visually UNIFIES the frame into one body (the wheels read as its flanks, not four
+      // separate blocks). Generous so it dominates as the hero form (ref chrome is one big shape).
+      length: desiredLength * 0.92,
+      width: Math.max(1.15, scaledW * 0.86),
+      // A confident rounded dome — the broad top surface the rolling sheen sweeps across.
+      height: Math.max(0.92, scaledH * 0.82),
+      // Seat the underside just above the deck (the model already sits on y=0 after baseOffset).
+      baseY: 0.12,
+      // Centre over the cockpit, very slightly aft of the nose.
+      zCenter: -desiredLength * 0.05
+    })
     // RimGlowShell is retired (its #00ffff->#ff00ff additive Fresnel halo is banned and
-    // would feed a bloom that no longer exists). The in-material car sheen (wired in a
-    // later wave) replaces its hero-focal role; `size`/`baseOffset` are no longer needed
-    // for a halo here.
+    // would feed a bloom that no longer exists). The in-material car sheen + this P5 cowl
+    // replace its hero-focal role.
   }
 
   private buildFallbackCar(carGroup: THREE.Group): void {
@@ -1261,6 +1310,74 @@ export class ThreeScene {
     // injector's customProgramCacheKey.
     this.carSheenMaterials.push(injectCarSheen(bodyMaterial))
     this.carSheenMaterials.push(injectCarSheen(cabinMaterial))
+
+    // P5: give the fallback hero a continuous BODY too (sized to the fallback boxes), so the
+    // broad cool sheen rolls across one form rather than two slabs.
+    this.addCarCanopy(carGroup, { length: 2.0, width: 1.2, height: 0.95, baseY: 0.18 })
+  }
+
+  /**
+   * P5 — GIVE THE HERO A BODY. Adds ONE low-poly rounded cowl/canopy hull over the open kart
+   * frame, parented into the car group and carrying its own {@link CarSheenMaterial}, so the
+   * broad cool "helmet sheen" rolls across a SINGLE continuous painted form instead of scattering
+   * over four neutral wheel-blobs + the busy skull cockpit (the kart's weakest read — see
+   * docs/redesign/CRITIQUE.md P5 / the f1_car3x crop).
+   *
+   * The hull is a half-ellipsoid blister: a low-poly SphereGeometry scaled into an elongated,
+   * flattened dome (long in Z = nose-to-tail, broad in X, low in Y) with its lower half scaled
+   * down toward the deck so it reads as a cowl sitting ON the frame, not a floating egg. It is
+   * a smooth CONVEX surface — exactly what the wide rolling sheen lobe wants — and tinted to the
+   * lit body violet-gray (#7) so the sheen ramp (cool-desaturate-on-brighten, value-capped) plays
+   * across it. The interior frame/seat/skull is demoted to the deep body violet in
+   * applyPaletteToModel so it reads LOST behind/under this body (matched dark, no clutter).
+   *
+   * Sizing is passed in so the caller can fit it to the loaded GLB's bounds (cowl ≈ the kart's
+   * own footprint) or the procedural fallback. The mesh is added to the same car group, so it
+   * inherits the car transform AND the HERO_LAYER tag the caller enables recursively afterward
+   * (keeping the body razor-sharp through the velocity smear).
+   */
+  private addCarCanopy(
+    carGroup: THREE.Group,
+    dims: { length: number; width: number; height: number; baseY: number; zCenter?: number }
+  ): void {
+    // Low-poly rounded hull (a UV sphere — 18x12 is plenty for a smooth Kuwahara-flattened cowl).
+    const geo = new THREE.SphereGeometry(0.5, 18, 12)
+    const pos = geo.getAttribute('position') as THREE.BufferAttribute
+    // Reshape the unit sphere into the cowl: elongate Z, broaden X, flatten Y, and pull the
+    // BOTTOM hemisphere in/down so the form sits like a canopy on the deck (a tapered lower
+    // edge) rather than a symmetric balloon. A gentle forward taper (narrower toward the nose)
+    // gives it a cockpit-cowl read.
+    for (let i = 0; i < pos.count; i++) {
+      let x = pos.getX(i)
+      let y = pos.getY(i)
+      let z = pos.getZ(i)
+      // Forward taper: at the nose (+z) pinch X/ a touch; at the tail keep full width.
+      const taper = 1.0 - 0.28 * Math.max(0, z * 2.0) // z in [-0.5,0.5] -> taper 1.0..0.72 toward nose
+      x *= dims.width * taper
+      z *= dims.length
+      // Flatten + seat: upper half rounds up to the full height; lower half is squashed toward
+      // the deck so the hull's underside tucks down onto the frame (no floating egg).
+      const yScale = y >= 0 ? dims.height : dims.height * 0.42
+      y *= yScale
+      pos.setXYZ(i, x, y, z)
+    }
+    geo.computeVertexNormals()
+
+    const canopyMat = new THREE.MeshStandardMaterial({
+      color: HARMONY.bodyVioletGray.clone(), // #7 lit body violet-gray (the sheen ramps over this)
+      roughness: 0.85,
+      metalness: 0.0
+    })
+    const canopy = new THREE.Mesh(geo, canopyMat)
+    // Seat the hull on the deck and centre it over the cockpit (slightly aft of the nose so it
+    // covers the seat/skull). baseY lifts the squashed underside to just above the frame deck.
+    canopy.position.set(0, dims.baseY + dims.height * 0.30, dims.zCenter ?? 0)
+    canopy.castShadow = true
+    canopy.receiveShadow = true
+    carGroup.add(canopy)
+
+    // The ONE broad continuous body the sheen rolls across.
+    this.carSheenMaterials.push(injectCarSheen(canopyMat))
   }
 
   private disposeCarChildren(target: THREE.Group): void {
@@ -1285,7 +1402,13 @@ export class ThreeScene {
     // character is added later in post (Kuwahara + pigment + granulation). The hero car
     // tints toward the body violet-gray (#7); other models toward the steel-violet field
     // (#3). The car's broad in-material sheen is injected in a later wave.
-    const target = isPlayer ? HARMONY.bodyVioletGray : HARMONY.steelVioletField
+    // P5: the PLAYER's imported submeshes are the busy open-frame interior (struts, seat, the
+    // "skull" cockpit) that read as a mechanical buggy. With the new cowl carrying the hero
+    // sheen, lerp that interior HARD toward the DEEP body violet (#2C2A38) so it settles matched-
+    // dark and reads LOST under/behind the canopy (no clutter) — the Sienkiewicz "lost" interior.
+    // (The sheen injector's in-shader floor lifts it to a readable violet-gray, never pure black.)
+    // Non-player models still desaturate toward the steel-violet field.
+    const target = isPlayer ? HARMONY.deepBodyNearBlack : HARMONY.steelVioletField
     object.traverse(obj => {
       if (obj instanceof THREE.Mesh) {
         obj.castShadow = true
@@ -1294,11 +1417,12 @@ export class ThreeScene {
         const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
         for (const material of materials) {
           if (material instanceof THREE.MeshStandardMaterial || material instanceof THREE.MeshPhysicalMaterial) {
-            // Desaturate ~0.55 toward the violet-gray family. Untextured materials get a
-            // stronger pull (lerp 0.7) so flat-coloured submeshes land squarely on the
-            // harmony; textured ones keep a little of their own value at lerp 0.55.
+            // P5: the player interior pulls HARD toward the deep body violet (lerp ~0.88) so the
+            // busy frame goes matched-dark/lost behind the cowl; non-player models keep the gentler
+            // desaturate (0.55 textured / 0.7 flat) toward the steel-violet field.
             const hasTexture = Boolean(material.map)
-            material.color.lerp(target, hasTexture ? 0.55 : 0.7)
+            const pull = isPlayer ? 0.88 : hasTexture ? 0.55 : 0.7
+            material.color.lerp(target, pull)
 
             // FLAT MATTE: kill emissive (no bloom feeders), kill metal/clearcoat mirror.
             material.emissive.setRGB(0, 0, 0)
@@ -1864,6 +1988,16 @@ export class ThreeScene {
     }
     smearU.uReset.value = smearReset || !this.hasPrevViewProj ? 1 : 0
 
+    // --- P4: derive the screen-space TRACK-FLOW direction for the injected smear drag. Project a
+    // point ~FLOW_LOOKAHEAD units ahead down the centerline AND the car's own position into clip
+    // space with the SAME shaken curViewProj the frame renders/unprojects with, take their NDC
+    // (perspective-divided) positions, and the screen vector FROM the ahead-point (near the
+    // vanishing point) TOWARD the car is the direction the static world slides past as the car
+    // drives forward — exactly the wet directional drag a gouache speed painting wants. Eased so
+    // the streak direction glides through bends instead of snapping. On a reset frame the smear is
+    // already zeroed in-shader, so a stale direction here is harmless.
+    this.updateSmearFlowDir(gameState.car.distance)
+
     this.composer.render()
 
     // Cache this frame's shaken VP for next frame's uPrevViewProj (copied AFTER render so it is
@@ -1918,14 +2052,15 @@ export class ThreeScene {
     // sweeps across the body as the car leans (spec §4), then breathe each registered material.
     // Base is the module default (up-and-toward-camera); cameraRoll (radians) tilts it laterally.
     const roll = this.cameraRoll
-    // Up-and-strongly-toward-camera (big +Z) so the broad "helmet shine" rolls across the body
-    // faces that FACE THE VIEWER (the hero read, ref 02), not just the up-facing wheel tops; the
-    // bank tilts it laterally so the lobe sweeps the body as the kart leans. Matches the module
-    // DEFAULTS.dir so the resting framing reads the same as the unit-shaded material.
+    // P5: CAMERA-FACING base (dominant +Z, modest up) so the broad "helmet shine" sweeps the
+    // VIEWER-FACING cowl/body (the hero read, ref 02) instead of the up-facing wheel tops; the
+    // bank tilts it laterally so the lobe rolls across the body as the kart leans. Matches the
+    // module DEFAULTS.dir (0.35,0.30,1.0) so the resting framing reads the same as the unit-
+    // shaded material.
     this.sheenDir.set(
-      0.30 + Math.sin(roll) * 0.28,
-      0.62,
-      0.95
+      0.35 + Math.sin(roll) * 0.28,
+      0.30,
+      1.0
     ).normalize()
     for (const entry of this.carSheenMaterials) {
       updateCarSheen(entry, {
@@ -1957,6 +2092,11 @@ export class ThreeScene {
     // Framerate-stable streak length: currentFps/targetFps (60). Clamp the dt so a stalled
     // frame doesn't blow the scale up; identity when dt is unknown (paused/first frame).
     smearU.uVelocityScale.value = dt > 1e-4 ? THREE.MathUtils.clamp((1 / dt) / 60, 0.25, 2) : 1
+    // P4 — injected track-flow drag gain opens on drops so the world drags noticeably longer on
+    // emotional peaks (the static world rushing past harder), eased so the streak never snaps.
+    const flowGainTarget = THREE.MathUtils.lerp(FLOW_GAIN_REST, FLOW_GAIN_DROP, dropIntensity)
+    this.smoothedFlowGain += (flowGainTarget - this.smoothedFlowGain) * FLOW_GAIN_EASE
+    smearU.uFlowGain.value = this.smoothedFlowGain
 
     // --- PAINTERLY EDGE breakup widen on drops + slow crawl.
     this.smoothedEdgeMusic += (dropIntensity - this.smoothedEdgeMusic) * EDGE_MUSIC_EASE
@@ -2502,6 +2642,83 @@ export class ThreeScene {
    * track ends and falls back to `fallback` if there is no track (so callers can pass
    * the car's current heading). Allocation-light: returns a fresh normalized vector.
    */
+  /**
+   * Samples the centerline WORLD POSITION at arc-length `s` (linear interp between the bracketing
+   * nodes), into `out`. Mirrors {@link sampleTrackForward}'s cheap forward-walk from the current
+   * node. Used by P4 to project a point ~80-120u ahead down the track into clip space and derive
+   * the screen-space track-flow direction for the velocity smear. Returns `out`.
+   */
+  private sampleTrackPosition(s: number, out: THREE.Vector3): THREE.Vector3 {
+    const nodes = this.trackData?.nodes
+    if (!nodes || nodes.length === 0) return out.copy(this.smoothedCarPosition)
+    if (nodes.length === 1 || s <= nodes[0].s) return out.copy(nodes[0].pos)
+
+    const last = nodes[nodes.length - 1]
+    if (s >= last.s) return out.copy(last.pos)
+
+    let i = Math.min(this.lastNodeIndex, nodes.length - 2)
+    while (i > 0 && nodes[i].s > s) i--
+    while (i < nodes.length - 2 && nodes[i + 1].s <= s) i++
+
+    const a = nodes[i]
+    const b = nodes[i + 1]
+    const span = b.s - a.s
+    const f = span > 1e-6 ? THREE.MathUtils.clamp((s - a.s) / span, 0, 1) : 0
+    return out.lerpVectors(a.pos, b.pos, f)
+  }
+
+  /**
+   * P4 — derives and eases the velocity-smear's screen-space FLOW direction (uFlowDir): the
+   * direction the static world slides past the camera as the car drives forward, used to inject a
+   * wet directional paint-drag (the camera-relative reprojection alone is near-zero in this chase
+   * view). Projects a point ~FLOW_LOOKAHEAD units ahead down the centerline AND the car's own
+   * world position into clip space with the cached shaken `curViewProj` (the exact transform the
+   * frame renders with), perspective-divides both to NDC, and takes the screen vector FROM the
+   * ahead-point (near the off-centre vanishing point) TOWARD the car as the flow direction. NDC.xy
+   * and UV.xy share orientation (uv = ndc*0.5+0.5), so the normalized NDC delta is a valid UV-space
+   * streak direction. Eased toward (FLOW_DIR_EASE) so the drag glides through bends. Writes the
+   * pass's uFlowDir uniform. No-op-safe with no track (the ahead/car points collapse and the
+   * direction holds its last eased value, which the in-shader reset zeroes anyway on (re)load).
+   */
+  private updateSmearFlowDir(carDistance: number): void {
+    // Ahead point on the centerline (world) and the car's current world position.
+    this.sampleTrackPosition(carDistance + FLOW_LOOKAHEAD, this.flowAheadPoint)
+
+    // Project both to clip with the shaken curViewProj, then perspective-divide to NDC.
+    this.flowAheadClip
+      .set(this.flowAheadPoint.x, this.flowAheadPoint.y, this.flowAheadPoint.z, 1)
+      .applyMatrix4(this.curViewProj)
+    this.flowCarClip
+      .set(this.smoothedCarPosition.x, this.smoothedCarPosition.y, this.smoothedCarPosition.z, 1)
+      .applyMatrix4(this.curViewProj)
+
+    // Guard against degenerate w (point behind the camera / on the near plane).
+    const wa = this.flowAheadClip.w
+    const wc = this.flowCarClip.w
+    if (Math.abs(wa) < 1e-4 || Math.abs(wc) < 1e-4) return
+
+    const aheadNdcX = this.flowAheadClip.x / wa
+    const aheadNdcY = this.flowAheadClip.y / wa
+    const carNdcX = this.flowCarClip.x / wc
+    const carNdcY = this.flowCarClip.y / wc
+
+    // Screen vector FROM the ahead-point (vanishing point) TOWARD the car = the direction surfaces
+    // flow as the world rushes past. NDC delta == UV-space direction (same orientation).
+    let dx = carNdcX - aheadNdcX
+    let dy = carNdcY - aheadNdcY
+    const len = Math.hypot(dx, dy)
+    if (len < 1e-5) return
+    dx /= len
+    dy /= len
+
+    // Ease toward the target (glide through bends), then write the (re-normalized) uniform.
+    this.smoothedFlowDir.x += (dx - this.smoothedFlowDir.x) * FLOW_DIR_EASE
+    this.smoothedFlowDir.y += (dy - this.smoothedFlowDir.y) * FLOW_DIR_EASE
+    const sLen = Math.hypot(this.smoothedFlowDir.x, this.smoothedFlowDir.y) || 1
+    const flow = this.velocitySmearPass.uniforms.uFlowDir.value as THREE.Vector2
+    flow.set(this.smoothedFlowDir.x / sLen, this.smoothedFlowDir.y / sLen)
+  }
+
   private sampleTrackForward(s: number, fallback: THREE.Vector3): THREE.Vector3 {
     const nodes = this.trackData?.nodes
     if (!nodes || nodes.length === 0) return fallback.clone().normalize()

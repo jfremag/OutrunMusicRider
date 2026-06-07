@@ -77,6 +77,7 @@ export function createVelocitySmearPass(opts: {
   depthNear?: number
   blendFloor?: number
   blendKnee?: number
+  flowGain?: number
 } = {}): ShaderPass {
   return new ShaderPass({
     uniforms: {
@@ -106,7 +107,16 @@ export function createVelocitySmearPass(opts: {
       uDepthFloor: { value: opts.depthFloor ?? 0.5 },
       uDepthNear: { value: opts.depthNear ?? 0.88 },
       uBlendFloor: { value: opts.blendFloor ?? 0.4 },
-      uBlendKnee: { value: opts.blendKnee ?? 0.016 }
+      uBlendKnee: { value: opts.blendKnee ?? 0.016 },
+      // P4 — INJECTED TRACK-FLOW DRAG. In this chase view the camera translates along its OWN
+      // axis, so the camera-relative reprojection velocity is a near-zero radial zoom and the
+      // smear is indistinguishable from OFF. A gouache speed painting depicts motion as a
+      // DIRECTIONAL value-drag, so we inject a screen-space flow direction (a point ~80-120u
+      // ahead down the centerline, projected to clip and subtracted from the car's clip position)
+      // as a velocity FLOOR before the clamp. uFlowDir is that normalized screen direction;
+      // uFlowGain sets the streak length (tuned so it ≈ SMEAR_MAX_REST at speedMultiplier≈1).
+      uFlowDir: { value: new THREE.Vector2(0, 0) },
+      uFlowGain: { value: opts.flowGain ?? 0.05 }
     },
     vertexShader: /* glsl */ `
       varying vec2 vUv;
@@ -141,6 +151,8 @@ export function createVelocitySmearPass(opts: {
       uniform float uDepthNear;
       uniform float uBlendFloor;
       uniform float uBlendKnee;
+      uniform vec2  uFlowDir;
+      uniform float uFlowGain;
 
       // Fixed compile-time tap count (GLSL ES 1.00: no dynamic loop bound). 8 taps is the
       // sweet spot in the spec's 6-10 range: enough for a smooth comet tail, cheap enough
@@ -231,6 +243,23 @@ export function createVelocitySmearPass(opts: {
         // 60fps), so without this gain the comet tail is too short to register as motion.
         float smearLen = (0.6 + 0.4 * uSpeedMul) + uBeatKick * 0.5;
         velocity *= uStrength * smearLen * uLengthGain;
+
+        // --- P4: INJECTED TRACK-FLOW DRAG ---------------------------------------------------
+        // The camera-relative reconstruction above is near-zero in this chase view (the camera
+        // slides along its own axis), so on its own the smear reads as OFF. Inject a directional
+        // FLOW velocity floor: uFlowDir is the screen-space direction of the track rushing past
+        // (a point ~80-120u ahead down the centerline, projected to clip minus the car's clip
+        // position, normalized — derived per-frame in ThreeScene from the cached shaken
+        // curViewProj). It is added to the working velocity BEFORE the clamp so the world reads as
+        // a wet directional paint-drag while the HERO mask below still holds the kart/swords razor-
+        // sharp. A WIDENED raw-depth ramp (0.25 floor + 0.75*ramp from mid-depth) makes the drag
+        // present even on near tarmac and GROW toward the off-centre horizon — a gouache speed
+        // painting. Scaled by uSpeedMul (drops accelerate the car → a longer streak), the strength
+        // master, framerate scale, and zeroed on reset (a stale frame must not drag the screen).
+        float flowRamp = smoothstep(0.5, 1.0, rawDepth);          // widened depth ramp (mid→far)
+        vec2  flowVel  = uFlowDir * uFlowGain * (0.25 + 0.75 * flowRamp) * uSpeedMul;
+        flowVel       *= uStrength * uVelocityScale * (1.0 - clamp(uReset, 0.0, 1.0));
+        velocity      += flowVel;
 
         // Hero car kept SHARP via the HERO_LAYER mask — the one crisp found anchor. Smooth the
         // mask edge so the car silhouette doesn't get a hard cut.
