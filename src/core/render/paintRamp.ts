@@ -77,16 +77,18 @@ const DEFAULT_STOPS: RampStop[] = [
   // Steel-violet field — DOMINANT neutral; anchors the lower-mid of the value scale.
   { pos: 0.52, hex: 0xa7a3b1, label: 'steel-violet field (#3)' },
   // Lit steel-blue — the COOL upper-mid. This is the broad band most bright negative-space
-  // pixels (the airy sky + cool field, ref 02's largest quiet area, luma ~0.6–0.85) land in,
-  // so the luminous negative space reads COOL steel-violet like the reference rather than a
-  // warm rosy haze (the old ramp put warm rose-gray here and warmed the whole bright half).
-  { pos: 0.70, hex: 0xb8bbce, label: 'lit steel-blue (#4)' },
-  // Rose-gray field — the WARM desaturated counterweight, a narrow note in the upper-mid
-  // (the warm half of the split-complementary, kept from dominating the bright field).
-  { pos: 0.82, hex: 0xceb9b9, label: 'rose-gray field (#5)' },
-  // Paper putty — the warm "white" substitute / gouache highlight cap for the bright FIELD
-  // (sky/paper). Sits just under the very top so most bright negative-space pixels read warm-putty.
-  { pos: 0.93, hex: 0xd9d6ce, label: 'paper putty highlight (#1)' },
+  // pixels (the airy sky + cool field, ref 02's largest quiet area) land in, so the luminous
+  // negative space reads COOL steel-blue like the reference. R-FINAL P1 WIDENS the cool band a
+  // touch (0.66..0.84) and cools the hex slightly so the now-brighter sky holds its cool against
+  // ACES/tooth desaturation instead of warming into a rosy putty haze (which collapsed the split).
+  { pos: 0.66, hex: 0xb6bdd2, label: 'lit steel-blue (#4) — cool band low' },
+  { pos: 0.84, hex: 0xc4cadd, label: 'lit steel-blue (#4) — cool band high' },
+  // Rose-gray field — the WARM desaturated counterweight, a narrow warm note near the highlight cap
+  // (the warm half of the split). Brightened to #DDCBC8 (luma ~0.82) so the ramp stays luminance-
+  // MONOTONIC between the cool-band-high stop (~0.79) and the putty cap (~0.84).
+  { pos: 0.92, hex: 0xddcbc8, label: 'rose-gray field (#5)' },
+  // Paper putty — the warm "white" substitute / gouache highlight cap. Sits just under the very top.
+  { pos: 0.96, hex: 0xd9d6ce, label: 'paper putty highlight (#1)' },
   // Sheen Peak — the COOL blue-violet highlight cap (STYLE_SPEC §2 #10: "Helmet-shine core tints
   // here"). Placed at the very top so ONLY the brightest hero pixels — the helmet sheen crest and
   // the sun's achromatic-to-cool core (§5) — resolve COOL rather than being warmed into putty by

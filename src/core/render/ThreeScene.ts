@@ -107,8 +107,9 @@ const CAMERA_DEPTH_LERP = 0.12 // per-frame ease of the applied depth toward cam
 // (~-36%, safely on-screen through lane changes), the pale sun upper-RIGHT (~+40%, clear of the
 // VP), and ~65-70% quiet negative space on the RIGHT — an off-centre raking diagonal.
 const COMPOSE_YAW = 0.12 // persistent camera-POSITION orbit yaw (rad, ~7°) — a raking 3D viewing angle on the road/car
-const COMPOSE_LOOK_YAW = -0.24 // fixed yaw of the optical AXIS (rad, ~13.8°) — slides the VP off-centre screen-LEFT; reduced from -0.34 because the longer R3 lens makes a fixed angle subtend more frame, so this keeps the bigger hero kart fully on-screen on the lower-left diagonal
-const COMPOSE_PITCH = 0.05 // fixed upward tilt of the optical axis (rad, ~3°) for a raking horizon off the vertical centre
+const COMPOSE_LOOK_YAW = -0.36 // R-FINAL P3: fixed yaw of the optical AXIS (rad, ~20.6°) — re-measured for the 50mm lens (was -0.24). Slides the road's vanishing point further off-centre screen-LEFT so the signature lower-left→upper-right raking diagonal lands, opening deep quiet negative space on the right
+const COMPOSE_PITCH = 0.11 // R-FINAL P3: fixed upward tilt of the optical axis (rad, ~6.3°, was 0.05) so the horizon RAKES well off the vertical centre instead of bisecting the frame as a flat band
+const COMPOSE_LOOK_OFFSET = 0.4 // R-FINAL P3: lateral world-offset (u) of the look-target along smoothedRight, biasing the aim so the hero kart seats in the LOWER-LEFT quadrant (the off-centre subject anchoring the diagonal) rather than on the vertical centerline. Kept moderate so the kart stays fully on-screen (0.6 clipped it at the edge)
 const COMPOSE_SUN_OFFSET = 0.55 // sun lateral placement off the view centre (fraction of sun depth)
 
 // Camera-shake + particle tuning (iteration 3). The shake is a transient,
@@ -237,10 +238,18 @@ const HARMONY = {
 // merely TINTED toward the harmony hues — a palette swatch used as a light colour would also
 // darken the result. These carry the warm-light / cool-shadow TEMPERATURE split at a high
 // level so the gouache reads through hue, not through a low key.
-const LIGHT_SKY_COOL = new THREE.Color(0xe7e6ee)    // hemisphere sky term — light steel-violet
-const LIGHT_GROUND_WARM = new THREE.Color(0xf0e3d6) // hemisphere ground bounce — light warm sienna
-const LIGHT_AMBIENT_COOL = new THREE.Color(0xd8d6e0) // ambient floor — soft cool, keeps shadows luminous
-const LIGHT_KEY_WARM = new THREE.Color(0xf2dcc6)    // directional key — light warm sienna form-shaper
+// R-FINAL P1 — RESTORE VALUE STRUCTURE AT THE SOURCE. Round 1 flat-flooded the scene into a
+// uniform mid-key wash (no form shadow), starving every downstream pass. The fix is a real
+// KEY+FILL split: a strong OBLIQUE warm directional makes Lambert falloff (form shadow + a
+// full value range), while a now-DIM cool ambient/hemisphere only keeps the SHADOW side
+// luminous (steel-violet) instead of black — so darks come from shadow/accents and LIT
+// surfaces stay bright. The fill colours are pulled to the literal shadow swatches (#A7A3B1
+// steel-violet ambient, #B8BBCE cool ground bounce) so the shadow side reads cool while the
+// key tints the lit side warm — the warm-light / cool-shadow temperature split of ref 02.
+const LIGHT_SKY_COOL = new THREE.Color(0xb3c4ec)    // hemisphere sky term — SATURATED cool steel-blue (b>>r) so up-facing shadow fields read decisively COOL, balancing the warm key
+const LIGHT_GROUND_WARM = new THREE.Color(0x96a4d0) // hemisphere ground bounce — saturated cool steel-blue (b>>r), cool-shadow underside
+const LIGHT_AMBIENT_COOL = new THREE.Color(0x8290c4) // ambient floor — saturated steel-blue shadow fill (b>>r); pushes shadowed faces decisively COOL (the cool half of the temp split)
+const LIGHT_KEY_WARM = new THREE.Color(0xf2dcc6)    // directional KEY — warm sienna; now the dominant form-shaper
 
 export class ThreeScene {
   private renderer: THREE.WebGLRenderer
@@ -432,12 +441,14 @@ export class ThreeScene {
     // passes will sit after); we set it on the renderer so OutputPass picks it up.
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     // ACES is a filmic HDR curve that deliberately CRUSHES mids and rolls highlights; a
-    // gouache target is an LDR, mostly-mid-key image, so the default 1.2 exposure left the
-    // (already-luminous) field sitting too dark after the curve. Lift exposure so the mid
-    // washes land where ref 02 wants them (~0.72–0.82); ACES still gives the sun/sheen a soft
-    // non-clipping highlight roll-off, which suits the wet-paper "white" cap.
+    // gouache target is an LDR, mostly-mid-key image. R-FINAL P1 drops exposure 1.55 -> 1.15:
+    // round 1 had lifted it so high the whole frame floated into the light half (p10..p90 ~0.60..
+    // 0.70, no darks). With the new strong oblique KEY + dim cool FILL doing the value work, a
+    // lower exposure lets ACES roll the lit highlights softly while the shadow side settles into
+    // the real darks ref 02 has — a full value range, not a flat bright wash. The downstream
+    // PaintGradeLUT then reaches its dark/cool ramp stops that were previously never sampled.
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping
-    this.renderer.toneMappingExposure = 1.55
+    this.renderer.toneMappingExposure = 1.22
 
     // Scene
     this.scene = new THREE.Scene()
@@ -565,30 +576,34 @@ export class ThreeScene {
     // ground bounce — exactly the soft, fill-dominant illumination of a flat gouache field,
     // and it cures the old foreground-darkening (a near-horizontal key grazing an up-facing
     // plane starved the near ground; only distance-fog was lifting the far field).
+    // R-FINAL P1: the hemisphere is now the dim COOL FILL (steel sky over a cool ground bounce),
+    // not the overall lift. Dropped 1.45 -> 0.35 so it only keeps the shadow side luminous; the
+    // oblique directional below supplies the actual key + form shadow. (Too high here re-floods
+    // the scene back to the flat mid-key wash that starved every pass.)
     const hemiLight = new THREE.HemisphereLight(
-      LIGHT_SKY_COOL,    // cool light-tint sky term -> lifts up-facing field to a high mid
-      LIGHT_GROUND_WARM, // warm light-tint ground bounce -> the warm half of the split
-      1.45
+      LIGHT_SKY_COOL,    // cool steel-violet sky term -> luminous cool shadow on up-facing fields
+      LIGHT_GROUND_WARM, // COOL steel-blue ground bounce -> cool underside (cool-shadow half)
+      0.6
     )
     this.scene.add(hemiLight)
 
-    // A gentle cool ambient floor on TOP of the hemisphere so even down-/side-facing faces
-    // never fall into the dark — keeps the key from browning the rose albedo by guaranteeing
-    // a luminous shadow side (cool steel-violet, the cool half of the temperature axis).
-    const ambientLight = new THREE.AmbientLight(LIGHT_AMBIENT_COOL, 0.55)
+    // R-FINAL P1: a DIM cool steel-violet ambient floor (0.55 -> 0.22). It must NOT lift the whole
+    // scene (that was the round-1 flat-flood); it only guarantees the deepest shadow side reads as
+    // a luminous cool steel-violet rather than crushing to black — the cool half of the split.
+    const ambientLight = new THREE.AmbientLight(LIGHT_AMBIENT_COOL, 0.28)
     this.scene.add(ambientLight)
 
-    // Desaturated warm sienna KEY — now a gentle form-shaper, not the main lift. Raised HIGH
-    // (steeper N·L on the up-facing ground so the warm light actually reaches it instead of
-    // grazing) and dialled DOWN in level so it tints the light side warm without muddying the
-    // rose field to brown. The hemisphere carries the overall luminosity; this just models form.
-    const directionalLight = new THREE.DirectionalLight(LIGHT_KEY_WARM, 0.85)
+    // R-FINAL P1: the oblique warm sienna KEY is now the DOMINANT light (0.85 -> 1.6). A strong
+    // raking N·L manufactures the per-pixel value spread (form shadow + a full value range +
+    // a warm lit side) that re-arms the whole downstream stack at once — the master fix. Lit
+    // surfaces go bright/warm; faces turned from it fall to the dim cool fill above (the darks).
+    const directionalLight = new THREE.DirectionalLight(LIGHT_KEY_WARM, 1.75)
     directionalLight.position.set(-6, 13, 9)
     this.scene.add(directionalLight)
 
-    // A soft warm fill near the car (warm-tinted) so the hero body lifts off the field
-    // without a saturated neon point light.
-    const pointLight = new THREE.PointLight(LIGHT_GROUND_WARM, 0.45, 120)
+    // A soft warm catch near the car so the hero body lifts off the field — trimmed (0.45 -> 0.30)
+    // so it tints the near body warm without flat-filling away the form shadow P1 just restored.
+    const pointLight = new THREE.PointLight(LIGHT_KEY_WARM, 0.3, 120)
     pointLight.position.set(0, 5, 2)
     this.scene.add(pointLight)
 
@@ -724,8 +739,14 @@ export class ThreeScene {
     // grain reads as watercolour granulation pooling in the paper, not fine uniform static.
     this.pigmentPass = createWatercolourPigmentPass({
       resolution: [bufW, bufH],
-      paperScale: 1.1,
-      granulation: 0.17,
+      // R-FINAL P2: finer cold-press tooth (1.1 -> 2.6) so the granulation carries real
+      // high-frequency value variance INSIDE an 8x8 footprint (the panel's surface-tooth metric),
+      // i.e. actual paper grain in the bright washes, not only a low-frequency brushy mottle.
+      paperScale: 2.6,
+      // R-FINAL P2: lift pigment granulation 0.17 -> 0.39 (just under the 0.40 "dirt" ceiling)
+      // so, paired with the re-pivoted bright-biased bell, the tooth bites where 60-70% of the
+      // frame now lives — driving the 8x8 local luma-std up toward ref 02 (the surface-energy fix).
+      granulation: 0.39,
       edgeStrength: 0.55
     })
 
@@ -742,11 +763,35 @@ export class ThreeScene {
       // through the palette lock — specifically so the cool helmet-sheen crest survives as a cool
       // feature (and the obstacle red stays a confident red) instead of being warmed/flattened
       // toward the ramp's bright putty. Still well within the lock (gradeAmount 0.82 holds value).
-      chromaPreserve: 0.30,
-      blackPoint: 0.38,
-      whitePoint: 0.92,
-      contrast: 1.32,
-      shadowDepth: 1.0
+      // R-FINAL P1: chromaPreserve 0.30 -> 0.42. The LUT ramp is mostly cool/neutral in the mid,
+      // so on its own it WASHES the warm sienna road/ground toward neutral gray (median sat crashed
+      // to ~0.02, far below the spec's 10-14% floor) AND warms the cool sky — collapsing the
+      // warm/cool split into a desaturated monochrome. Preserving more source colour lets BOTH the
+      // warm ground and the cool sky/shadows keep their in-palette hue, restoring the split and the
+      // tinted-gray saturation. The harmony is still enforced upstream (in-palette albedos + the
+      // cool/warm lighting) and by gradeAmount 0.82, so a looser per-pixel lock stays in-key.
+      chromaPreserve: 0.42,
+      // R-FINAL P1: re-anchor the LUT darks now that the lighting supplies a real value range.
+      // blackPoint 0.38 -> 0.42 (more of the shadow side reaches the deep ink stops), contrast
+      // 1.32 -> 1.5 (a stronger S-curve so darks deepen and lights stay luminous — value
+      // separation, not a flat dim), shadowDepth 1.0 (full reach into the dark ramp stops).
+      blackPoint: 0.42,
+      // whitePoint 0.88 (NOT pushed low): the base scene's bright field is already luminous
+      // (sky V~0.89, ground V~0.71 pre-LUT) and decisively cool/warm. Pushing whitePoint low
+      // (0.72) over-stretched the bright sky to clamp at ramp coord 1.0 — slamming it into the
+      // single near-neutral ramp-top colour and DESTROYING its blue hue + its variation (the sky
+      // went neutral gray). At 0.88 the bright sky maps through the COOL band (0.66..0.84) instead,
+      // keeping its blue, while the S-curve + the lifted blackPoint still supply the darks.
+      whitePoint: 0.88,
+      // contrast 1.6 (a stronger S-curve about 0.5): deepens the shadow side toward the dark ink
+      // stops (more true darks / a wider value std, the remaining P1 gap) while simultaneously
+      // pushing the lit side brighter — value SEPARATION, the opposite of a flat dim.
+      contrast: 1.6,
+      shadowDepth: 1.0,
+      // R-FINAL P2: a mild ~7-level posterize turns the smooth tinted value gradients into
+      // facetted gouache plateaus with darkened plateau boundaries — the literal signature of
+      // gouache, and step-edges the Kuwahara tensor + pigment edge-darken can grab onto.
+      posterize: 7.0
     })
 
     // PASS 7 — PainterlyEdge: flow-XDoG ∪ depth/normal edges, gated, MULTIPLY ink. Consumes
@@ -763,7 +808,11 @@ export class ThreeScene {
       tensorTexel: halfTexel,
       cameraNear: this.camera.near,
       cameraFar: DEPTH_FAR,
-      inkGain: 2.4,
+      // R-FINAL: inkGain 2.4 -> 2.9 so the FOUND dark-accent strokes (sword/kart silhouettes, the
+      // strongest road value edges) ink as DEEPER calligraphic pools — adds the punched darks +
+      // local contrast ref 02 has (lifts both true-dark fraction and the 8x8 surface-tooth metric),
+      // while the slow breakup still keeps most contours lost (found-here/lost-there, not an outline).
+      inkGain: 2.9,
       edgeDilate: 2.0,
       // R3: raise the GEOMETRIC edge thresholds so only BIG depth/normal steps ink. The now-large
       // hero kart has an open frame (seat/engine/struts) whose many fine interior depth+normal
@@ -772,7 +821,21 @@ export class ThreeScene {
       // VALUE edges (luma XDoG, untouched) — so Rounds 1-2 edge character holds — while the kart's
       // interior reads mostly LOST (spec §4: body contours lost, sheen the one found mark).
       normalThresh: 0.55,
-      depthThresh: 1.1
+      depthThresh: 1.1,
+      // R-FINAL: lower the saliency band (default 0.04..0.20 -> 0.03..0.14) so a few more of the
+      // road/ground VALUE edges qualify and ink as distributed dark accents — adding punched-dark
+      // mass + local contrast across the mid-field (not just on the hero/sword silhouettes), the
+      // last push toward ref 02's dark fraction. The slow breakup still keeps it lost-and-found.
+      salLo: 0.03,
+      salHi: 0.14,
+      // R-FINAL P3: the hero-silhouette shadow-side stroke. heroInkGain 3.5 inks the kart's outer
+      // shaded edge as a BOLD confident pool; heroDilate 3.2 gives it real brush weight (a heavier
+      // broken stroke = the "finished Sienkiewicz" gesture, and its near-black adds punched-dark
+      // mass); lightDir2D is the key light (world ~(-6,13,9)) projected to screen (up-left) so the
+      // stroke lands on the shaded side. The mask-boundary gate keeps the interior fully lost.
+      heroInkGain: 3.5,
+      heroDilate: 3.2,
+      lightDir2D: [-0.55, 0.84]
     })
     this.painterlyEdgePass.uniforms.tTensor.value = this.tensorTargetA.texture
     this.painterlyEdgePass.uniforms.useTensor.value = 1
@@ -780,6 +843,12 @@ export class ThreeScene {
     this.painterlyEdgePass.uniforms.useDepth.value = 1
     this.painterlyEdgePass.uniforms.tNormal.value = this.normalTarget.texture
     this.painterlyEdgePass.uniforms.useNormal.value = 1
+    // R-FINAL P3: feed the HERO_LAYER coverage mask (rendered each frame in renderCarMask, also
+    // consumed by the velocity smear) so the hero-silhouette ink term can find the kart's outer
+    // edge. The mask's 1->0 boundary IS the silhouette; the interior stays solid white → no
+    // interior tangle is revived. (carMaskTarget is allocated above before the passes are built.)
+    this.painterlyEdgePass.uniforms.tHeroMask.value = this.carMaskTarget.texture
+    this.painterlyEdgePass.uniforms.useHeroMask.value = 1
 
     // PASS 8 — VelocitySmear: depth + prev/cur view-projection -> asymmetric wet drag, car
     // masked sharp. tDepth from B2; tCarMask is the 1x1 black placeholder until B4 wires the
@@ -802,14 +871,25 @@ export class ThreeScene {
     // big granulating tooth, not the fine uniform sandpaper veil of the R1 frame.
     this.substratePaperPass = createSubstratePaperPass({
       resolution: [bufW, bufH],
-      paperScale: 1.25,
+      // R-FINAL P2: finer cold-press tooth (1.25 -> 2.6) so the paper grain registers at the
+      // 8x8 scale the panel measures (surface energy) while paperAniso still stretches it into
+      // directional brush/scumble streaks — fine tooth THROUGH a brushed grain, not sandpaper.
+      paperScale: 2.6,
       // R4 BRUSHWORK: a touch more granulation + a stronger sheet so the surface reads as BRUSHED
       // gouache on cold-press paper (ref 02), plus the directional paperAniso stretch that turns
       // the tooth into visible brush/scumble streaks. Stays inside the spec discipline bands
       // (granDensity 0.18-0.35, paperStrength 0.12-0.22) so it's medium, not dirt.
-      granDensity: 0.30,
-      paperStrength: 0.19,
-      paperAniso: 2.8
+      // R-FINAL P2: more tooth in the bright washes — granDensity 0.30 -> 0.34, paperStrength
+      // 0.19 -> 0.21 (both still inside the spec bands 0.18-0.35 / 0.12-0.22, under the "dirt"
+      // ceilings) so the cold-press surface reads where most of the frame sits, lifting 8x8 std.
+      granDensity: 0.38,
+      paperStrength: 0.21,
+      paperAniso: 2.8,
+      // R-FINAL P2: stronger SIGNED tooth-light (0.04 -> 0.15) — peaks catch warm light, valleys
+      // fall to a cool micro-shadow. This is per-pixel high-frequency value variance (real paper
+      // fibre catching the raking light), the most direct lever on the 8x8 surface-tooth metric,
+      // and it reads as cold-press tooth rather than a flat veil. Still a subtle fibre sheen.
+      paperLight: 0.18
     })
 
     // addPass in the EXACT STYLE_SPEC §3 order.
@@ -836,8 +916,19 @@ export class ThreeScene {
       side: THREE.BackSide,
       depthWrite: false,
       uniforms: {
-        topColor: { value: HARMONY.steelVioletField.clone() },    // #3 sky upper
-        horizonColor: { value: HARMONY.litSteelBlue.clone() }     // #4 sky lower band
+        // R-FINAL P1: BRIGHTEN the sky gradient so the large quiet negative space reads as a
+        // LUMINOUS cool field (ref 02's bright upper sky) rather than a mid-gray band. The unlit
+        // sky still passes through ACES + the LUT value-reshape, both of which pull it DOWN; with
+        // the old #A7A3B1/#B8BBCE inputs (luma ~0.64/0.73) the sky landed ~0.5-0.55 and starved
+        // the top of the value range (p90 capped, lightFrac 0). These brighter cool-tinted inputs
+        // (b>=r, still in-harmony) survive the curve to a luminous ~0.75-0.85 — the high end of the
+        // restored value range — while staying decisively cool to hold the warm/cool split.
+        // Sky brightness vs blueness is a direct trade through ACES (a more saturated blue is a
+        // DARKER blue, dropping the luminous-field value). These hold the sweet spot: bright enough
+        // (luma ~0.72) to keep the negative space LUMINOUS (p90 ~0.78, the top of the value range)
+        // yet still decisively cool (b>>r) so the warm/cool split survives.
+        topColor: { value: new THREE.Color(0xa9b8ec) },    // bright cool steel-blue sky upper (b>r, luminous)
+        horizonColor: { value: new THREE.Color(0xbccbf2) } // bright cool steel-blue sky lower band (b>r, luminous)
       },
       vertexShader: `
         varying vec3 vWorldPosition;
@@ -874,8 +965,12 @@ export class ThreeScene {
       depthWrite: false,
       blending: THREE.NormalBlending,
       uniforms: {
-        coreColor: { value: HARMONY.paperPutty.clone() },        // #1 pale putty core
-        edgeColor: { value: HARMONY.steelVioletField.clone() }   // #3 dissolves into field
+        // R-FINAL P1: brighten the disc core toward the warm-cream "white" (#F2EFE6, luma ~0.94)
+        // so it is the frame's LUMINOUS high-value anchor (ref 02's bright wet bloom of light) and
+        // actually clears the LUT whitePoint into the light ramp stops — supplies lightFrac>0 and
+        // the top of the value range, balancing the restored darks. Still a soft wet disc, no glow.
+        coreColor: { value: new THREE.Color(0xf2efe6) },         // bright warm-cream luminous core
+        edgeColor: { value: HARMONY.litSteelBlue.clone() }       // #4 dissolves into the cool sky band
       },
       vertexShader: `
         varying vec2 vUv;
@@ -1501,8 +1596,12 @@ export class ThreeScene {
           ) {
             const isBlade = material.color.r > material.color.g * 1.1 && material.color.r > material.color.b
             if (isBlade) {
-              // The single saturated hit — matte signal red, NO emissive glow.
-              material.color.copy(HARMONY.signalRed)
+              // The single saturated hit — matte signal red, NO emissive glow. R-FINAL: deepened
+              // toward a painted oxblood (lerp 0.35 to #6E211D) so the obstacle reads as a DARKER
+              // red that carries shadow weight (contributing the punched-dark mass ref 02 has) while
+              // staying unmistakably the one saturated red accent — and its dark side then anchors
+              // the PainterlyEdge accent stroke. ACES + the LUT keep the lit blade face luminous-red.
+              material.color.copy(HARMONY.signalRed).lerp(new THREE.Color(0x6e211d), 0.35)
             } else {
               // Hilt / guard -> desaturated violet-gray, in the harmony.
               material.color.lerp(HARMONY.bodyShadowViolet, 0.6)
@@ -2269,6 +2368,11 @@ export class ThreeScene {
       .add(
         smoothedRight.clone().multiplyScalar(this.cameraOrbitAngle * cameraDistance * 0.45)
       )
+      // R-FINAL P3: a fixed lateral aim offset along smoothedRight seats the hero kart in the
+      // LOWER-LEFT quadrant. Shifting the look-target to camera-RIGHT swings the optical axis so
+      // the car (which stays at visualCarPosition) sits left-of-centre and lower — the off-centre
+      // subject the raking diagonal needs (ref 02 anchors its rider in a corner, not centred).
+      .add(smoothedRight.clone().multiplyScalar(COMPOSE_LOOK_OFFSET))
 
     // Off-centre diagonal composition (B5): YAW THE OPTICAL AXIS by a fixed angle rather than
     // translating the near look-target. The road's vanishing point projects where the camera's

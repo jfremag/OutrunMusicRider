@@ -111,6 +111,9 @@ export function createPainterlyEdgePass(opts: {
   strength?: number
   inkGain?: number
   edgeDilate?: number
+  heroInkGain?: number
+  heroDilate?: number
+  lightDir2D?: [number, number]
 } = {}): ShaderPass {
   const [rx, ry] = opts.resolution ?? [1920, 1080]
   const [tx, ty] = opts.texel ?? [1 / rx, 1 / ry]
@@ -177,6 +180,28 @@ export function createPainterlyEdgePass(opts: {
       uInkGain: { value: opts.inkGain ?? 2.2 },
       // Edge dilation radius (px) — fattens the 1px detector scribble into a brush-width stroke.
       uEdgeDilate: { value: opts.edgeDilate ?? 2.0 },
+
+      // --- R-FINAL P3: HERO-SILHOUETTE shadow-side ink -----------------------------------------
+      // The hero kart reads "unfinished" because its silhouette is 100% lost (the round-3
+      // normalThresh 0.55 / depthThresh 1.1 suppressed its busy interior, but that also killed
+      // its OUTER edge). This adds ONE confident broken calligraphic stroke on the kart's outer
+      // edge, biased to its SHADED side — the "finished Sienkiewicz" cue — WITHOUT reviving the
+      // interior tangle, by gating the term to the HERO_LAYER coverage mask's BOUNDARY only.
+      //   tHeroMask     the HERO_LAYER coverage mask (white over kart/swords) — same target the
+      //                 velocity smear consumes; its 1->0 boundary IS the hero silhouette.
+      //   useHeroMask   0 until ThreeScene wires the real mask (safe: term is skipped).
+      //   uHeroInkGain  how hard the silhouette inks (~3.0 — a deep confident pool, sparser than
+      //                 the global ink so it reads as the one found hero gesture).
+      //   uHeroDilate   dilation (px) of the mask-edge detector — a brush-width hero stroke (~2.6).
+      //   uLightDir2D   the key light projected to 2D screen space; the term inks where the local
+      //                 luma gradient faces AWAY from it (the shadow side), so the stroke lands on
+      //                 the kart's shaded edge like a painter's accent, not all the way round.
+      tHeroMask: { value: null },
+      useHeroMask: { value: 0 },
+      uHeroInkGain: { value: opts.heroInkGain ?? 3.0 },
+      uHeroDilate: { value: opts.heroDilate ?? 2.6 },
+      uLightDir2D: { value: new THREE.Vector2(...(opts.lightDir2D ?? [-0.55, 0.84])) },
+
       uTime: { value: 0 },
       uMusic: { value: 0 }
     },
@@ -231,6 +256,11 @@ export function createPainterlyEdgePass(opts: {
       uniform float uDebug;
       uniform float uInkGain;
       uniform float uEdgeDilate;
+      uniform sampler2D tHeroMask;
+      uniform float useHeroMask;
+      uniform float uHeroInkGain;
+      uniform float uHeroDilate;
+      uniform vec2  uLightDir2D;
       uniform float uTime;
       uniform float uMusic;
 
@@ -400,6 +430,28 @@ export function createPainterlyEdgePass(opts: {
         return clamp((div - normalThresh) / max(1.0 - normalThresh, EPS), 0.0, 1.0);
       }
 
+      // -- R-FINAL P3: hero-silhouette edge from the HERO_LAYER coverage mask --------------------
+      // The mask is white (1) over the kart and 0 elsewhere; its BOUNDARY is the hero silhouette.
+      // A small Sobel-ish gradient magnitude of the mask peaks exactly on that boundary and is ~0
+      // both inside the solid kart (no interior tangle) and out in the empty field. Sampling a few
+      // px out (uHeroDilate) gives a brush-width band hugging the outer edge.
+      float heroMaskAt(vec2 uv) {
+        return texture2D(tHeroMask, uv).r;
+      }
+      // Gradient of the mask (central differences at uHeroDilate spacing) → silhouette band + the
+      // 2D direction pointing from the kart OUTWARD across the edge (mask decreasing).
+      vec3 heroSilhouette(vec2 uv) {
+        vec2 d = texel * uHeroDilate;
+        float l = heroMaskAt(uv - vec2(d.x, 0.0));
+        float r = heroMaskAt(uv + vec2(d.x, 0.0));
+        float dn = heroMaskAt(uv - vec2(0.0, d.y));
+        float up = heroMaskAt(uv + vec2(0.0, d.y));
+        vec2 g = vec2(r - l, up - dn);          // points toward INCREASING mask (into the kart)
+        float band = clamp(length(g), 0.0, 1.0); // peaks on the silhouette boundary
+        // Outward normal of the silhouette (kart -> background) is -g.
+        return vec3(band, -g);
+      }
+
       // -- Combined candidate edge (luma XDoG ∪ near-foreground depth/normal) at one UV ------
       // Factored out so the candidate can be DILATED (a few offset samples, max-combined) into
       // a brush-WIDTH stroke. The raw XDoG/geo edges are 1px scribbles; ref 02's accent strokes
@@ -509,6 +561,30 @@ export function createPainterlyEdgePass(opts: {
         // depthFade only attenuate. This knocks the candidates down to a sparse, confident set.
         float gate = saliency * breakup * cohGate * depthFade;
         float e = clamp(candidate * gate * uStrength * uInkGain, 0.0, 1.0);
+
+        // --- R-FINAL P3: HERO-SILHOUETTE shadow-side found stroke ------------------------------
+        // Add ONE confident calligraphic accent on the kart's OUTER edge, biased to its SHADED
+        // side, gated to the mask boundary so the interior stays lost. This is the single "found"
+        // hero gesture that makes the kart read finished (its silhouette was 100% lost before).
+        if (useHeroMask > 0.5) {
+          vec3 sil = heroSilhouette(vUv);            // .x = boundary band, .yz = outward normal
+          float band = sil.x;
+          vec2 outN = sil.yz;
+          // SHADOW-SIDE bias: the stroke lands where the silhouette's outward normal faces AWAY
+          // from the key light (dot < 0 → shaded side). clamp(0.5 - dot,0,1) peaks there and
+          // fades on the lit side, so the kart inks heavily on its shadow edge and lightly (or
+          // not at all) on the lit edge — a painter's accent, never an even outline.
+          float shadowSide = clamp(0.5 - dot(normalize(outN + 1e-5), normalize(uLightDir2D)), 0.0, 1.0);
+          // Reuse the same slow breakup field so even the hero stroke is FOUND-here/LOST-there
+          // (a broken brush line), not a continuous toon outline. A higher floor (0.45) keeps the
+          // hero stroke more present than the global ink (it is THE focal gesture) while still
+          // breaking. Multiply by the band so it only lives on the silhouette.
+          float heroBreak = mix(0.45, 1.0, breakup);
+          float heroE = clamp(band * shadowSide * heroBreak * uStrength * uHeroInkGain, 0.0, 1.0);
+          // Union with the global edge — the hero stroke is additive presence, taking the stronger
+          // of the two so a found global edge on the kart isn't weakened.
+          e = max(e, heroE);
+        }
 
         // --- DEV DIAGNOSTIC: visualise the edge fields as white-on-black ------------------
         if (uDebug > 0.5) {

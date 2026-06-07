@@ -239,18 +239,22 @@ export function createSubstratePaperPass(opts: {
         // tooth (real watercolour granulation) rather than a uniform fine veil over everything.
         float settle = clamp(0.5 - hSigned, 0.0, 1.0); // 0 at peaks, ->1 in deep valleys
         settle = pow(settle, 1.8);                      // pool in the deep valleys, clear the peaks
-        // Luma BELL gate: bite in the mid washes, fade in paper-white & darks. NARROWED and
-        // pivoted a touch DOWN (peak ~0.40, width ~0.20) so the luminous negative space / bright
-        // sky stays CLEAN (ref 02's quiet field is ungranulated) and the granulation concentrates
-        // in the mid-value washes (ground, road, forms) where watercolour granulation lives.
+        // R-FINAL P2: RE-PIVOT the luma bell to peak ~0.62 / width 0.30 (was 0.40/0.20). With P1's
+        // restored value range the bulk of the frame now sits in the bright washes (~0.6-0.8); the
+        // tooth must BITE there (ref 02's bright sky carries visible cold-press tooth) instead of
+        // in a thin mid band that no longer holds much of the picture. Widened so the tooth reads
+        // across the bright field continuously. Matched to the WatercolourPigment bell.
         float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
-        float bell = exp(-pow((luma - 0.40) / 0.20, 2.0));
+        float bell = exp(-pow((luma - 0.58) / 0.24, 2.0));
         float gran = granDensity * settle * bell;
         // Subtractive: darken toward the local value (pigment drying denser).
         col *= (1.0 - gran);
         // Desaturating: pull the granulated patch slightly toward its own luma (pigment
-        // settling kills a little chroma in the valley — value noise, hue ~unchanged).
-        col = mix(col, vec3(luma), gran * 0.5);
+        // settling kills a little chroma in the valley — value noise, hue ~unchanged). R-FINAL P2
+        // softens this (0.5 -> 0.25): at the higher granDensity the 0.5 factor was washing the
+        // whole frame toward neutral gray (median sat crashed below the spec's 10-14% floor); the
+        // tooth must be a VALUE noise, keeping the field's tint (spec §8 "granulate VALUE not hue").
+        col = mix(col, vec3(luma), gran * 0.25);
 
         // --- (2) TOOTH LIGHTING: faint SIGNED raking light from the height gradient -----
         // Slopes facing the light (rake > 0) catch a WARM micro-highlight and brighten;

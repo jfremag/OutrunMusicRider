@@ -225,10 +225,14 @@ export function createWatercolourPigmentPass(opts: {
         // at ~0.45 so the tooth bites in the mid washes and fades out in paper-white and in
         // the dense darks (a Gaussian bell on luma, width ~0.30).
         float h = paperHeight(uv);
-        // Narrowed luma bell (peak ~0.40, width ~0.20) so granulation bites in the MID washes
-        // and clears the luminous negative space — matches the SubstratePaper gate so the two
-        // tooth layers agree and the bright field stays clean (not a uniform fine veil).
-        float bell = exp(-pow((lum - 0.40) / 0.20, 2.0));
+        // R-FINAL P2: RE-PIVOT the luma bell from peak 0.40 to 0.62 / width 0.30. After P1
+        // restored the value range, 60-70% of the frame now lives in the BRIGHT washes (~0.6-0.8)
+        // — but the old bell peaked at 0.40, below where the picture sits, so the tooth never
+        // bit where most pixels are (ref 02's bright sky is alive with tooth; ours was dead-
+        // smooth). Pivoting to the new median (~0.62) and widening to 0.30 makes the granulation
+        // bite across the bright AND mid fields. Matched to the SubstratePaper bell so the two
+        // tooth layers agree.
+        float bell = exp(-pow((lum - 0.58) / 0.24, 2.0));
         // Sharpen the valley response (1-h)^1.6 so pigment POOLS in the deep tooth rather than
         // veiling evenly — reads as watercolour granulation, not sandpaper static.
         float valley = pow(clamp(1.0 - h, 0.0, 1.0), 1.6);

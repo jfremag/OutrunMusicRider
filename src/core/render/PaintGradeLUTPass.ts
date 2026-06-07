@@ -146,9 +146,14 @@ export function createPaintGradeLUTPass(opts: {
         // row centre (v = 0.5). NO in-shader pow — ramp + src share display space.
         vec3 graded = texture2D(tGradient, vec2(coord, 0.5)).rgb;
 
-        // Keep a sliver of the source's local hue so the hero/accents stay colour,
-        // not dead gray; then blend the whole thing toward the locked grade.
-        vec3 col = graded * (1.0 - uChromaPreserve) + src * uChromaPreserve;
+        // Keep a sliver of the source's local hue so the hero/accents stay colour, not dead gray;
+        // then blend the whole thing toward the locked grade. R-FINAL: chroma-preserve is now
+        // VALUE-AWARE — it fades toward 0 in the DARKEST coords so deep shadows lock onto the ramp's
+        // tinted near-black ink stops (real punched darks) instead of being lifted back toward mid-
+        // gray by their own source colour, while the mids/lights keep the full preserve that holds
+        // the warm/cool split + the tinted-gray saturation. Ramps in over coord 0..0.35.
+        float chromaPreserve = uChromaPreserve * smoothstep(0.05, 0.35, coord);
+        vec3 col = graded * (1.0 - chromaPreserve) + src * chromaPreserve;
         col = mix(src, col, uGradeAmount);
 
         // Optional tiny hue rotation toward rose (music drives this on drops).
@@ -159,10 +164,16 @@ export function createPaintGradeLUTPass(opts: {
           col = hsv2rgb(hsv);
         }
 
-        // Optional soft posterize for gouache value plateaus. The uniform doubles
-        // as enable flag (>0.5) and as the level count, matching the spec snippet.
+        // Optional soft posterize for gouache value plateaus. The uniform doubles as enable flag
+        // (>0.5) and as the level count. R-FINAL: quantise the VALUE, not each channel — a plain
+        // per-channel floor() on these LOW-saturation tinted grays rounds the three channels to the
+        // same level and COLLAPSES the tint to neutral (the cool blue sky went dead gray). Gouache
+        // plateaus are VALUE steps anyway, so we quantise luma and rescale the colour to the
+        // stepped luma, preserving hue+saturation while still faceting the washes into plateaus.
         if (uPosterize > 0.5) {
-          col = floor(col * uPosterize) / uPosterize;
+          float pl = dot(col, vec3(0.2126, 0.7152, 0.0722));
+          float ql = (floor(pl * uPosterize) + 0.5) / uPosterize; // step centres
+          col *= ql / max(pl, 1e-3);
         }
 
         // TPDF (triangular) dither: two summed hashes in [0,1) -> noise in [-1,1),
