@@ -53,6 +53,9 @@ export function createAnisotropicKuwaharaPass(opts: {
   radius?: number
   sharpness?: number
   eccentricityClamp?: number
+  anisoGain?: number
+  anisoExp?: number
+  strokeBias?: number
   texel?: [number, number]
   tensorTexel?: [number, number]
 } = {}): ShaderPass {
@@ -68,7 +71,17 @@ export function createAnisotropicKuwaharaPass(opts: {
       // Painterly controls (spec PASS 4 defaults).
       radius: { value: opts.radius ?? 6.0 },
       sharpness: { value: opts.sharpness ?? 12.0 },
-      eccentricityClamp: { value: opts.eccentricityClamp ?? 0.6 }
+      eccentricityClamp: { value: opts.eccentricityClamp ?? 0.6 },
+      // R4 BRUSHWORK CONVICTION: on this luminous LOW-CONTRAST scene the Sobel gradients (and
+      // thus the tensor anisotropy A) are tiny everywhere, so the ellipse stayed near-circular
+      // and Kuwahara "mostly just smoothed". anisoExp (<1) LIFTS small A and anisoGain amplifies
+      // it, so even gentle value gradients elongate the kernel into a directional gouache stroke
+      // — visible BRUSHWORK that bends along contours, not an isotropic blur. strokeBias shapes
+      // the along-stroke weighting so the brush sweeps (uniform along its length) rather than
+      // being damped to a dot by an isotropic radial Gaussian.
+      anisoGain: { value: opts.anisoGain ?? 2.2 },
+      anisoExp: { value: opts.anisoExp ?? 0.5 },
+      strokeBias: { value: opts.strokeBias ?? 0.55 }
     },
     vertexShader: /* glsl */ `
       varying vec2 vUv;
@@ -89,13 +102,16 @@ export function createAnisotropicKuwaharaPass(opts: {
       uniform float radius;      // kernel radius in colour pixels (<= LOOP_R)
       uniform float sharpness;   // q
       uniform float eccentricityClamp; // ecc
+      uniform float anisoGain;   // amplify anisotropy A (R4 brushwork)
+      uniform float anisoExp;    // lift small A via pow(A, anisoExp) (R4 brushwork)
+      uniform float strokeBias;  // along-stroke weighting bias (R4 brushwork)
 
       // ---- Compile-time constants (GLSL ES 1.00: loop bounds must be literals) -------
       // The square neighbourhood scanned each frame is fixed at [-7, 7]; samples that
       // fall outside the (smaller, runtime-sized) ellipse are rejected with continue.
       const int   LOOP_R    = 7;       // matches the radius=6 default with margin
       const int   N_SECTORS = 8;       // 8 angular sectors of the ellipse
-      const float MAX_ECC   = 6.0;     // clamp so strong edges keep a >1px minor axis
+      const float MAX_ECC   = 8.0;     // R4: allow longer strokes (was 6) for brush sweep
       const float PI        = 3.14159265358979;
       const float TWO_PI    = 6.28318530717959;
       const float EPS       = 1e-4;
@@ -114,6 +130,13 @@ export function createAnisotropicKuwaharaPass(opts: {
         float l2 = h - d;           // smaller eigenvalue (along the edge)
         // Anisotropy in [0,1]: 0 = isotropic (flat region), ->1 = strong oriented edge.
         float A = (l1 + l2 > EPS) ? (l1 - l2) / (l1 + l2) : 0.0;
+        // R4 BRUSHWORK: lift + amplify A. On the low-contrast gouache scene raw A is small
+        // (~0.05-0.2) almost everywhere, so the kernel stayed near-circular and only smoothed.
+        // pow(A, anisoExp<1) lifts the small values, anisoGain amplifies, then re-clamp to [0,1].
+        // This gives confident DIRECTIONAL strokes that bend along the gentle contours the scene
+        // does have (road/ground boundaries, shadow gradients, the kart's rounded shading), the
+        // visible brushwork ref 02 shows — without needing the scene to be high-contrast.
+        A = clamp(pow(A, anisoExp) * anisoGain, 0.0, 1.0);
         // Gradient orientation. Ellipse must align its LONG axis to the TANGENT, i.e.
         // perpendicular to the gradient, so strokes run ALONG contours.
         float phi = 0.5 * atan(2.0 * Jxy, Jxx - Jyy);
@@ -150,8 +173,6 @@ export function createAnisotropicKuwaharaPass(opts: {
           wSum[k] = 0.0;
         }
 
-        // Radial Gaussian: 2-sigma reaches the kernel rim (smooth, no hard edge ring).
-        float invSigma2 = 1.0 / max(EPS, 0.25 * radius * radius);
         // Sector half-width control for the smooth polynomial weights. Each sample's
         // angle is folded into 8 overlapping cosine^2 lobes spaced TWO_PI/8 apart so a
         // sample near a boundary contributes (smoothly) to both neighbouring sectors —
@@ -175,9 +196,16 @@ export function createAnisotropicKuwaharaPass(opts: {
             vec2 sampUv = vUv + off * texel;
             vec3 c = texture2D(tDiffuse, sampUv).rgb;
 
-            // Radial Gaussian falloff (in pixel space) — peak at centre, ~0 at the rim.
-            float pr2 = dot(off, off);
-            float wr = exp(-pr2 * invSigma2);
+            // R4 BRUSH-SWEEP falloff (in ELLIPSE space, not isotropic pixel space). The old
+            // weight was a radial Gaussian on raw pixel distance, which damped the elongated tail
+            // back to a dot — so even an elongated kernel read as a smooth, not a stroke. Here the
+            // weight falls off across the edge (ex, the short axis) but stays much FLATTER ALONG
+            // the stroke (ey, the long axis), so the kept samples form a directional sweep of
+            // pigment. strokeBias (0..1) sets how flat the along-stroke profile is: higher = a
+            // longer, more even brush mark. A gentle Gaussian shoulder keeps the rim soft (no ring).
+            float wAcross = exp(-ex * ex * 3.0);
+            float wAlong  = mix(exp(-ey * ey * 3.0), 1.0 - 0.25 * ey * ey, strokeBias);
+            float wr = wAcross * max(wAlong, 0.0);
 
             // Angle of this sample within the ellipse frame, for the sector lobes.
             float ang = atan(ey, ex); // [-PI, PI]

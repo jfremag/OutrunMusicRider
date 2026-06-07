@@ -61,6 +61,7 @@ export function createSubstratePaperPass(opts: {
   resolution?: [number, number]
   paperScale?: number
   paperAngle?: number
+  paperAniso?: number
   paperStrength?: number
   granDensity?: number
   distortAmt?: number
@@ -90,6 +91,11 @@ export function createSubstratePaperPass(opts: {
       resolution: { value: new THREE.Vector2(res[0], res[1]) },
       paperScale: { value: opts.paperScale ?? 2.6 },
       paperAngle: { value: opts.paperAngle ?? 0.297 }, // ~17 degrees
+      // R4 BRUSHWORK: anisotropic stretch of the tooth ALONG the felt-grain angle. 1.0 = round
+      // (isotropic) tooth; >1 stretches the noise into directional brush/scumble streaks so the
+      // flat fields read as BRUSHED gouache (ref 02), not airbrushed. Keeps the paper frame-
+      // anchored (no shower-door) — it's the SAMPLE that's stretched, not scrolled.
+      paperAniso: { value: opts.paperAniso ?? 2.6 },
       paperStrength: { value: opts.paperStrength ?? 0.16 },
       granDensity: { value: opts.granDensity ?? 0.26 },
       distortAmt: { value: opts.distortAmt ?? 0.0015 },
@@ -117,6 +123,7 @@ export function createSubstratePaperPass(opts: {
       uniform vec2  resolution;
       uniform float paperScale;
       uniform float paperAngle;
+      uniform float paperAniso;
       uniform float paperStrength;
       uniform float granDensity;
       uniform float distortAmt;
@@ -183,6 +190,11 @@ export function createSubstratePaperPass(opts: {
         float ca = cos(paperAngle);
         float sa = sin(paperAngle);
         p = mat2(ca, -sa, sa, ca) * p;             // felt-grain anisotropy rotation
+        // R4: stretch the noise ALONG the grain (x after rotation) so the tooth becomes
+        // directional brush/scumble streaks instead of a round dot field. Dividing the
+        // along-grain coordinate makes the lattice repeat slower in that direction = elongated
+        // pigment fingers; the across-grain axis stays fine, so strokes read as bristle marks.
+        p.x /= max(paperAniso, 0.25);
         p *= paperScale * 64.0;                     // tiles across screen -> lattice units
         p += vec2(time * 0.013, time * -0.009);     // slow re-seed drift (shower-door safe)
         return p;

@@ -72,6 +72,11 @@ export function createVelocitySmearPass(opts: {
   cameraNear?: number
   cameraFar?: number
   velocityScale?: number
+  lengthGain?: number
+  depthFloor?: number
+  depthNear?: number
+  blendFloor?: number
+  blendKnee?: number
 } = {}): ShaderPass {
   return new ShaderPass({
     uniforms: {
@@ -91,7 +96,17 @@ export function createVelocitySmearPass(opts: {
       uCameraNear: { value: opts.cameraNear ?? 0.1 },
       uCameraFar: { value: opts.cameraFar ?? 2000.0 },
       uVelocityScale: { value: opts.velocityScale ?? 1.0 },
-      uReset: { value: 0.0 }
+      uReset: { value: 0.0 },
+      // R4 wet-drag controls (see shader): lengthGain stretches the physical comet so the per-
+      // frame velocity reads as wet PAINT DRAG; depthFloor/Near shape the raw-depth weight so
+      // near tarmac stays readable and the drag grows toward the horizon; blendFloor/Knee set how
+      // little velocity is needed for the wet field to become visible (decoupled from the |v|
+      // hard clamp, which the old build wrongly used as the blend opacity → near-invisible smear).
+      uLengthGain: { value: opts.lengthGain ?? 3.8 },
+      uDepthFloor: { value: opts.depthFloor ?? 0.5 },
+      uDepthNear: { value: opts.depthNear ?? 0.88 },
+      uBlendFloor: { value: opts.blendFloor ?? 0.4 },
+      uBlendKnee: { value: opts.blendKnee ?? 0.016 }
     },
     vertexShader: /* glsl */ `
       varying vec2 vUv;
@@ -121,6 +136,11 @@ export function createVelocitySmearPass(opts: {
       uniform float uCameraFar;
       uniform float uVelocityScale;
       uniform float uReset;
+      uniform float uLengthGain;
+      uniform float uDepthFloor;
+      uniform float uDepthNear;
+      uniform float uBlendFloor;
+      uniform float uBlendKnee;
 
       // Fixed compile-time tap count (GLSL ES 1.00: no dynamic loop bound). 8 taps is the
       // sweet spot in the spec's 6-10 range: enough for a smooth comet tail, cheap enough
@@ -171,8 +191,6 @@ export function createVelocitySmearPass(opts: {
           return;
         }
 
-        float linDepth = linearizeDepth(rawDepth);
-
         // --- Reconstruct screen-space velocity (camera-relative) ----------------------------
         // PER-FRAGMENT perspective divide on both ends (mandatory): unproject this UV+depth to
         // a world point with the current inverse VP, reproject it with the previous VP, and the
@@ -194,13 +212,25 @@ export function createVelocitySmearPass(opts: {
         // smear the whole screen. The controller re-baselines these; uReset signals them.
         velocity *= (1.0 - clamp(uReset, 0.0, 1.0));
 
-        // Depth-bias: near tarmac stays readable, far road dissolves into pigment fingers.
-        velocity *= (0.3 + 0.7 * linDepth);
+        // Depth-weight (R4 fix): the previous build keyed this off LINEARISED depth, but in this
+        // chase view perspective-linearised depth is ~0.0005..0.05 for the WHOLE visible scene,
+        // so (0.3 + 0.7*linDepth) collapsed to a near-constant 0.30 — it just killed 70% of every
+        // velocity uniformly and the "grows toward the horizon" gradient was DEAD (the smear was
+        // effectively inert). RAW device depth, by contrast, spans ~0.9..1.0 meaningfully across
+        // the road/ground from the car to the horizon, so we drive the depth weight from it: near
+        // tarmac under the car stays the most readable, and the wet drag GROWS toward the off-
+        // centre horizon as a gouache speed painting wants. uDepthFloor keeps near geometry from
+        // going fully crisp (a little drag everywhere reads as a moving painting).
+        float depthW = uDepthFloor + (1.0 - uDepthFloor) * smoothstep(uDepthNear, 1.0, rawDepth);
+        velocity *= depthW;
 
         // Music-driven smear length: louder/faster/drops => longer wet drag; a beat is a brief
-        // pulse, never a flash. Folded into the overall strength master.
+        // pulse, never a flash. Folded into the overall strength master. uLengthGain lengthens the
+        // physical drag so it reads as WET PAINT DRAG (a long directional smear), not a 1-2px
+        // photographic micro-blur. The per-frame reconstructed velocity is small (~0.02-0.05 UV at
+        // 60fps), so without this gain the comet tail is too short to register as motion.
         float smearLen = (0.6 + 0.4 * uSpeedMul) + uBeatKick * 0.5;
-        velocity *= uStrength * smearLen;
+        velocity *= uStrength * smearLen * uLengthGain;
 
         // Hero car kept SHARP via the HERO_LAYER mask — the one crisp found anchor. Smooth the
         // mask edge so the car silhouette doesn't get a hard cut.
@@ -227,10 +257,15 @@ export function createVelocitySmearPass(opts: {
         vec2 perp = vec2(-vdir.y, vdir.x);
 
         // --- Accumulate the asymmetric wet drag --------------------------------------------
-        // Sample TAP_COUNT taps from the trailing edge (t=-0.5, dissolves most) through to just
-        // past the leading edge (t≈+0.5). The smoothstep(0.5,-0.5,t) weight is high at the
-        // trailing edge and low at the leading edge -> comet / dry-brush tail, NOT a symmetric
-        // ghost. Weights are renormalised by the accumulated total.
+        // ASYMMETRIC, BACKWARD-WEIGHTED comet: the smear is the WAKE behind a surface point, so
+        // taps run from the trailing edge (t=-1, the longest dry-brush tail) up to just past the
+        // current position (t=+0.15). Mapping t into [-1, +0.15] (instead of the old symmetric
+        // [-0.5,+0.5]) doubles the trailing reach and biases the whole drag BEHIND the point —
+        // a wet directional smear with a dissolving tail, never a symmetric photographic ghost.
+        // The trailing weight curve dissolves the far tail (dry-brush) while keeping the body of
+        // the stroke present.
+        const float T_LEAD = 0.15;   // taps reach just past the leading edge
+        const float T_TAIL = -1.0;   // taps reach a full velocity-length behind (long tail)
         vec3  accum   = vec3(0.0);
         float wsum    = 0.0;
 
@@ -239,29 +274,37 @@ export function createVelocitySmearPass(opts: {
         vec2 noiseBase = vUv / max(uTexelSize, vec2(1e-6)) * 0.012;
 
         for (int i = 0; i < TAP_COUNT; i++) {
-          // t in [-0.5, +0.5] across the taps.
-          float t = (float(i) / (TAP_COUNTF - 1.0)) - 0.5;
+          // t spans [T_TAIL, T_LEAD] across the taps (mostly behind the point).
+          float f = float(i) / (TAP_COUNTF - 1.0);          // 0..1
+          float t = mix(T_TAIL, T_LEAD, f);
 
-          // Asymmetric tail weight: trailing (t<0) heavy, leading (t>0) light.
-          float w = smoothstep(0.5, -0.5, t);
+          // Asymmetric DRY-BRUSH tail weight: full weight at/just-behind the point, dissolving
+          // toward the far trailing tip (a comet). smoothstep(T_LEAD, T_TAIL+0.35, t) is ~1 near
+          // the head and eases to ~0 at the tail tip → renormalised wet drag with a dry tail.
+          float w = smoothstep(T_TAIL + 0.35, T_LEAD, t);
+          // Keep a faint floor so the tail tip still ghosts (dry-brush whisper, not a hard cut).
+          w = 0.06 + 0.94 * w;
 
           // Tap position along the velocity vector.
           vec2 along = velocity * t;
 
           // (2) Perpendicular low-frequency wobble — value-noise nudge sideways for bristles.
+          // Scaled a touch by |t| so the wobble fans out along the tail (bristle splay), not a
+          // rigid parallel offset.
           float n = valueNoise(noiseBase + vec2(t * 3.7, 0.0)) - 0.5;
-          vec2  wob = perp * (n * uWobble);
+          vec2  wob = perp * (n * uWobble * (0.5 + abs(t)));
 
           vec2 tapUv = clamp(vUv + along + wob, vec2(0.0), vec2(1.0));
           vec3 tap   = texture2D(tDiffuse, tapUv).rgb;
 
           // (3) Granulation stretched ALONG the streak — faint pigment-finger value modulation
           // (value only, never chroma), gated by a mid-value bell so it bites in washes and
-          // fades in paper-white & dense darks.
+          // fades in paper-white & dense darks. Stronger toward the tail so the drag breaks into
+          // dry-brush fingers as it dissolves.
           float gnoise = valueNoise(noiseBase * 2.3 + vec2(t * 9.0, 4.0));
           float bell   = 1.0 - abs(luma(tap) - 0.45) * 2.0;
           bell         = clamp(bell, 0.0, 1.0);
-          float fingers = 1.0 - 0.10 * gnoise * bell;
+          float fingers = 1.0 - 0.16 * gnoise * bell * (0.4 + abs(t));
           tap *= fingers;
 
           accum += tap * w;
@@ -273,19 +316,24 @@ export function createVelocitySmearPass(opts: {
         // --- Value, not chroma -------------------------------------------------------------
         // The smear must carry VALUE structure; pulling chroma into the streak reads as a dead
         // photo blur. Take the smeared LUMA but bias the colour back toward the original chroma
-        // by recolouring the source to the smeared value. Stronger smears stay a touch wetter
-        // (more of the smeared chroma) so motion still feels fluid, but never neutral.
+        // by recolouring the source to the smeared value, so the streak STREAKS VALUE while the
+        // hue stays anchored. A small wet-chroma drag is mixed back proportional to the smear.
         float srcL  = max(luma(src), 1e-4);
         float smL   = luma(smeared);
         vec3  valued = src * (smL / srcL);          // source hue at the smeared value
 
-        // How much actual smear happened (0 at rest, 1 at the clamp) — drives both how much we
-        // blend in the smeared field and how "wet" (chroma-carrying) it is.
-        float amount = clamp(vlen / max(uMaxSmear, 1e-4), 0.0, 1.0);
+        // R4 blend opacity (decoupled from the |v| HARD CLAMP). The old build set the blend to
+        // vlen/uMaxSmear, so a real but moderate velocity (~0.013 after the broken depth-bias)
+        // only blended ~26% over a 1-2px span → effectively invisible. Now the opacity ramps to
+        // (near) full over a SMALL velocity KNEE (uBlendKnee, ~0.018 UV), with a floor so any
+        // smear that survives the depth-weight is actually VISIBLE as wet drag — while still
+        // easing to zero at true rest. The hard clamp still bounds the comet LENGTH separately.
+        float reach  = smoothstep(0.0, uBlendKnee, vlen);
+        float amount = clamp(uBlendFloor + (1.0 - uBlendFloor) * reach, 0.0, 1.0) * reach;
 
         // Blend smeared-chroma vs value-preserving smear: keep it value-led, with a small wet
         // chroma drag that grows with smear length.
-        vec3  wet = mix(valued, smeared, 0.25 + 0.25 * amount);
+        vec3  wet = mix(valued, smeared, 0.30 + 0.30 * reach);
 
         // Final composite: lerp from the crisp source into the wet value-drag by how much
         // velocity there was. Hero-masked fragments have velocity≈0 -> amount≈0 -> stay sharp.

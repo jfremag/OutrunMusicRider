@@ -173,8 +173,11 @@ const KUWAHARA_Q_EASE = 0.12 // per-frame lerp toward the drop-driven q target (
 // also nudged up a touch on drops so the comet tail can physically reach further.
 const SMEAR_BEAT_KICK_MS = 260 // beat "wet drag" pulse window (ms)
 const SMEAR_BEAT_KICK_MAX = 0.6 // peak uBeatKick added on a full-strength beat
-const SMEAR_MAX_REST = 0.05 // hard |velocity| clamp at rest (UV)
-const SMEAR_MAX_DROP = 0.075 // looser clamp at full drop so the tail reaches further
+// R4: looser |velocity| clamps so the wet drag reaches the bolder, longer streak of ref 02 at
+// speed/on drops (the comet length is bounded by these; the new uLengthGain in the pass and the
+// raw-depth weight do the rest). Still bounded so a stale matrix can't drag the whole screen.
+const SMEAR_MAX_REST = 0.062 // hard |velocity| clamp at rest (UV)
+const SMEAR_MAX_DROP = 0.095 // looser clamp at full drop so the tail reaches further
 const SMEAR_DRIVE_EASE = 0.18 // ease of the smeared uStrength toward its musical target
 // A frame whose clamped car-distance jumps more than this (world units) is a seek / rewind /
 // tab-throttle re-baseline (mirrors the controller's dt>0.5 @ 50 u/s ⇒ >25u jump): ZERO the
@@ -298,12 +301,21 @@ export class ThreeScene {
   // low-frequency; bilinear upscale via `tensorTexel` is free. Reallocated in resize().
   private tensorTargetA: THREE.WebGLRenderTarget
   private tensorTargetB: THREE.WebGLRenderTarget
-  // 1x1 placeholder for VelocitySmear's hero `tCarMask` until the dedicated hero-isolation
-  // mask render lands (B4). Black (.r = 0) => the smear treats the whole frame as the
-  // streakable world; the smear is independently inert in B3 anyway (its prev/cur view-
-  // projection matrices default to identity -> zero reconstructed velocity), so this only
-  // exists so the sampler is never unbound. B4 swaps in the real HERO_LAYER mask texture.
+  // 1x1 placeholder for VelocitySmear's hero `tCarMask` — bound at construction so the sampler
+  // is never unbound before the real mask target exists. Once carMaskTarget is allocated, the
+  // smear reads that instead (see renderCarMask). Black (.r = 0) => "streakable world".
   private carMaskPlaceholder: THREE.DataTexture
+  // R4: the real HERO_LAYER sharp-mask for VelocitySmear. A HALF-RES target into which only the
+  // hero objects (car + sheen + sword obstacles + beat indicator + particles, all tagged
+  // HERO_LAYER) are rendered FLAT WHITE on black each frame, with the SAME shaken camera the
+  // colour frame uses. The smear samples it (smoothstep'd) and zeroes velocity where it is lit,
+  // so the kart stays the one crisp FOUND anchor inside the streaking world (spec PASS 8 / §6).
+  // Half-res + LinearFilter gives a softly feathered silhouette (desirable — no hard mask cut).
+  private carMaskTarget!: THREE.WebGLRenderTarget
+  // Flat unlit WHITE override for the mask pass (fog disabled so the far hero stays solid white).
+  private maskMaterial!: THREE.MeshBasicMaterial
+  // Scratch colour to save/restore the renderer clear colour around the mask render (alloc-free).
+  private maskClearScratch = new THREE.Color()
   private roadMesh: THREE.Mesh | null = null
   // Cached, immutable base vertex positions of the road, captured once at setTrack
   // (iteration 8). The per-frame spectral elevation morph reads from these so it always
@@ -517,6 +529,23 @@ export class ThreeScene {
     this.carMaskPlaceholder.colorSpace = THREE.NoColorSpace
     this.carMaskPlaceholder.needsUpdate = true
 
+    // R4: the real HERO_LAYER sharp-mask target (half-res; the silhouette only needs to gate the
+    // smear, and a soft linear-upscaled edge is exactly what we want so the car has no hard mask
+    // cut). NoColorSpace + Linear filtering; no depth needed (hero objects are opaque and we only
+    // want coverage). Reallocated in resize().
+    this.carMaskTarget = new THREE.WebGLRenderTarget(halfW, halfH, {
+      type: THREE.UnsignedByteType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      depthBuffer: true,
+      stencilBuffer: false,
+      colorSpace: THREE.NoColorSpace
+    })
+    this.carMaskTarget.texture.name = 'ThreeScene.carMask'
+    // Flat unlit WHITE; fog OFF so a far hero (a sword entering at distance) still masks solid.
+    this.maskMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, fog: false })
+
     // Build + addPass the painterly Track-A stack now that the colour composer, the depth/
     // normal G-buffers and the tensor targets all exist. Sets every resolution/texel/
     // tensorTexel uniform in drawing-buffer pixels and wires the cross-pass textures.
@@ -680,7 +709,13 @@ export class ThreeScene {
       tensorTexel: halfTexel,
       radius: 7,
       sharpness: KUWAHARA_Q_REST,
-      eccentricityClamp: 0.48
+      // R4: lower ecc (0.48 -> 0.40) so the edge-aligned ellipse elongates MORE along contours,
+      // plus the anisoGain/anisoExp/strokeBias brush knobs (factory defaults) that lift the tiny
+      // anisotropy of this low-contrast scene into confident DIRECTIONAL gouache strokes.
+      eccentricityClamp: 0.40,
+      anisoGain: 2.4,
+      anisoExp: 0.5,
+      strokeBias: 0.6
     })
     this.kuwaharaPass.uniforms.tTensor.value = this.tensorTargetA.texture
 
@@ -756,7 +791,9 @@ export class ThreeScene {
     })
     this.velocitySmearPass.uniforms.uTexelSize.value = new THREE.Vector2(fullTexel[0], fullTexel[1])
     this.velocitySmearPass.uniforms.tDepth.value = this.sceneDepthTexture
-    this.velocitySmearPass.uniforms.tCarMask.value = this.carMaskPlaceholder
+    // R4: the real HERO_LAYER sharp-mask (rendered each frame in renderCarMask). The kart + sword
+    // obstacles stay crisp inside the streaking world. (carMaskPlaceholder remains the safe fallback.)
+    this.velocitySmearPass.uniforms.tCarMask.value = this.carMaskTarget.texture
 
     // PASS 9 — SubstratePaper (FINAL): frame-anchored paper granulation + tooth-light +
     // micro-distort, Pegtop soft-light, folded dither (drawing-buffer resolution).
@@ -766,8 +803,13 @@ export class ThreeScene {
     this.substratePaperPass = createSubstratePaperPass({
       resolution: [bufW, bufH],
       paperScale: 1.25,
-      granDensity: 0.20,
-      paperStrength: 0.14
+      // R4 BRUSHWORK: a touch more granulation + a stronger sheet so the surface reads as BRUSHED
+      // gouache on cold-press paper (ref 02), plus the directional paperAniso stretch that turns
+      // the tooth into visible brush/scumble streaks. Stays inside the spec discipline bands
+      // (granDensity 0.18-0.35, paperStrength 0.12-0.22) so it's medium, not dirt.
+      granDensity: 0.30,
+      paperStrength: 0.19,
+      paperAniso: 2.8
     })
 
     // addPass in the EXACT STYLE_SPEC §3 order.
@@ -1530,6 +1572,8 @@ export class ThreeScene {
     const halfH = Math.max(1, Math.floor(bufH / 2))
     this.tensorTargetA.setSize(halfW, halfH)
     this.tensorTargetB.setSize(halfW, halfH)
+    // R4: the HERO_LAYER sharp-mask target tracks half-res too.
+    this.carMaskTarget.setSize(halfW, halfH)
 
     const fullTexel: [number, number] = [1 / bufW, 1 / bufH]
     const halfTexel: [number, number] = [1 / halfW, 1 / halfH]
@@ -1804,7 +1848,9 @@ export class ThreeScene {
     // comet tail can physically reach further. uStrength is eased so the drag breathes.
     const smearU = this.velocitySmearPass.uniforms
     smearU.uSpeedMul.value = car.speedMultiplier
-    const smearTarget = THREE.MathUtils.clamp(0.85 + dropIntensity * 0.35, 0, 1.4)
+    // R4: a slightly higher rest master + drop boost so the wet drag is confidently present at
+    // speed (ref 02's bold streak) while still easing back toward a short drag when quiet.
+    const smearTarget = THREE.MathUtils.clamp(0.95 + dropIntensity * 0.4, 0, 1.5)
     this.smoothedSmearStrength += (smearTarget - this.smoothedSmearStrength) * SMEAR_DRIVE_EASE
     smearU.uStrength.value = this.smoothedSmearStrength
     smearU.uBeatKick.value = beatPulse * SMEAR_BEAT_KICK_MAX
@@ -1878,6 +1924,22 @@ export class ThreeScene {
     // Clear so cleared depth reads 1.0 (== "no geometry"/sky) for the passes that gate on it.
     this.renderer.clear()
     this.renderer.render(this.scene, this.camera)
+
+    // R4: HERO_LAYER sharp-mask render. Mask the camera to layer 2 only, override every hero with
+    // FLAT WHITE, and render onto a BLACK background → coverage mask for VelocitySmear (.r=1 over
+    // the kart/swords, 0 elsewhere). Same shaken camera, so the mask is pixel-aligned with the
+    // painted frame. Restore the camera to all layers afterward so the colour frame is unaffected.
+    const prevClearColor = this.renderer.getClearColor(this.maskClearScratch)
+    const prevClearAlpha = this.renderer.getClearAlpha()
+    this.scene.overrideMaterial = this.maskMaterial
+    this.camera.layers.disableAll()
+    this.camera.layers.enable(HERO_LAYER)
+    this.renderer.setRenderTarget(this.carMaskTarget)
+    this.renderer.setClearColor(0x000000, 1)
+    this.renderer.clear()
+    this.renderer.render(this.scene, this.camera)
+    this.renderer.setClearColor(prevClearColor, prevClearAlpha)
+    this.camera.layers.enableAll()
 
     // Restore everything for the colour render that follows.
     this.scene.overrideMaterial = prevOverride
