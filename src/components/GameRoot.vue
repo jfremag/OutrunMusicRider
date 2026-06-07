@@ -19,7 +19,7 @@
         <button
           @click="handlePlay"
           :disabled="!isReady || isPlaying"
-          class="control-button"
+          class="control-button control-button--primary"
         >
           Play
         </button>
@@ -281,17 +281,27 @@ const handlePause = () => {
   z-index: 5;
   /* Let every click/drag fall through to the game canvas underneath. */
   pointer-events: none;
-  /* Reinforce the neon aesthetic with a soft outer glow on the whole panel. */
-  filter: drop-shadow(0 0 6px rgba(106, 246, 255, 0.35));
+  /* "Watercolour Speed": the HUD is ink marginalia painted directly on the same paper.
+     No neon glow — just a faint warm ink drop to seat the marks on the sheet. */
+  filter: drop-shadow(0 1px 1px rgba(30, 27, 34, 0.18));
 }
 
+/* A collision is a brief "wet" painterly hit, not a neon strobe: a soft muted
+   obstacle-red (#D6443B) wash that pools toward the edges and clears quickly,
+   like pigment dropped on a wet sheet. Low alpha keeps it over the painting. */
 .damage-flash {
   position: absolute;
   inset: 0;
-  background: rgba(255, 58, 83, 0.4);
+  background: radial-gradient(
+    circle at 50% 60%,
+    rgba(214, 68, 59, 0.06) 0%,
+    rgba(214, 68, 59, 0.16) 55%,
+    rgba(214, 68, 59, 0.32) 100%
+  );
+  mix-blend-mode: multiply;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.18s ease;
+  transition: opacity 0.22s ease-out;
   z-index: 15;
 }
 
@@ -299,6 +309,9 @@ const handlePause = () => {
   opacity: 1;
 }
 
+/* "Watercolour Speed" chrome: a quiet translucent PAPER card pinned to the corner
+   of the painting — warm cream sheet, soft thin ink border, a faint ink drop to lift
+   it off the canvas. No neon, no cyan, no bloom. Low contrast, unobtrusive marginalia. */
 .controls {
   position: absolute;
   top: 20px;
@@ -306,12 +319,14 @@ const handlePause = () => {
   z-index: 10;
   display: flex;
   flex-direction: column;
-  gap: 15px;
-  background: rgba(4, 18, 38, 0.82);
-  padding: 20px;
-  border-radius: 8px;
-  border: 1px solid rgba(106, 246, 255, 0.35);
-  box-shadow: 0 0 22px rgba(255, 58, 83, 0.25);
+  gap: 14px;
+  background: rgba(237, 231, 216, 0.86);
+  padding: 18px 20px;
+  border-radius: 3px;
+  border: 1px solid rgba(30, 27, 34, 0.18);
+  box-shadow: 0 1px 3px rgba(30, 27, 34, 0.16);
+  color: #1e1b22;
+  backdrop-filter: blur(1px);
 }
 
 .file-input-container {
@@ -321,26 +336,48 @@ const handlePause = () => {
 }
 
 .file-label {
-  color: #30f3c8;
-  font-size: 14px;
-  font-weight: bold;
+  color: #1e1b22;
+  font-size: 13px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 1px;
+  letter-spacing: 1.5px;
+  opacity: 0.82;
 }
 
 .file-input {
-  color: #e5faff;
-  background: rgba(10, 47, 68, 0.7);
-  border: 1px solid rgba(30, 224, 255, 0.65);
-  padding: 8px;
-  border-radius: 4px;
+  color: #1e1b22;
+  background: rgba(217, 214, 206, 0.6);
+  border: 1px solid rgba(30, 27, 34, 0.22);
+  padding: 7px 8px;
+  border-radius: 3px;
   cursor: pointer;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  font-size: 12px;
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+/* The native button half of the file input — make it read as a small putty chip. */
+.file-input::-webkit-file-upload-button,
+.file-input::file-selector-button {
+  color: #1e1b22;
+  background: rgba(237, 231, 216, 0.9);
+  border: 1px solid rgba(30, 27, 34, 0.2);
+  border-radius: 2px;
+  padding: 4px 10px;
+  margin-right: 10px;
+  cursor: pointer;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  transition: background-color 0.2s ease;
+}
+
+.file-input::-webkit-file-upload-button:hover,
+.file-input::file-selector-button:hover {
+  background: rgba(217, 214, 206, 0.95);
 }
 
 .file-input:hover {
-  border-color: rgba(255, 58, 83, 0.7);
-  box-shadow: 0 0 12px rgba(255, 58, 83, 0.35);
+  border-color: rgba(30, 27, 34, 0.4);
+  background: rgba(217, 214, 206, 0.78);
 }
 
 .playback-controls {
@@ -348,46 +385,64 @@ const handlePause = () => {
   gap: 10px;
 }
 
+/* Buttons are paper chips with ink text. Secondary (PAUSE) is muted putty;
+   hover = a subtle ink darkening of the paper, never a glow. */
 .control-button {
-  padding: 10px 20px;
-  background: linear-gradient(135deg, #0db5d6, #6af6ff);
-  border: none;
-  border-radius: 4px;
-  color: #fff;
-  font-weight: bold;
+  padding: 9px 20px;
+  background: rgba(217, 214, 206, 0.85);
+  border: 1px solid rgba(30, 27, 34, 0.22);
+  border-radius: 3px;
+  color: #1e1b22;
+  font-weight: 600;
   cursor: pointer;
   text-transform: uppercase;
-  letter-spacing: 1px;
-  transition: all 0.3s;
-  box-shadow: 0 0 12px rgba(106, 246, 255, 0.45);
+  letter-spacing: 1.5px;
+  font-size: 12px;
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
 }
 
 .control-button:hover:not(:disabled) {
-  transform: translateY(-2px);
-  box-shadow: 0 0 18px rgba(255, 58, 83, 0.45);
+  background: rgba(201, 196, 184, 0.95);
+  border-color: rgba(30, 27, 34, 0.4);
+}
+
+/* Primary / active (PLAY): the single dusty-rose accent note. Muted gouache rose,
+   not neon — paper-light ink text over it, a quiet darkening on hover. */
+.control-button--primary {
+  background: rgba(169, 98, 118, 0.85);
+  border-color: rgba(132, 74, 92, 0.6);
+  color: #ede7d8;
+}
+
+.control-button--primary:hover:not(:disabled) {
+  background: rgba(151, 86, 105, 0.92);
+  border-color: rgba(110, 60, 76, 0.7);
+  color: #ede7d8;
 }
 
 .control-button:disabled {
-  opacity: 0.5;
+  opacity: 0.42;
   cursor: not-allowed;
 }
 
 .status-message {
-  color: #6af6ff;
-  font-size: 12px;
+  color: #1e1b22;
+  opacity: 0.7;
+  font-size: 11px;
+  font-style: italic;
   text-align: center;
-  padding: 8px;
-  background: rgba(14, 181, 214, 0.18);
-  border-radius: 4px;
+  padding: 7px 8px;
+  background: rgba(217, 214, 206, 0.45);
+  border-radius: 3px;
 }
 
 .file-name-display {
-  color: #30f3c8;
-  font-size: 12px;
-  margin-top: 8px;
-  padding: 6px;
-  background: rgba(48, 243, 200, 0.15);
-  border-radius: 4px;
-  border: 1px solid rgba(48, 243, 200, 0.35);
+  color: #20211c;
+  font-size: 11px;
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: rgba(217, 214, 206, 0.5);
+  border-radius: 3px;
+  border: 1px solid rgba(30, 27, 34, 0.16);
 }
 </style>

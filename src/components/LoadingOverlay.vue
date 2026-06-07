@@ -17,10 +17,13 @@ defineProps<{
 </script>
 
 <style scoped>
+/* "Watercolour Speed" loading screen: a warm-cream PAPER backdrop with a quiet
+   ink spinner and ink status text. No neon, no glow — the decode/analyse pipeline
+   reads as marks being laid down on the same sheet the painting sits on. */
 .loading-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(6, 14, 32, 0.92);
+  background: rgba(233, 225, 210, 0.94);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -32,16 +35,17 @@ defineProps<{
   text-align: center;
 }
 
+/* A thin ink ring drawn on paper: faint warm-ink track, a darker warm-ink leading
+   arc, with one dusty-rose accent tick on the opposite side. No box-shadow bloom. */
 .spinner {
-  width: 120px;
-  height: 120px;
+  width: 110px;
+  height: 110px;
   margin: 0 auto 24px;
-  border: 3px solid rgba(48, 243, 200, 0.18);
-  border-top-color: rgba(48, 243, 200, 1);
-  border-right-color: rgba(255, 0, 255, 0.8);
+  border: 2px solid rgba(30, 27, 34, 0.14);
+  border-top-color: rgba(30, 27, 34, 0.78);
+  border-right-color: rgba(169, 98, 118, 0.7);
   border-radius: 50%;
   animation: spin 2.5s linear infinite;
-  box-shadow: 0 0 14px rgba(48, 243, 200, 0.6), 0 0 28px rgba(255, 0, 255, 0.3);
 }
 
 @keyframes spin {
@@ -56,20 +60,20 @@ defineProps<{
 .status-text {
   font-family: 'Courier New', monospace;
   font-size: 13px;
-  color: #30f3c8;
-  letter-spacing: 1px;
+  color: #1e1b22;
+  opacity: 0.78;
+  letter-spacing: 1.5px;
   text-transform: uppercase;
-  text-shadow: 0 0 8px rgba(48, 243, 200, 0.7);
-  animation: pulse 0.8s ease-in-out infinite;
+  animation: pulse 1.1s ease-in-out infinite;
 }
 
 @keyframes pulse {
   0%,
   100% {
-    opacity: 0.7;
+    opacity: 0.55;
   }
   50% {
-    opacity: 1;
+    opacity: 0.82;
   }
 }
 
