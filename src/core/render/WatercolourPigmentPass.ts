@@ -102,6 +102,13 @@ export function createWatercolourPigmentPass(opts: {
       uWorldGrainScale: { value: opts.worldGrainScale ?? 1.7 },
       uWorldDistRef: { value: opts.worldDistRef ?? 26.0 },
       useWorldGrain: { value: 1 },
+      // ralph(iter8) STRAY-SQUARE GUARD (PRIORITY-4): 0 until ThreeScene has copied a REAL inverse
+      // view-projection (set to 1 each frame after the first valid matrix, alongside the paper pass).
+      // While 0 — the identity PLACEHOLDER on the very first / a seek frame — the depth→world
+      // unproject in paperToothAt degenerates (worldH.w collapses, wp blows up into a hard block),
+      // which can flash a stray square via the granulation tooth. With the guard down the tooth falls
+      // back to the stable SCREEN-SPACE fbm, so no degenerate world reconstruction is ever sampled.
+      uViewProjReady: { value: 0 },
       resolution: { value: opts.resolution ?? [1920, 1080] },
       time: { value: 0 },
       paperScale: { value: opts.paperScale ?? 2.2 },
@@ -137,6 +144,7 @@ export function createWatercolourPigmentPass(opts: {
       uniform float uWorldGrainScale;
       uniform float uWorldDistRef;
       uniform float useWorldGrain;
+      uniform float uViewProjReady;
       uniform vec2  resolution;
       uniform float time;
       uniform float paperScale;
@@ -224,7 +232,10 @@ export function createWatercolourPigmentPass(opts: {
       float paperToothAt(vec2 fragUv, vec2 sampleUv) {
         float hScreen = paperHeight(sampleUv);
         float rawDepth = texture2D(tDepth, fragUv).r;
-        if (useWorldGrain < 0.5 || rawDepth >= 0.9999) {
+        // Fall back to the stable screen tooth for sky/cleared depth, when world grain is off, OR
+        // (ralph iter8) while the inverse view-projection is still the identity placeholder
+        // (uViewProjReady<0.5) — guarding the world reconstruction from the degenerate-matrix square.
+        if (useWorldGrain < 0.5 || rawDepth >= 0.9999 || uViewProjReady < 0.5) {
           return hScreen;
         }
         vec4 ndc    = vec4(fragUv * 2.0 - 1.0, rawDepth * 2.0 - 1.0, 1.0);

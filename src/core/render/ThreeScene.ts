@@ -2515,11 +2515,15 @@ export class ThreeScene {
     const paperU = this.substratePaperPass.uniforms
     ;(paperU.uInvViewProj.value as THREE.Matrix4).copy(this.invViewProj)
     ;(paperU.uCameraPos.value as THREE.Vector3).copy(this.shakenCameraPos)
-    // ralph(iter7) STRAY-SQUARE GUARD: a REAL inverse view-projection now exists this frame (computed
-    // just above from the shaken VP), so the paper pass may use the world-locked grain. Until this
-    // ran (the identity placeholder) the pass fell back to the stable screen-space grain, so no
-    // degenerate world reconstruction (the hard-square artefact) is ever sampled.
+    // ralph(iter7/8) STRAY-SQUARE GUARD: a REAL inverse view-projection now exists this frame
+    // (computed just above from the shaken VP), so the world-reconstructing passes may use it. Until
+    // this ran (the identity placeholder) each of them fell back to a stable screen-space path, so no
+    // degenerate world reconstruction (the hard-square artefact) is ever sampled. ralph(iter8) extends
+    // the guard from the paper pass to EVERY world-reconstructing pass: the pigment tooth (falls back
+    // to screen fbm) and the velocity smear (forces velocity to zero) get the same readiness flag.
     paperU.uViewProjReady.value = 1
+    pigU.uViewProjReady.value = 1
+    smearU.uViewProjReady.value = 1
 
     // --- P4: derive the screen-space TRACK-FLOW direction for the injected smear drag. Project a
     // point ~FLOW_LOOKAHEAD units ahead down the centerline AND the car's own position into clip

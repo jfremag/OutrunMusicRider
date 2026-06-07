@@ -98,6 +98,14 @@ export function createVelocitySmearPass(opts: {
       uCameraFar: { value: opts.cameraFar ?? 2000.0 },
       uVelocityScale: { value: opts.velocityScale ?? 1.0 },
       uReset: { value: 0.0 },
+      // ralph(iter8) STRAY-SQUARE GUARD (PRIORITY-4): 0 until ThreeScene has copied a REAL inverse
+      // view-projection (set to 1 each frame after the first valid matrix, alongside the paper pass).
+      // While 0 — the identity PLACEHOLDER on the very first / a seek frame — the depth→world
+      // unproject degenerates (worldH.w collapses, worldPos blows up into a hard block) and can flash
+      // a stray hard square. With the guard down the camera-relative reprojection is skipped entirely
+      // (velocity forced to zero, exactly like uReset), so no degenerate world reconstruction is ever
+      // smeared. The same guard the SubstratePaper/Pigment world-reconstruction passes carry.
+      uViewProjReady: { value: 0.0 },
       // R4 wet-drag controls (see shader): lengthGain stretches the physical comet so the per-
       // frame velocity reads as wet PAINT DRAG; depthFloor/Near shape the raw-depth weight so
       // near tarmac stays readable and the drag grows toward the horizon; blendFloor/Knee set how
@@ -146,6 +154,7 @@ export function createVelocitySmearPass(opts: {
       uniform float uCameraFar;
       uniform float uVelocityScale;
       uniform float uReset;
+      uniform float uViewProjReady;
       uniform float uLengthGain;
       uniform float uDepthFloor;
       uniform float uDepthNear;
@@ -222,7 +231,12 @@ export function createVelocitySmearPass(opts: {
 
         // ZERO on seek / rewind / large-delta frames — a stale prev-matrix would otherwise
         // smear the whole screen. The controller re-baselines these; uReset signals them.
-        velocity *= (1.0 - clamp(uReset, 0.0, 1.0));
+        // ALSO zero while the inverse view-projection is still the identity PLACEHOLDER
+        // (uViewProjReady<0.5, ralph iter8): with identity matrices the per-fragment unproject
+        // above degenerates and the reprojected UV is garbage — gate it out so the first/seek
+        // frame can never smear a degenerate-world hard square.
+        float vpReady = step(0.5, uViewProjReady);
+        velocity *= (1.0 - clamp(uReset, 0.0, 1.0)) * vpReady;
 
         // Depth-weight (R4 fix): the previous build keyed this off LINEARISED depth, but in this
         // chase view perspective-linearised depth is ~0.0005..0.05 for the WHOLE visible scene,
@@ -268,7 +282,7 @@ export function createVelocitySmearPass(opts: {
         // for several car-lengths behind the hero is provably untouched (drag ~0 there).
         float flowRamp = smoothstep(0.994, 0.999, rawDepth);      // drag confined to FAR ground only
         vec2  flowVel  = uFlowDir * uFlowGain * flowRamp * uSpeedMul;
-        flowVel       *= uStrength * uVelocityScale * (1.0 - clamp(uReset, 0.0, 1.0));
+        flowVel       *= uStrength * uVelocityScale * (1.0 - clamp(uReset, 0.0, 1.0)) * vpReady;
         velocity      += flowVel;
 
         // Hero car kept SHARP via the HERO_LAYER mask — the one crisp found anchor. A PROTECTIVE
