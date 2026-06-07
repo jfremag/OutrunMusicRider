@@ -29,8 +29,12 @@ import { injectCarSheen, updateCarSheen, CarSheenMaterial } from './CarSheenMate
 // back. Evaluated procedurally each frame from (now - lastBeatTime) so it is frame-rate
 // independent and needs no tween bookkeeping (matching the codebase's manual-lerp style).
 // (The bloom pulse this envelope also used to drive was ripped out with the post stack.)
-const BASE_FOV = 75
-const FOV_PUNCH = 9 // extra degrees added at peak of a full-strength beat
+// Round 3 hero-subject reframe: a LONGER lens (was 75) so the kart reads as a large,
+// flattened focal subject the way the chrome rider fills its panel in ref 02 — a tighter
+// FOV magnifies the car and gently compresses depth (flattering the painted read) without
+// touching the off-centre diagonal stance (the COMPOSE_* angles below are re-tuned to suit).
+const BASE_FOV = 50
+const FOV_PUNCH = 6 // extra degrees added at peak of a full-strength beat (scaled to the longer lens)
 const FOV_ATTACK_MS = 90 // ramp up to peak
 const FOV_DECAY_MS = 420 // ease back to base
 
@@ -69,7 +73,7 @@ const FOV_DROP_PUNCH = 6 // extra degrees at full drop intensity (cinematic expa
 // extra FOV is a complementary widening bound to the SAME normalized depth excess, so the
 // two always move in concert. On the rising edge of the focus flag the camera orbit angle
 // is snapped square (one frame) so the car is framed head-on during the moment.
-const BASE_CAMERA_DISTANCE = 8 // resting chase distance behind the car (units)
+const BASE_CAMERA_DISTANCE = 4.2 // resting chase distance behind the car (units) — pulled in (was 8) so the kart commands the frame as the hero subject (~1/3 frame height)
 const FOV_DROP_BOOST_MAX = 7 // extra degrees of FOV at full camera pull-back (6-8° band)
 const CAMERA_DEPTH_LERP = 0.12 // per-frame ease of the applied depth toward cameraDepthScale
 
@@ -103,7 +107,7 @@ const CAMERA_DEPTH_LERP = 0.12 // per-frame ease of the applied depth toward cam
 // (~-36%, safely on-screen through lane changes), the pale sun upper-RIGHT (~+40%, clear of the
 // VP), and ~65-70% quiet negative space on the RIGHT — an off-centre raking diagonal.
 const COMPOSE_YAW = 0.12 // persistent camera-POSITION orbit yaw (rad, ~7°) — a raking 3D viewing angle on the road/car
-const COMPOSE_LOOK_YAW = -0.34 // fixed yaw of the optical AXIS (rad, ~19.5°) — slides the VP ~20-25% off-centre toward screen-LEFT (stable)
+const COMPOSE_LOOK_YAW = -0.24 // fixed yaw of the optical AXIS (rad, ~13.8°) — slides the VP off-centre screen-LEFT; reduced from -0.34 because the longer R3 lens makes a fixed angle subtend more frame, so this keeps the bigger hero kart fully on-screen on the lower-left diagonal
 const COMPOSE_PITCH = 0.05 // fixed upward tilt of the optical axis (rad, ~3°) for a raking horizon off the vertical centre
 const COMPOSE_SUN_OFFSET = 0.55 // sun lateral placement off the view centre (fraction of sun depth)
 
@@ -699,6 +703,11 @@ export class ThreeScene {
     // so the punched darks of ref 02 appear WITHOUT undoing Round 1's mid-key base.
     this.paintGradePass = createPaintGradeLUTPass({
       gradient: buildPaintRamp(),
+      // R3: nudge chroma-preserve up (0.22 -> 0.30) so the HERO keeps more of its local hue
+      // through the palette lock — specifically so the cool helmet-sheen crest survives as a cool
+      // feature (and the obstacle red stays a confident red) instead of being warmed/flattened
+      // toward the ramp's bright putty. Still well within the lock (gradeAmount 0.82 holds value).
+      chromaPreserve: 0.30,
       blackPoint: 0.38,
       whitePoint: 0.92,
       contrast: 1.32,
@@ -720,7 +729,15 @@ export class ThreeScene {
       cameraNear: this.camera.near,
       cameraFar: DEPTH_FAR,
       inkGain: 2.4,
-      edgeDilate: 2.0
+      edgeDilate: 2.0,
+      // R3: raise the GEOMETRIC edge thresholds so only BIG depth/normal steps ink. The now-large
+      // hero kart has an open frame (seat/engine/struts) whose many fine interior depth+normal
+      // steps were inking into a busy black tangle that fought the helmet sheen. Higher thresholds
+      // keep the kart's outer silhouette + the sword silhouettes (large steps) and the road/ground
+      // VALUE edges (luma XDoG, untouched) — so Rounds 1-2 edge character holds — while the kart's
+      // interior reads mostly LOST (spec §4: body contours lost, sheen the one found mark).
+      normalThresh: 0.55,
+      depthThresh: 1.1
     })
     this.painterlyEdgePass.uniforms.tTensor.value = this.tensorTargetA.texture
     this.painterlyEdgePass.uniforms.useTensor.value = 1
@@ -1758,10 +1775,14 @@ export class ThreeScene {
     // sweeps across the body as the car leans (spec §4), then breathe each registered material.
     // Base is the module default (up-and-toward-camera); cameraRoll (radians) tilts it laterally.
     const roll = this.cameraRoll
+    // Up-and-strongly-toward-camera (big +Z) so the broad "helmet shine" rolls across the body
+    // faces that FACE THE VIEWER (the hero read, ref 02), not just the up-facing wheel tops; the
+    // bank tilts it laterally so the lobe sweeps the body as the kart leans. Matches the module
+    // DEFAULTS.dir so the resting framing reads the same as the unit-shaded material.
     this.sheenDir.set(
-      0.35 + Math.sin(roll) * 0.25,
-      0.8,
-      0.45
+      0.30 + Math.sin(roll) * 0.28,
+      0.62,
+      0.95
     ).normalize()
     for (const entry of this.carSheenMaterials) {
       updateCarSheen(entry, {
@@ -2153,7 +2174,9 @@ export class ThreeScene {
       CAMERA_DEPTH_LERP
     )
     const cameraDistance = BASE_CAMERA_DISTANCE * this.appliedDepthScale
-    const cameraHeight = 3
+    // Round 3: a LOWER eye-line (was 3) so we read the kart's flank/shoulder — the rounded
+    // surface the broad "helmet" sheen rolls across — instead of a top-down dark blob.
+    const cameraHeight = 2.0
     const baseCameraOffset = this.smoothedCarForward
       .clone()
       .multiplyScalar(-cameraDistance)

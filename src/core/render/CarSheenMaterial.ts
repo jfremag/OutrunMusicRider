@@ -105,14 +105,20 @@ export interface CarSheenMaterial {
 // ---------------------------------------------------------------------------------------------
 
 const DEFAULTS = {
-  /** View-space light direction the lobe wraps around (up-and-slightly-toward-camera). */
-  dir: new THREE.Vector3(0.35, 0.8, 0.45).normalize(),
+  /**
+   * View-space light direction the broad lobe wraps around. Biased UP-and-strongly-TOWARD-CAMERA
+   * (big +Z) so the "helmet shine" rolls across the body faces that FACE THE VIEWER — the way the
+   * chrome rider's sheen turns toward us in ref 02 — instead of only catching the few up-facing
+   * polys (which on this kart are the small wheel tops, not the body/cabin we want as the hero).
+   */
+  dir: new THREE.Vector3(0.30, 0.62, 0.95).normalize(),
   /** LOW exponent -> a broad rolling lobe (NOT a tight CG glint). */
   width: 6.0,
-  /** Base lobe intensity; driven up on the beat by `updateCarSheen`. */
-  strength: 0.6,
-  /** Half-Lambert wrap so the lobe bleeds softly past the terminator like wet paint. */
-  wrap: 0.5
+  /** Base lobe intensity; driven up on the beat by `updateCarSheen`. A confident resting sheen so
+   *  the broad cool roll on the rounded forms is the hero read that out-glows the dark frame core. */
+  strength: 1.05,
+  /** Generous half-Lambert wrap so the broad lobe bleeds well past the terminator like wet paint. */
+  wrap: 0.75
 }
 
 /**
@@ -223,14 +229,15 @@ export function injectCarSheen(
       void main() {`
     )
 
-    // Inject the lobe AFTER lighting accumulation (post-BRDF) but while `totalEmissiveRadiance`
-    // is still folded into `outgoingLight`. `#include <aomap_fragment>` is the last chunk before
-    // the diffuse/specular sums, and at this point the view-space `normal` and `vViewPosition`
-    // (= -mvPosition.xyz, i.e. surface->camera) are both valid.
+    // Inject the lobe AFTER the BRDF lighting is fully composed into `outgoingLight`, i.e. right
+    // before `#include <opaque_fragment>` (which writes gl_FragColor). Operating on the final
+    // `outgoingLight` (not just `totalEmissiveRadiance`, which is only ADDED) lets the broad sheen
+    // OVERPAINT the body like wet paint and lets the value cap actually hold — adding to emissive
+    // could only ever lift the dark body, never own it. The view-space `normal` and `vViewPosition`
+    // (= surface->camera) are function-scope locals still valid here.
     shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <aomap_fragment>',
-      /* glsl */ `#include <aomap_fragment>
-
+      '#include <opaque_fragment>',
+      /* glsl */ `
       {
         // View-space frame. 'normal' is the (possibly normal-mapped) surface normal; vViewPosition
         // points from the surface toward the camera, so its normalization is the view direction.
@@ -238,14 +245,27 @@ export function injectCarSheen(
         vec3 sV = normalize(vViewPosition);
         vec3 sL = normalize(uSheenDir);
 
-        // ONE broad soft lobe. Half-Lambert WRAP first (lobe bleeds softly past the terminator
-        // like wet paint), then a LOW-exponent specular-ish falloff around the half-vector so it
-        // is a wide rolling band, never a tight glint. This is deliberately NOT a BRDF term.
+        // ONE broad soft ROLLING lobe — the chrome-rider "helmet shine" of ref 02. The brightest
+        // pass of the band must cover a BROAD swathe of the form (the upper/facing shoulder), not
+        // a tight CG glint, so it is built primarily from a WRAPPED hemisphere gradient and only
+        // gently shaped by a wide specular core. Half-Lambert WRAP of N·L gives a soft, very broad
+        // light-facing gradient that bleeds past the terminator like wet paint; a LOW-exponent
+        // half-vector term adds the rolling brightest core on top. Neither is a BRDF term.
         float ndl = dot(sN, sL);
         float wrapped = clamp((ndl + uSheenWrap) / (1.0 + uSheenWrap), 0.0, 1.0); // half-Lambert
         vec3  sH = normalize(sL + sV);
         float ndh = clamp(dot(sN, sH), 0.0, 1.0);
-        float lobe = pow(ndh, uSheenWidth) * wrapped;                              // broad band
+        // The broad core: a WIDE specular band (low exponent) AND a strong broad floor from the
+        // wrapped gradient itself, so the lobe is a big soft swathe over the form. The wrapped^1.3
+        // shaping keeps it reading as a single directional roll rather than flat fill, while the
+        // specular core (smoothed against the wrap so it can only live on the lit side) supplies
+        // the brightest crest. Combine so the band is broad (not pow(ndh,6) alone — that was too
+        // tight + double-attenuated the contribution below).
+        float broadCore = pow(ndh, uSheenWidth);                                   // wide spec crest
+        // Weight the crest MORE and keep a smaller flat floor so the band has a clear bright
+        // ROLLING crest with darker flanks (a directional roll, not uniform fill — uniform fill
+        // read as flat dark-gray). Still broad (low exponent), still wrapped, never a CG glint.
+        float lobe = clamp(wrapped * (0.30 + 1.25 * broadCore) * pow(wrapped, 0.4), 0.0, 1.0);
 
         // Fresnel for the grazing catch-lights + the razor spark gate (silhouette emphasis).
         float fres = pow(1.0 - clamp(dot(sN, sV), 0.0, 1.0), 3.0);
@@ -255,10 +275,15 @@ export function injectCarSheen(
         // space and crawled by uTime (slow -> no boiling).
         float mottle = sheenNoise(gl_FragCoord.xy * 0.012 + uTime * 0.05) - 0.5; // ~[-0.5, 0.5]
 
-        // The spec term s: how lit this fragment's sheen is, 0..~1. Strength scales the lobe;
-        // mottle nudges it; clamp keeps the ramp in range. Darken s slightly in the mottle's
-        // troughs so the wash both lightens AND desaturates unevenly.
-        float s = clamp(lobe * uSheenStrength + mottle * 0.10, 0.0, 1.0);
+        // COVERAGE: how strongly the broad sheen owns this fragment, 0..1. Strength widens AND
+        // deepens the band (a louder beat = a bigger, brighter roll), mottle breaks its edge so it
+        // is a hand-laid wash. This single term drives BOTH the colour ramp and how much the body
+        // is overpainted, so the lobe is applied ONCE (the old code multiplied lobe*strength into
+        // the colour AND again into the contribution, double-attenuating the shine into nothing).
+        float cov = clamp(lobe * uSheenStrength + mottle * 0.10, 0.0, 1.0);
+        // The brightness ramp s lifts faster than coverage so even the broad mid-band of the lobe
+        // reads as a luminous cool sheen (a gentle ramp left the whole band dim/dark-gray).
+        float s = clamp(pow(cov, 0.6), 0.0, 1.0);
 
         // SIENKIEWICZ MOVE: as s rises, hue-lerp toward ~232deg (steel-blue), multiply saturation
         // by (1 - 0.6*s), and HARD-CAP value at ~0.90 -> the lobe cools+desaturates as it
@@ -267,7 +292,7 @@ export function injectCarSheen(
         float targetHue = 232.0 / 360.0;                         // steel-blue target hue
         float hue = mix(baseHsv.x, targetHue, s);                // cool toward 232deg as it lifts
         float sat = baseHsv.y * (1.0 - 0.6 * s);                 // desaturate as it brightens
-        float val = min(baseHsv.z, 0.90) * (0.55 + 0.45 * s);   // cap ~0.90, lift with s
+        float val = min(baseHsv.z, 0.90) * (0.62 + 0.38 * s);   // cap ~0.90; brighter floor so the broad band stays luminous through the LUT
         val += mottle * 0.05;                                    // +-0.05 value variance (mottle)
         val = clamp(val, 0.0, 0.90);                             // HARD value cap (never white)
         vec3 sheenCol = sheenHsv2rgb(vec3(hue, clamp(sat, 0.0, 1.0), val));
@@ -279,18 +304,21 @@ export function injectCarSheen(
             uCatchCool * (fres * 0.08) +                         // cool grazing reflection sliver
             uCatchWarm * (litSide * lobe * 0.05);                // warm hint on the lit lobe
 
-        // The broad sheen contribution, added as UNLIT paint to the emissive radiance (post-BRDF).
-        vec3 sheenContribution = sheenCol * (lobe * uSheenStrength) + catchLights;
+        // DARKS first: lift the composed output FLOOR toward a violet-gray a notch ABOVE the deep
+        // body (#2C2A38 ×1.55) so the body's un-sheened interior (this kart's open frame: seat,
+        // engine, struts) settles at a CONFIDENT, READABLE violet-gray rather than near-black. This
+        // both keeps hue+sat alive into the shadow AND — crucially for THIS geometry — cuts the
+        // internal luma contrast that was making the edge pass ink every interior strut into a busy
+        // black tangle. With a lifted floor the body contours read mostly LOST (spec §4), leaving
+        // the bright sheen crest + the few strongest silhouette accents as the found marks.
+        outgoingLight = max(outgoingLight, uDeepBody * 1.55);
 
-        // DARKS: where the form is in shadow and unlit by the lobe, lerp the *output* toward the
-        // deep violet-blue body floor (#2C2A38) instead of letting the BRDF crush it to black —
-        // hue+sat preserved into the core shadow. We pull totalEmissiveRadiance toward the floor
-        // in proportion to how dark+un-sheened this fragment is (the BRDF result is summed after).
-        float shade = (1.0 - litSide) * (1.0 - lobe);            // 1 in un-lit, un-sheened cores
-        totalEmissiveRadiance = mix(totalEmissiveRadiance, uDeepBody, shade * 0.18);
-
-        // Add the broad lobe + catch-lights as unlit paint.
-        totalEmissiveRadiance += sheenContribution;
+        // OVERPAINT the body with the broad cool sheen where coverage is high — like wet paint laid
+        // over the form — so the lobe DOMINATES the upper/facing surface as the hero feature rather
+        // than glazing faintly over an already-dark body. LERP the composed outgoingLight toward the
+        // (value-capped) sheen colour by coverage; the cap guarantees the sheen never reaches white.
+        outgoingLight = mix(outgoingLight, sheenCol, cov);
+        outgoingLight += catchLights;
 
         // RAZOR SPARKS: the ONLY near-white on the car. Gate to the top ~2% of (spec*fresnel) on
         // high-curvature silhouettes. Use the *un-attenuated* specular peak (ndh, not the broad
@@ -298,8 +326,9 @@ export function injectCarSheen(
         // surface/light/grazing all align — keeping sparks rare (<2%) but possible. additive #F6F7F9.
         float sparkTerm = ndh * fres;                            // spec peak * fresnel, 0..1
         float spark = smoothstep(0.985, 1.0, sparkTerm);         // top ~2% only
-        totalEmissiveRadiance += uSparkColor * spark * 0.9;
-      }`
+        outgoingLight += uSparkColor * spark * 0.9;
+      }
+      #include <opaque_fragment>`
     )
   }
 
@@ -317,10 +346,12 @@ export function injectCarSheen(
 // Per-frame update
 // ---------------------------------------------------------------------------------------------
 
-/** Lower bound the lobe never drops below — the shine is always faintly present (a wet body). */
-const SHEEN_BASE = 0.45
-/** Upper clamp on the driven lobe strength (kept below a bloom-flash level). */
-const SHEEN_MAX = 1.3
+/** Lower bound the lobe never drops below — the shine is always confidently present (R3: the broad
+ *  cool roll is the HERO read on the rounded forms, so it rests luminous, not faint). */
+const SHEEN_BASE = 0.95
+/** Upper clamp on the driven lobe strength (kept below a bloom-flash level; the value cap in-shader
+ *  still guarantees the crest never reaches white however hard this is driven). */
+const SHEEN_MAX = 1.6
 /** Smoothing factor — fast attack, soft settle (matches the codebase's lerp feel). */
 const SHEEN_EASE = 0.3
 
@@ -329,9 +360,11 @@ const SHEEN_EASE = 0.3
  * **breathes/rolls on the beat** — a saturation/value pulse of the existing hue, never a new
  * colour and never a bloom flash:
  *
- *   target ≈ 0.45 + beatStrength*0.5 + spectralCentroid*0.25   (clamped ≤ ~1.3)
+ *   target ≈ 0.95 + beatStrength*0.5 + spectralCentroid*0.25   (clamped ≤ ~1.6)
  *
- * eased toward by ~0.3. Also crawls the mottle noise via `uTime` and, if supplied, rolls the lobe
+ * The high resting floor (R3) keeps the broad cool roll a confident HERO feature; the beat adds a
+ * subtle swell on top (the in-shader value cap means even the peak never reaches white). Eased
+ * toward by ~0.3. Also crawls the mottle noise via `uTime` and, if supplied, rolls the lobe
  * direction (`uSheenDir`). No-ops safely until the program has compiled (`entry.uniforms` set).
  *
  * @param entry the registry entry from {@link injectCarSheen}.

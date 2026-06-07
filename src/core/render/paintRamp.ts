@@ -81,11 +81,18 @@ const DEFAULT_STOPS: RampStop[] = [
   // so the luminous negative space reads COOL steel-violet like the reference rather than a
   // warm rosy haze (the old ramp put warm rose-gray here and warmed the whole bright half).
   { pos: 0.70, hex: 0xb8bbce, label: 'lit steel-blue (#4)' },
-  // Rose-gray field — the WARM desaturated counterweight, now a narrower note just under the
-  // highlight (the warm half of the split-complementary, kept from dominating the bright field).
-  { pos: 0.87, hex: 0xceb9b9, label: 'rose-gray field (#5)' },
-  // Paper putty — lightest value; the "white" substitute, gouache highlight cap.
-  { pos: 1.0, hex: 0xd9d6ce, label: 'paper putty highlight (#1)' }
+  // Rose-gray field — the WARM desaturated counterweight, a narrow note in the upper-mid
+  // (the warm half of the split-complementary, kept from dominating the bright field).
+  { pos: 0.82, hex: 0xceb9b9, label: 'rose-gray field (#5)' },
+  // Paper putty — the warm "white" substitute / gouache highlight cap for the bright FIELD
+  // (sky/paper). Sits just under the very top so most bright negative-space pixels read warm-putty.
+  { pos: 0.93, hex: 0xd9d6ce, label: 'paper putty highlight (#1)' },
+  // Sheen Peak — the COOL blue-violet highlight cap (STYLE_SPEC §2 #10: "Helmet-shine core tints
+  // here"). Placed at the very top so ONLY the brightest hero pixels — the helmet sheen crest and
+  // the sun's achromatic-to-cool core (§5) — resolve COOL rather than being warmed into putty by
+  // the luminance lock. Luma (~0.85) sits just above putty so the ramp stays monotonic. This is
+  // what lets the broad rolling sheen survive the palette lock as a cool feature, not a warm glaze.
+  { pos: 1.0, hex: 0xd7d7e6, label: 'sheen peak cool highlight (#10)' }
 ]
 
 /** Unpack a 0xRRGGBB integer into a normalised sRGB triplet (display-space). */
