@@ -22,6 +22,7 @@ import { createPaintGradeLUTPass } from './PaintGradeLUTPass'
 import { buildPaintRamp } from './paintRamp'
 import { createPainterlyEdgePass } from './PainterlyEdgePass'
 import { createVelocitySmearPass } from './VelocitySmearPass'
+import { createAerialPerspectivePass } from './AerialPerspectivePass'
 import { createSubstratePaperPass } from './SubstratePaperPass'
 import { createSelectiveBloomPass, SelectiveBloom } from './SelectiveBloomPass'
 import { createUnsharpMaskPass } from './UnsharpMaskPass'
@@ -140,6 +141,42 @@ const PARTICLE_LIFETIME_COLLISION = 0.32 // seconds a collision-burst particle l
 // bright/hot sections. They no longer drive any glow — just the ink temperature.
 const BURST_COLOR_COOL = new THREE.Color(0x6a7aa4) // steel-blue accent -> cool ink
 const BURST_COLOR_HOT = new THREE.Color(0xa96276) // rose-magenta accent -> warm ink
+
+// --- Contact-shadow + jump-read tuning -----------------------------------------------------
+// The soft elliptical shadow pool under the kart grounds it AND sells jump height: it stays on
+// the ROAD as the car lifts, so the GAP between kart and shadow reads as altitude (the Nintendo
+// trick). The shadow is a flat plane with a soft radial-violet alpha; as verticalOffset rises it
+// SHRINKS, SOFTENS (lower opacity) and drifts so the gap is unmistakable.
+const SHADOW_BASE_RADIUS = 1.7        // grounded half-size of the shadow ellipse (world units, ~kart footprint)
+const SHADOW_LENGTH_SCALE = 1.35      // stretch along the kart's forward axis (an ellipse, not a disc)
+const SHADOW_GROUND_LIFT = 0.05       // height above the road surface to avoid z-fighting (world units)
+const SHADOW_BASE_OPACITY = 0.62      // grounded peak opacity (deep-violet, soft-edged)
+const SHADOW_COLOR = new THREE.Color(0x241d2d) // deep dusky-violet (NOT black) — in the mauve-shadow harmony
+// Jump-height response: over this lift (world units) the shadow shrinks/fades to its airborne floor.
+const SHADOW_LIFT_FALLOFF = 4.5       // verticalOffset at which the shadow reaches its smallest/faintest
+const SHADOW_MIN_SCALE = 0.6          // smallest the shadow shrinks to at full height (still present, grounded)
+const SHADOW_MIN_OPACITY_FACTOR = 0.62 // opacity floor factor at full height (fainter but clearly visible → reads as "up")
+
+// Squash/stretch on the kart through the jump arc (sells takeoff/landing). Vertical VELOCITY
+// (not offset) drives it: rising → stretch tall/thin, falling → neutral, the landing impact →
+// a brief squash. Kept subtle so the kart never reads as rubbery.
+const SQUASH_VEL_SCALE = 0.012        // stretch per unit upward velocity (subtle)
+const SQUASH_MAX = 0.16               // clamp on the stretch/squash magnitude
+const SQUASH_LAND_DURATION_MS = 220   // landing squash envelope length
+const SQUASH_LAND_AMOUNT = 0.18       // peak squash (flatten) on landing impact
+const JUMP_LAND_BURST_COUNT = 14      // sparse ink-spatter flecks kicked up on landing
+const JUMP_LAND_FOV_PUNCH = 3.5       // small extra FOV widening beat on landing (degrees)
+const JUMP_LAND_FOV_MS = 260          // landing FOV-beat envelope length
+// JUMP CAMERA (the Nintendo setup). The camera FULLY follows the kart's vertical lift so the kart
+// stays in its composed lower-left spot (NOT flung to the horizon — this close, low camera
+// hugely amplifies vertical world motion, so any under-follow throws the kart off-frame). The
+// GROUNDED SHADOW (held at the road, see updateContactShadow) then drops BELOW the kart by the
+// full lift → that gap is the height cue. A small extra camera HEIGHT lift on a jump tilts the
+// gaze down a touch so the widening gap sits clearly in the lower frame (and the kart reads as
+// airborne over receding ground), without disturbing the resting composition.
+const CAMERA_JUMP_FOLLOW = 0.66       // fraction of the jump lift the camera follows (1 = kart pinned in frame)
+const CAMERA_JUMP_HEIGHT = 0.34       // extra camera height per unit lift (deepens the look-down on a jump)
+const CAMERA_JUMP_HEIGHT_MAX = 1.3    // clamp on the jump height boost (world units)
 
 // Layers (Watercolour Speed). The synthwave NEON_LAYER (selective-bloom selector) is
 // GONE — there is no bloom to select for. LAYER_DEFAULT (0) carries the whole matte
@@ -341,6 +378,12 @@ export class ThreeScene {
   private paintGradePass!: ShaderPass
   private painterlyEdgePass!: ShaderPass
   private velocitySmearPass!: ShaderPass
+  // Aerial-perspective (atmospheric) haze — the DEPTH-RESTORE pass. Depth-gated wash toward the
+  // pale field/sky colour + desaturate + contrast-compress with distance, so the far world
+  // dissolves into the field (recession) while the near foreground stays rich/dark/sharp. Reads
+  // the same scene DepthTexture the edge/smear passes use; fully static (depth-anchored, no
+  // crawl). Slots AFTER the smear (so the streak still grows toward the VP) and BEFORE the paper.
+  private aerialPass!: ShaderPass
   // Subtle final unsharp-mask (crisp, no halos/grain-amp); runs on the painted CONTENT BEFORE
   // the paper grain so it never amplifies the grain. See UnsharpMaskPass.
   private unsharpPass!: ShaderPass
@@ -384,6 +427,15 @@ export class ThreeScene {
   private roadMorphAmplitude = 0
   private roadMorphPhase = 0
   private carMesh: THREE.Group | null = null
+  // Soft contact-shadow pool projected flat on the road directly beneath the kart (deep-violet,
+  // not black). It GROUNDS the floating kart in the world (the single missing cue) and — because
+  // it stays on the ROAD while the car lifts — the growing GAP between kart and shadow is what
+  // sells jump HEIGHT (the Nintendo trick). It is its OWN mesh in the scene (NOT parented to the
+  // lifted car group), positioned each frame at the kart's GROUNDED position, and scaled/softened/
+  // faded by the renderer's carVerticalOffset. Soft-edged radial alpha, NormalBlending so it
+  // darkens the ground beneath. Not HERO_LAYER (it is world shadow, not a crisp foreground hero).
+  private contactShadowMesh: THREE.Mesh | null = null
+  private contactShadowMaterial: THREE.MeshBasicMaterial | null = null
   private trackData: TrackData | null = null
   private skyMesh: THREE.Mesh | null = null
   private sunMesh: THREE.Mesh | null = null
@@ -408,6 +460,13 @@ export class ThreeScene {
   private carOrientation = new THREE.Quaternion()
   private carVerticalVelocity = 0
   private carVerticalOffset = 0
+  // Jump-read state (renderer-owned, drives ONLY visuals — never the jump physics/game logic).
+  // `lastLandingTime` stamps the moment the kart touches down (offset → 0 while descending) so the
+  // landing squash + FOV beat + ink-spatter burst can be phased off performance.now(); the burst
+  // is one-shot-gated by `jumpAirborne` (set true once the kart leaves the ground, cleared on the
+  // landing that fires the burst) so a grounded micro-bounce can't spam spatter.
+  private lastLandingTime = -Infinity
+  private jumpAirborne = false
   private lastTrackHeight = 0
   private lastFrameTime: number | null = null
   private lastFrameDelta = 0
@@ -677,6 +736,9 @@ export class ThreeScene {
 
     // Create the immersion-preserving beat indicator (a glowing sprite, not HUD text)
     this.createBeatIndicator()
+
+    // Soft contact shadow under the kart (grounds it; drives the jump-height read).
+    this.createContactShadow()
 
     // Create initial car
     this.createCar().catch(error => {
@@ -951,6 +1013,41 @@ export class ThreeScene {
     // obstacles stay crisp inside the streaking world. (carMaskPlaceholder remains the safe fallback.)
     this.velocitySmearPass.uniforms.tCarMask.value = this.carMaskTarget.texture
 
+    // PASS 8.5 — AERIAL PERSPECTIVE (DEPTH RESTORE). The frame had read FLAT (a light fore-
+    // ground field meeting a hard dark wedge with no recession). This depth-gated haze washes
+    // the far ground/road/horizon progressively toward the pale field/sky colour, desaturates
+    // it and compresses its contrast (+ a small lift) so distance DISSOLVES into the field
+    // ("lost horizon", ref 02's deep space) while the NEAR foreground keeps its rich, dark,
+    // sharp, high-contrast value. cameraFar TIGHTENED to DEPTH_FAR to match the depth capture's
+    // linearisation; tDepth is the same scene DepthTexture the edge/smear consume. Fully STATIC
+    // (a smooth analytic function of scene depth — no noise, no time, no crawl → no floaters).
+    // The haze colour sits between the sky-horizon band (#CCCCBA) and the sage field so both the
+    // dark-wedge ground and the beige road recede into the same luminous veil.
+    this.aerialPass = createAerialPerspectivePass({
+      cameraNear: this.camera.near,
+      cameraFar: DEPTH_FAR,
+      // Pale cool green-beige haze — the colour the far world dissolves toward (matches the sky
+      // horizon band so the lost horizon reads as ground melting into sky).
+      hazeColor: new THREE.Color(0xc8cdba),
+      // RAW device-depth band, MEASURED for this chase view (the visible ground spans raw ~0.967
+      // near .. ~0.994 at the horizon). Start the wash a touch FARTHER out (0.978) so the whole
+      // near-mid foreground keeps its full RICH/DARK/SATURATED painted value (preserving the prior
+      // palette + near-far weight) and the wash ramps in only across the MID→far band, reaching
+      // full strength at the horizon (0.9935). A gamma keeps the recession smooth into the lost
+      // horizon (the far ground/road/dark-wedge dissolve into the field).
+      hazeNear: 0.978,
+      hazeFar: 0.9935,
+      hazeGamma: 1.55,
+      // A confident wash so the FLAT dark wedge clearly recedes (it was the worst offender), but
+      // short of fully painting the far field flat-pale (the obstacles down-track must still read).
+      hazeStrength: 0.74,
+      desat: 0.5,
+      contrast: 0.52,
+      lift: 0.05,
+      pivot: 0.6
+    })
+    this.aerialPass.uniforms.tDepth.value = this.sceneDepthTexture
+
     // PASS 9 — SubstratePaper (FINAL): frame-anchored paper granulation + tooth-light +
     // micro-distort, Pegtop soft-light, folded dither (drawing-buffer resolution).
     // Round 2: a COARSER cold-press tooth (paperScale 2.6 → 1.25, low-frequency paper grain)
@@ -1023,6 +1120,8 @@ export class ThreeScene {
     this.composer.addPass(this.paintGradePass)
     this.composer.addPass(this.painterlyEdgePass)
     this.composer.addPass(this.velocitySmearPass)
+    // DEPTH RESTORE: aerial-perspective haze on the smeared image, under the static paper grain.
+    this.composer.addPass(this.aerialPass)
     this.composer.addPass(this.unsharpPass)
     this.composer.addPass(this.substratePaperPass)
     // FINAL: additive selective bloom on the genuinely bright accents (after the paper sheet, so
@@ -1257,6 +1356,155 @@ export class ThreeScene {
     this.beatIndicator.scale.set(scale, scale, scale)
     // Idle glow ~0.18 so it reads as a persistent synthwave element; punches to ~1.
     this.beatIndicatorMaterial.opacity = 0.18 + pulse * 0.82
+  }
+
+  /**
+   * Builds the soft contact-shadow pool laid flat on the road beneath the kart. A radial-
+   * gradient alpha (soft-edged ellipse) on a plane, tinted DEEP DUSKY-VIOLET (not black, so it
+   * sits in the mauve-shadow harmony), NormalBlended so it darkens the ground it covers. Its
+   * own mesh in the scene (NOT parented to the lifted car group), so updateContactShadow can
+   * keep it on the GROUND while the car rises — the kart↔shadow GAP is the jump-height cue.
+   *
+   * The plane is built in the XZ ground plane (rotated flat) with the longer axis along local Z
+   * so updateContactShadow can orient it to the kart's forward and stretch it into a road-hugging
+   * ellipse. depthWrite off (it must never occlude the kart/road); a small ground lift + polygon
+   * offset avoid z-fighting with the road ribbon.
+   */
+  private createContactShadow(): void {
+    const size = 128
+    const canvas = document.createElement('canvas')
+    canvas.width = size
+    canvas.height = size
+    const ctx = canvas.getContext('2d')
+    if (ctx) {
+      // Soft radial falloff baked as LUMINANCE (white core -> black rim) on a fully-opaque canvas.
+      // three.js `alphaMap` samples the texture's GREEN channel for opacity, so the alpha must live
+      // in the colour value (white = opaque centre, black = transparent rim) — encoding it in the
+      // canvas ALPHA channel instead would be ignored (the subtle bug that first hid the shadow).
+      const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2)
+      g.addColorStop(0.0, 'rgb(255,255,255)')
+      g.addColorStop(0.45, 'rgb(210,210,210)')
+      g.addColorStop(0.75, 'rgb(80,80,80)')
+      g.addColorStop(1.0, 'rgb(0,0,0)')
+      ctx.fillStyle = g
+      ctx.fillRect(0, 0, size, size)
+    }
+    const texture = new THREE.CanvasTexture(canvas)
+    texture.colorSpace = THREE.NoColorSpace // used as an alpha mask; no sRGB decode
+    texture.minFilter = THREE.LinearFilter
+    texture.magFilter = THREE.LinearFilter
+
+    const geo = new THREE.PlaneGeometry(1, 1)
+    const mat = new THREE.MeshBasicMaterial({
+      color: SHADOW_COLOR.clone(),
+      alphaMap: texture,
+      transparent: true,
+      opacity: SHADOW_BASE_OPACITY,
+      depthWrite: false,
+      // Pull the fragments toward the camera in depth so the flat shadow never z-fights the road
+      // it lies on (it is also lifted a hair in Y).
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+      // Keep it out of the painterly tone-map fuss: it's a simple alpha-darkening decal. fog ON so
+      // a distant shadow recedes with the world (it never travels far from the near kart anyway).
+      toneMapped: true
+    })
+    const mesh = new THREE.Mesh(geo, mat)
+    mesh.rotation.x = -Math.PI / 2 // lay flat in the ground (XZ) plane
+    mesh.renderOrder = 1 // after the opaque road/ground, before the heroes
+    mesh.frustumCulled = false
+    // World shadow → LAYER_DEFAULT only (no HERO_LAYER: it must not be a crisp sharp-masked hero,
+    // and it must not appear in the hero coverage mask the smear/edge/bloom consume).
+    mesh.layers.set(LAYER_DEFAULT)
+    this.contactShadowMesh = mesh
+    this.contactShadowMaterial = mat
+    this.scene.add(mesh)
+  }
+
+  /**
+   * Positions/orients/scales the contact shadow each frame. CRITICAL: it is seated at the kart's
+   * GROUNDED position (groundPos, WITHOUT the vertical jump offset) so it stays pinned to the road
+   * while the kart lifts — the growing kart↔shadow GAP is what reads as jump height. As the lift
+   * rises the shadow SHRINKS and FADES toward an airborne floor (still present, so the eye keeps
+   * the ground reference), selling altitude the way a Nintendo character's shadow does.
+   *
+   * @param groundPos kart position on the road surface (no vertical offset)
+   * @param forward   kart forward (for the ellipse's long axis)
+   * @param up        local up at the kart (the road normal)
+   * @param lift      carVerticalOffset (world units the kart is currently raised)
+   */
+  private updateContactShadow(
+    groundPos: THREE.Vector3,
+    forward: THREE.Vector3,
+    up: THREE.Vector3,
+    lift: number
+  ): void {
+    const mesh = this.contactShadowMesh
+    const mat = this.contactShadowMaterial
+    if (!mesh || !mat) return
+
+    // Height-driven shrink/fade. t: 0 grounded → 1 at full height.
+    const t = THREE.MathUtils.clamp(lift / SHADOW_LIFT_FALLOFF, 0, 1)
+    const sizeScale = THREE.MathUtils.lerp(1, SHADOW_MIN_SCALE, t)
+    const opacity = SHADOW_BASE_OPACITY * THREE.MathUtils.lerp(1, SHADOW_MIN_OPACITY_FACTOR, t)
+    mat.opacity = opacity
+
+    // Seat the shadow ON the road at the grounded position, lifted a hair to dodge z-fighting.
+    mesh.position.copy(groundPos)
+    mesh.position.addScaledVector(up, SHADOW_GROUND_LIFT)
+
+    // Orient flat in the road plane with the long axis along the kart forward. The PlaneGeometry
+    // lies in its LOCAL XY plane with normal +Z, so to lay it flat its local Z must map to the road
+    // UP, local X to "across" (right) and local Y to "along" (forward-in-plane). makeBasis(X,Y,Z) =
+    // makeBasis(right, fOnPlane, up). (Getting this wrong stands the quad up vertical → invisible
+    // from above; this is exactly the bug that hid the shadow.)
+    const f = forward.clone().normalize()
+    const right = new THREE.Vector3().crossVectors(f, up).normalize()
+    // Re-orthogonalise forward against up so the quad lies exactly in the road plane.
+    const fOnPlane = new THREE.Vector3().crossVectors(up, right).normalize()
+    const m = new THREE.Matrix4().makeBasis(right, fOnPlane, up)
+    mesh.quaternion.setFromRotationMatrix(m)
+
+    // Ellipse: base radius across, stretched along forward; scaled down with height. (The plane is
+    // 1x1 built in XY, X = across = right, Y = along = forward.)
+    const across = SHADOW_BASE_RADIUS * 2 * sizeScale
+    const along = SHADOW_BASE_RADIUS * 2 * SHADOW_LENGTH_SCALE * sizeScale
+    mesh.scale.set(across, along, 1)
+  }
+
+  /**
+   * Applies the jump squash/stretch to the kart GROUP (visual only). The group's own scale is
+   * identity (the GLB's scale lives on its child), so a small non-uniform group scale is a safe,
+   * composable accent on top of the hero transform. Two contributions:
+   *   - VELOCITY STRETCH: rising (vy>0) stretches the kart tall + thin (anticipation); the apex
+   *     and fall sit near neutral. Subtle, clamped.
+   *   - LANDING SQUASH: a brief flatten (short + wide) phased off lastLandingTime — the impact.
+   * Local Y is "up", local X/Z the footprint (the lookAt orientation puts forward at +Z, up +Y).
+   */
+  private applyJumpSquash(): void {
+    if (!this.carMesh) return
+    // VERTICAL SPEED → STRETCH TALL. Classic squash/stretch elongates a body along its motion, so
+    // the kart stretches tall while moving fast vertically (BOTH on the launch rise and the fall)
+    // and relaxes to neutral at the apex hang (|vy|≈0) — never pre-squashing on the descent. Driven
+    // by |vy| so the sign is always a stretch; clamped so it never reads rubbery.
+    const velStretch = THREE.MathUtils.clamp(
+      Math.abs(this.carVerticalVelocity) * SQUASH_VEL_SCALE,
+      0,
+      SQUASH_MAX
+    )
+    // Landing squash envelope (ease-out): brief flatten right after touchdown.
+    let landSquash = 0
+    const landAge = performance.now() - this.lastLandingTime
+    if (Number.isFinite(landAge) && landAge >= 0 && landAge < SQUASH_LAND_DURATION_MS) {
+      const d = landAge / SQUASH_LAND_DURATION_MS
+      landSquash = (1 - d) * (1 - d) * SQUASH_LAND_AMOUNT
+    }
+    // Net vertical scale: +velStretch (tall on rise) − landSquash (flat on land). Footprint
+    // (X/Z) takes the opposite sign so volume reads roughly preserved.
+    const sy = 1 + velStretch - landSquash
+    const sxz = 1 - velStretch * 0.5 + landSquash * 0.6
+    this.carMesh.scale.set(sxz, sy, sxz)
   }
 
   private async createCar(): Promise<void> {
@@ -1562,6 +1810,8 @@ export class ThreeScene {
     this.carOrientation.identity()
     this.carVerticalVelocity = 0
     this.carVerticalOffset = 0
+    this.lastLandingTime = -Infinity
+    this.jumpAirborne = false
     this.lastCollisionTime = 0
     this.lastTrackHeight = track.nodes[0]?.pos.y ?? 0
     this.lastFrameTime = null
@@ -2000,12 +2250,13 @@ export class ThreeScene {
    * its uPrevViewProj is cached AFTER render; the smear is zeroed on seek/large-delta frames.
    */
   private renderComposite(gameState: GameState): void {
+    const now = performance.now()
     // Milliseconds since the last beat onset. lastBeatTime is a performance.now()
     // timestamp recorded by the controller when the audio clock crosses a beat, so
     // we can compute the envelope phase without the renderer knowing the audio time.
     // It starts at -Infinity, so before any beat this is huge and envelopes sit at
     // baseline.
-    const beatAgeMs = performance.now() - gameState.car.lastBeatTime
+    const beatAgeMs = now - gameState.car.lastBeatTime
     const strength = gameState.car.beatStrength
 
     // Mood signals (smoothed upstream by the controller). centroid is the slow sectional
@@ -2037,7 +2288,16 @@ export class ThreeScene {
     // scale FOV_DROP_BOOST_MAX by it, so the lens widens in lock-step with the camera easing
     // back — read off the same eased depth (this.appliedDepthScale) so they never desync.
     const depthExcess = THREE.MathUtils.clamp((this.appliedDepthScale - 1) / 0.15, 0, 1)
-    const targetFov = BASE_FOV + fovOffset + dropIntensity * FOV_DROP_PUNCH + depthExcess * FOV_DROP_BOOST_MAX
+    // Landing FOV beat (jump read): a small fast widen-and-settle the instant the kart touches
+    // down, phased off lastLandingTime (the FOV-punch infra), so the impact gets a camera beat on
+    // top of the squash + ink spatter. Distinct from the beat/drop terms; eases out quickly.
+    let landFov = 0
+    const landAge = now - this.lastLandingTime
+    if (Number.isFinite(landAge) && landAge >= 0 && landAge < JUMP_LAND_FOV_MS) {
+      const d = landAge / JUMP_LAND_FOV_MS
+      landFov = (1 - d) * (1 - d) * JUMP_LAND_FOV_PUNCH
+    }
+    const targetFov = BASE_FOV + fovOffset + dropIntensity * FOV_DROP_PUNCH + depthExcess * FOV_DROP_BOOST_MAX + landFov
     if (Math.abs(this.camera.fov - targetFov) > 0.01) {
       this.camera.fov = targetFov
       this.camera.updateProjectionMatrix()
@@ -2562,15 +2822,60 @@ export class ThreeScene {
     )
     gameState.car.verticalOffset = relativeVerticalOffset
 
+    // --- JUMP-READ visual reactions (purely visual; never touches the jump physics above). The
+    // kart is "airborne" once it clears a threshold; the rising edge arms a one-shot landing
+    // gesture, the falling edge (back to grounded) FIRES it: a sparse ink-spatter burst kicked
+    // up off the contact point + a stamped landing time that drives the landing squash and the
+    // small FOV beat (consumed in renderComposite). The shadow stays grounded throughout (see
+    // updateContactShadow), so the kart↔shadow gap already telegraphs the height on the way up.
+    const AIRBORNE_THRESHOLD = 0.35
+    if (deltaSeconds > 0) {
+      if (relativeVerticalOffset > AIRBORNE_THRESHOLD) {
+        this.jumpAirborne = true
+      } else if (this.jumpAirborne) {
+        // Touchdown: fire the one-shot landing gesture.
+        this.jumpAirborne = false
+        const now2 = performance.now()
+        this.lastLandingTime = now2
+        // A sparse, short ink-spatter kick at the wheels' contact point (grounded position), so
+        // it reads as dust/ink thrown up on impact — NOT a lingering floater field.
+        const landPos = this.smoothedCarPosition.clone()
+        landPos.y += 0.15
+        const landColor =
+          gameState.car.spectralCentroid > 0.5 ? BURST_COLOR_HOT : BURST_COLOR_COOL
+        this.particlePool.emitBurst(JUMP_LAND_BURST_COUNT, landPos, 7, landColor, PARTICLE_LIFETIME_COLLISION)
+        // A small Wipeout-ish landing thud on the camera shake (gentler than a collision).
+        gameState.car.cameraShakeAmplitude = Math.max(gameState.car.cameraShakeAmplitude, 0.32)
+        gameState.car.lastShakeTime = now2
+      }
+    }
+
     this.handleObstacleCollision(visualCarPosition, gameState)
 
     // Position and orient car
     this.carMesh.position.copy(visualCarPosition)
     this.carMesh.quaternion.copy(this.carOrientation)
 
+    // --- SQUASH & STRETCH (jump read). Drive a subtle non-uniform scale on the kart group off
+    // the vertical VELOCITY: rising → stretch tall (Y up, footprint X/Z in); the landing impact →
+    // a brief squash (Y flat, footprint out), phased off lastLandingTime. Kept small + clamped so
+    // the kart never reads rubbery — just a lively anticipation/impact accent. Applied AFTER the
+    // position/orientation copy so it composes on top of the hero transform.
+    this.applyJumpSquash()
+
     const smoothedRight = new THREE.Vector3()
       .crossVectors(this.smoothedCarForward, currentNode.up)
       .normalize()
+
+    // CAMERA ANCHOR (jump read): the camera frames this point, which follows only a SMALL fraction
+    // of the kart's vertical jump lift (CAMERA_JUMP_FOLLOW). The kart mesh itself sits at the FULL
+    // lift (visualCarPosition), so on a jump the kart visibly RISES in the frame, away from its
+    // grounded shadow — the gap that sells height. On the ground (lift 0) the anchor == the kart, so
+    // resting framing is unchanged. Forward/lateral come from the grounded position so the chase
+    // tracking is identical horizontally; only the vertical follow is damped.
+    const cameraAnchor = this.smoothedCarPosition
+      .clone()
+      .addScaledVector(currentNode.up, this.carVerticalOffset * CAMERA_JUMP_FOLLOW)
 
     // Position camera behind and slightly above car with orbiting glide during lane changes.
     // Cinematic pull-back (iteration 9): ease the applied depth scale toward the controller's
@@ -2586,7 +2891,13 @@ export class ThreeScene {
     const cameraDistance = BASE_CAMERA_DISTANCE * this.appliedDepthScale
     // Round 3: a LOWER eye-line (was 3) so we read the kart's flank/shoulder — the rounded
     // surface the broad "helmet" sheen rolls across — instead of a top-down dark blob.
-    const cameraHeight = 2.0
+    // Jump read: a small extra height while airborne deepens the look-down so the grounded-shadow
+    // GAP sits clearly in the lower frame (eased off the lift; zero at rest → composition intact).
+    const jumpHeightBoost = Math.min(
+      CAMERA_JUMP_HEIGHT_MAX,
+      this.carVerticalOffset * CAMERA_JUMP_HEIGHT
+    )
+    const cameraHeight = 2.0 + jumpHeightBoost
     const baseCameraOffset = this.smoothedCarForward
       .clone()
       .multiplyScalar(-cameraDistance)
@@ -2599,7 +2910,7 @@ export class ThreeScene {
     // the composition stays raking even during a head-on drop moment.
     baseCameraOffset.applyAxisAngle(currentNode.up, this.cameraOrbitAngle + COMPOSE_YAW)
 
-    const cameraPosition = visualCarPosition.clone().add(baseCameraOffset)
+    const cameraPosition = cameraAnchor.clone().add(baseCameraOffset)
     this.camera.position.lerp(cameraPosition, 0.2)
 
     // Anticipatory look-ahead (iteration 6): aim further down the track than the old
@@ -2611,7 +2922,7 @@ export class ThreeScene {
     const carSpeed = 50 // matches the GameController/TrackGenerator speed constant
     const lookAheadDist = Math.max(LOOK_AHEAD_DISTANCE, carSpeed * 0.2)
     const aheadForward = this.sampleTrackForward(carDistance + lookAheadDist, this.smoothedCarForward)
-    const lookTarget = visualCarPosition
+    const lookTarget = cameraAnchor
       .clone()
       .add(aheadForward.clone().multiplyScalar(lookAheadDist))
       .add(
@@ -2663,6 +2974,15 @@ export class ThreeScene {
 
     // Keep the neon floor + ground streaming beneath the car (infinite scroll).
     this.updateFloorFollow(this.smoothedCarPosition)
+
+    // Ground the kart with its contact shadow. Seated at the GROUNDED position (no vertical jump
+    // offset) so it stays on the road while the kart lifts — the kart↔shadow gap = jump height.
+    this.updateContactShadow(
+      this.smoothedCarPosition,
+      this.smoothedCarForward,
+      currentNode.up,
+      this.carVerticalOffset
+    )
 
     // Render
     this.updateSunPlacement()
