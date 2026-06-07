@@ -277,10 +277,11 @@ export function injectCarSheen(
         // Fresnel for the grazing catch-lights + the razor spark gate (silhouette emphasis).
         float fres = pow(1.0 - clamp(dot(sN, sV), 0.0, 1.0), 3.0);
 
-        // Low-frequency desaturating mottle: a slow value-noise wash across the lobe (~+-0.05 in
-        // value) so the sheen is a hand-laid wash, not a clean CG gradient. Sampled in screen
-        // space and crawled by uTime (slow -> no boiling).
-        float mottle = sheenNoise(gl_FragCoord.xy * 0.012 + uTime * 0.05) - 0.5; // ~[-0.5, 0.5]
+        // Low-frequency desaturating mottle: a value-noise wash across the lobe (~+-0.05 in
+        // value) so the sheen is a hand-laid wash, not a clean CG gradient. FLOATER FIX: the
+        // uTime*0.05 crawl was removed so the mottle is STATIC, frame-anchored to gl_FragCoord —
+        // a fixed hand-laid texture, never a per-frame boil (drifting sheen reads as a floater).
+        float mottle = sheenNoise(gl_FragCoord.xy * 0.012) - 0.5; // ~[-0.5, 0.5], static
 
         // COVERAGE: how strongly the broad sheen owns this fragment, 0..1. Strength widens AND
         // deepens the band (a louder beat = a bigger, brighter roll), mottle breaks its edge so it
@@ -416,8 +417,10 @@ const SHEEN_EASE = 0.3
  * @param drivers the current music/animation drivers (see {@link CarSheenDrivers}).
  */
 export function updateCarSheen(entry: CarSheenMaterial, drivers: CarSheenDrivers): void {
-  // Advance time even before the shader compiles so the mottle is already crawling on first frame.
-  entry.time += Math.max(0, drivers.dt)
+  // FLOATER FIX: the mottle noise is now STATIC (frame-anchored, no uTime), so `entry.time` is
+  // no longer advanced and uTime is left inert — the sheen breathes via uSheenStrength only (a
+  // value pulse), never a crawling texture. The dt driver is unused here now.
+  void drivers.dt
 
   const u = entry.uniforms
   if (!u) return

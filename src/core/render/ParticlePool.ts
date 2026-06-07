@@ -296,7 +296,10 @@ export class ParticlePool {
     if (deltaSeconds <= 0 || this.liveHighWater === 0) return
 
     const GRAVITY = 7 // a touch heavier than embers — droplets fall and settle fast
-    const DRAG = 0.9 // stronger per-frame damping so spatter throws then stops
+    // FLOATER FIX: heavier per-frame damping (0.9 -> 0.82) so a fleck throws then arrests
+    // quickly — it travels a short distance and stops, rather than drifting across the frame
+    // for its whole life (the drifting motion was the "floater" the user flagged).
+    const DRAG = 0.82
     let anyAlive = false
 
     for (let i = 0; i < this.liveHighWater; i++) {
@@ -368,6 +371,10 @@ export class ParticlePool {
   // Locked near-black pigments (STYLE_SPEC §2 #16 / #17). NEVER pure black.
   private static readonly INK_COOL = new THREE.Color(0x20211c) // cool-lit ink / drip
   private static readonly INK_WARM = new THREE.Color(0x1e1b22) // warm-side shadow ink
-  // Keep coverage at ~1–2%: emit only this fraction of the requested count.
-  private static readonly COVERAGE_THIN = 0.45
+  // FLOATER FIX: the drifting dark flecks were the literal "eye floaters" — a persistent
+  // field of dark specks crawling over the light frame. Thinned HARD (0.45 -> 0.18) so a
+  // burst is sparse INK PUNCTUATION (a few flecks), not a spray that lingers and drifts.
+  // Combined with the shortened lifetimes at the call sites, the spatter is now a brief
+  // collision/beat accent that settles fast — no constant floating drift.
+  private static readonly COVERAGE_THIN = 0.18
 }

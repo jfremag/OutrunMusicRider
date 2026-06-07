@@ -32,9 +32,9 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
  * The GATE is the heart of the look. The raw union is multiplied by:
  *     saliency  x  flow-coherence(anisotropy)  x  slow-crawling value-noise breakup  x  depthFade
  * so a contour only inks where it is locally salient, well-oriented, NOT masked out by the
- * breakup field, and near enough to matter. Because the breakup noise CRAWLS slowly
- * (`uTime * 0.05`) the masked-out segments drift gently rather than strobing — and the very
- * same physical edge therefore appears inked on one stretch and absent on the next. A
+ * breakup field, and near enough to matter. The breakup noise is FRAME-ANCHORED and STATIC
+ * (the old `uTime` crawl was removed — drifting/swimming edges read as "eye floaters"); the
+ * same physical edge therefore appears inked on one stretch and absent on the next, FIXED. A
  * hysteresis-style smoothstep band on a smoothed contrast field (`salLo..salHi`) keeps weak
  * speckle from flickering in and strong cores reliably present (the EMA/temporal smoothing of
  * that contrast field lives on the renderer side via the pre-blurred input; this pass keeps
@@ -277,8 +277,8 @@ export function createPainterlyEdgePass(opts: {
       float lumaAt(vec2 uv) { return luma(texture2D(tDiffuse, uv).rgb); }
 
       // -- Value noise (same hash21/valueNoise idiom the pigment/paper passes use) ---------
-      // Drives the slow breakup field that makes edges "found here / lost there". Frame-
-      // anchored in screen UV and crawling at uTime*0.05 so masked segments drift, not strobe.
+      // Drives the STATIC breakup field that makes edges "found here / lost there". Frame-
+      // anchored in screen UV with NO time term (the old uTime crawl caused drifting floaters).
       float hash21(vec2 p) {
         p = fract(p * vec2(123.34, 345.45));
         p += dot(p, p + 34.345);
@@ -532,14 +532,14 @@ export function createPainterlyEdgePass(opts: {
         //    wet zones ink a little LESS; high-coherence true contours ink full.
         float cohGate = mix(0.45, 1.0, smoothstep(cohLo, cohHi, coherence));
 
-        // 3) SLOW-CRAWLING BREAKUP NOISE — the lost-and-found engine. A frame-anchored fbm
-        //    that crawls at uTime*0.05 (slow, per spec, or edges strobe). Compared against a
-        //    threshold so only the higher-noise stretches keep their ink: the SAME edge is
-        //    found where the field is high and LOST where it is low, and because the field
-        //    drifts slowly the boundary creeps rather than blinking. Threshold ~0.42 calm so
-        //    a healthy MINORITY (~35-45%) of the salient length survives (the rest stay lost).
+        // 3) STATIC BREAKUP NOISE — the lost-and-found engine. A FRAME-ANCHORED fbm sampled in
+        //    screen UV. FLOATER FIX: the old uTime crawl made masked edge segments drift, swim,
+        //    and strobe frame-to-frame (the eye-floaters complaint). The time term is REMOVED
+        //    so the found/lost pattern is FIXED in the frame — the SAME edge is inked where the
+        //    field is high and lost where it is low, but that boundary never moves.
+        //    Threshold ~0.42 calm so a healthy MINORITY (~35-45%) of the salient length survives.
         vec2 aspect = vec2(uResolution.x / uResolution.y, 1.0);
-        vec2 np = vUv * aspect * noiseScale + vec2(uTime * 0.05, uTime * 0.037);
+        vec2 np = vUv * aspect * noiseScale;
         float n = breakupFbm(np);
         // Music WIDENS the threshold window so MORE ink survives on drops (never a strength
         // strobe). Lower threshold => more of the field passes => more found ink.

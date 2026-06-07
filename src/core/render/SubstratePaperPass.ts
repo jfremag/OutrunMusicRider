@@ -32,10 +32,11 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
  *
  * FRAME-ANCHORED (the #1 paper risk): the height field is sampled from `gl_FragCoord` /
  * resolution, i.e. screen-static. It is NOT tied to scene geometry, so it does not scroll
- * with the road ("shower-door" death). `time` only drives a very slow, low-amplitude re-seed
- * (a barely-perceptible drift of a new sheet) — never a per-frame boil. The finite-difference
- * gradient is taken from the NOISE FIELD itself (not from tDiffuse), so the tooth-light and
- * micro-distortion describe the paper, not the image content.
+ * with the road ("shower-door" death), AND it is fully TIME-FREE — the old slow `time` re-seed
+ * drift was removed so the tooth never crawls (drifting granulation reads as "eye floaters").
+ * `time` remains as an inert uniform only. The finite-difference gradient is taken from the
+ * NOISE FIELD itself (not from tDiffuse), so the tooth-light and micro-distortion describe the
+ * paper, not the image content.
  *
  * Display-space LDR: runs after OutputPass like every painterly pass; all maths are
  * perceptual (luma bell, soft-light) and would misbehave on linear HDR.
@@ -196,7 +197,9 @@ export function createSubstratePaperPass(opts: {
         // pigment fingers; the across-grain axis stays fine, so strokes read as bristle marks.
         p.x /= max(paperAniso, 0.25);
         p *= paperScale * 64.0;                     // tiles across screen -> lattice units
-        p += vec2(time * 0.013, time * -0.009);     // slow re-seed drift (shower-door safe)
+        // FLOATER FIX: the slow re-seed drift (time*0.013) is REMOVED so the paper tooth is
+        // 100% frame-anchored and NEVER moves — any drift of the granulation field reads as
+        // crawling grain (floaters). The time uniform is retained as inert for back-compat.
         return p;
       }
 

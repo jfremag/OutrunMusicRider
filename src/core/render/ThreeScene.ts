@@ -23,6 +23,8 @@ import { buildPaintRamp } from './paintRamp'
 import { createPainterlyEdgePass } from './PainterlyEdgePass'
 import { createVelocitySmearPass } from './VelocitySmearPass'
 import { createSubstratePaperPass } from './SubstratePaperPass'
+import { createSelectiveBloomPass, SelectiveBloom } from './SelectiveBloomPass'
+import { createUnsharpMaskPass } from './UnsharpMaskPass'
 import { injectCarSheen, updateCarSheen, CarSheenMaterial } from './CarSheenMaterial'
 
 // Beat-sync envelope tuning. The FOV "punch" zooms out fast on a beat onset then eases
@@ -125,8 +127,11 @@ const SHAKE_DECAY = 0.92 // residual offset decay multiplier per frame (clean se
 const COLLISION_SHAKE_AMPLITUDE = 0.6 // fixed Wipeout-style impact spike
 const PARTICLES_PER_DROP_UNIT = 60 // burst count multiplier on drop entry (× dropStrength)
 const PARTICLES_PER_COLLISION = 42 // burst count on an obstacle hit (kept below a bloom wash)
-const PARTICLE_LIFETIME_DROP = 0.6 // seconds a drop-burst particle lives
-const PARTICLE_LIFETIME_COLLISION = 0.5 // seconds a collision-burst particle lives
+// FLOATER FIX: shortened lifetimes so the ink spatter is a brief punctuation that settles
+// fast, not a lingering drifting plume of dark specks (the "eye floaters"). A drop fleck now
+// reads as a quick spit of ink, dries, and is gone — no persistent floating field.
+const PARTICLE_LIFETIME_DROP = 0.35 // seconds a drop-burst particle lives (was 0.6)
+const PARTICLE_LIFETIME_COLLISION = 0.32 // seconds a collision-burst particle lives (was 0.5)
 
 // Mood-burst warmth keyed off spectral centroid (perceived brightness). The particle
 // pool now renders all bursts as tinted near-black pigment spatter and only reads the
@@ -224,7 +229,10 @@ const HUE_SHIFT_EASE = 0.1 // ease toward the loudness-driven hue-shift target
 const TREBLE_BURST_COUNT_MIN = 6 // particles at threshold strength
 const TREBLE_BURST_COUNT_MAX = 8 // particles at full-strength transient
 const TREBLE_BURST_SPEED = 6 // outward fling speed (slower/tighter than drop bursts)
-const TREBLE_BURST_LIFETIME = 0.25 // seconds — a quick flick, not a lingering plume
+// FLOATER FIX: even shorter (0.25 -> 0.16) — a treble flick is a single quick spit of ink,
+// not a hovering speck. Treble peaks are frequent, so a short life is what keeps them from
+// accumulating into a persistent drifting field.
+const TREBLE_BURST_LIFETIME = 0.16 // seconds — a quick flick, not a lingering plume
 
 // "Watercolour Speed" harmony palette (STYLE_SPEC §2, pixel-measured from ref 02). These
 // are the literal driver values for the FLAT MATTE materials, lighting and fog. The grays
@@ -333,7 +341,13 @@ export class ThreeScene {
   private paintGradePass!: ShaderPass
   private painterlyEdgePass!: ShaderPass
   private velocitySmearPass!: ShaderPass
+  // Subtle final unsharp-mask (crisp, no halos/grain-amp); runs on the painted CONTENT BEFORE
+  // the paper grain so it never amplifies the grain. See UnsharpMaskPass.
+  private unsharpPass!: ShaderPass
   private substratePaperPass!: ShaderPass
+  // Selective high-threshold bloom (sun + hero sheen/glint + sword tips only); a self-contained
+  // bright-pass + half-res blur + ADDITIVE composite, added as the FINAL pass. See SelectiveBloomPass.
+  private selectiveBloom!: SelectiveBloom
   // Owned HALF-RES RGBA16F float targets for the structure-tensor side-chain. The tensor
   // packs (Jxx, Jyy, Jxy) which are SQUARED/SIGNED gradients (>1, ±) so an 8-bit target
   // would band the stroke directions — float storage is mandatory. Two targets ping-pong
@@ -769,10 +783,14 @@ export class ThreeScene {
     // 0.6 -> 0.42 so the ellipse is LESS extreme/elongated and the along-stroke profile falls off
     // sooner — keeping the directional brush CHARACTER but stopping the long flat tail that was
     // dragging colour across edges into a blur. anisoGain trimmed 2.4 -> 2.0 to match.
+    // CRISP: radius 5 -> 4 shrinks the gouache averaging footprint a notch so forms read crisper
+    // (ref 02 is print-sharp) while staying painterly; the directional brush character is retained
+    // by the (unchanged) ecc/anisoGain/strokeBias. The unsharp-mask finisher then crisps edges
+    // further without re-blurring.
     this.kuwaharaPass = createAnisotropicKuwaharaPass({
       texel: fullTexel,
       tensorTexel: halfTexel,
-      radius: 5,
+      radius: 4,
       sharpness: KUWAHARA_Q_REST,
       eccentricityClamp: 0.52,
       anisoGain: 2.0,
@@ -968,7 +986,34 @@ export class ThreeScene {
       coolTint: [0.58, 0.60, 0.56]   // cool sage-green/mauve micro-shadow valley
     })
 
-    // addPass in the EXACT STYLE_SPEC §3 order.
+    // CRISP: a subtle unsharp-mask AFTER the smear (on the painted CONTENT) and BEFORE the paper
+    // grain, so it crisps the painted forms toward ref 02's print-sharpness WITHOUT amplifying the
+    // fine grain (the grain is laid on top, after). amount/threshold keep it subtle + halo/grain-safe.
+    this.unsharpPass = createUnsharpMaskPass({
+      resolution: [bufW, bufH],
+      amount: 1.0,       // confident crisp toward ref 02's print-sharpness (still painterly, no CG look)
+      radius: 1.0,
+      threshold: 0.02,   // deadzone: flat-field micro-texture below this is NOT sharpened (grain-safe)
+      maxBoost: 0.22     // clamp so even strong contours crisp without ringing/halos
+    })
+
+    // SELECTIVE BLOOM (FINAL pass): a tasteful, high-threshold, additive bloom isolated to the
+    // genuinely bright accents only — the sun disc, the hero sheen/glint, the brightest sword
+    // tips — for ref 02's lively wet luminosity. It is SELECTIVE via a high luma threshold AND the
+    // HERO_LAYER mask boost, so it never washes/softens the muted matte field (no synthwave glow).
+    // Self-contained side-chain (bright-pass + half-res blur) folded into its composite render.
+    this.selectiveBloom = createSelectiveBloomPass({
+      resolution: [bufW, bufH],
+      threshold: 0.80,   // only luma > ~0.80 blooms → the sun core + sheen crest + sword glints
+      knee: 0.07,
+      strength: 1.3,     // a clearly LIVELY but still tasteful wet glow on the lights (field stays matte)
+      radius: 2.4,
+      heroBoost: 2.2     // car sheen / sword tips bloom harder than an equally-bright field pixel
+    })
+    // The hero mask boosts the heroes; it is the same half-res HERO_LAYER coverage the smear uses.
+    this.selectiveBloom.setHeroMask(this.carMaskTarget.texture)
+
+    // addPass in the EXACT STYLE_SPEC §3 order, then the crisp + selective-bloom finishers.
     this.composer.addPass(this.preBlurPass)
     this.composer.addPass(this.structureTensorPass)
     this.composer.addPass(this.tensorBlurHPass)
@@ -978,7 +1023,11 @@ export class ThreeScene {
     this.composer.addPass(this.paintGradePass)
     this.composer.addPass(this.painterlyEdgePass)
     this.composer.addPass(this.velocitySmearPass)
+    this.composer.addPass(this.unsharpPass)
     this.composer.addPass(this.substratePaperPass)
+    // FINAL: additive selective bloom on the genuinely bright accents (after the paper sheet, so
+    // the lights glow on top of the finished painting). renderToScreen is managed by EffectComposer.
+    this.composer.addPass(this.selectiveBloom.composite)
   }
 
   private createBackground(): void {
@@ -1872,6 +1921,10 @@ export class ThreeScene {
     ThreeScene.setVec2Uniform(this.painterlyEdgePass.uniforms.tensorTexel, halfTexel)
     // VelocitySmear: full-res texel for the noise/wobble sampling.
     ThreeScene.setVec2Uniform(this.velocitySmearPass.uniforms.uTexelSize, fullTexel)
+    // Unsharp-mask: full-res texel for the blur tap spacing.
+    ThreeScene.setVec2Uniform(this.unsharpPass.uniforms.texel, fullTexel)
+    // Selective bloom: resize its half-res bright/blur side-chain targets to the new buffer.
+    this.selectiveBloom.setSize(bufW, bufH)
   }
 
   /**
@@ -2077,7 +2130,8 @@ export class ThreeScene {
    *    drops; uStrength eases toward a speed/drop target; uVelocityScale keeps the streak
    *    framerate-stable.
    *  - PAINTERLY EDGE: uMusic eased toward dropIntensity so the breakup threshold WIDENS (more
-   *    "found" ink — the painter pressing harder) on drops; uTime advanced for the slow crawl.
+   *    "found" ink — the painter pressing harder) on drops. The breakup field is STATIC (frame-
+   *    anchored, no uTime crawl) to avoid drifting-edge floaters, so only the threshold moves.
    *  - PAINT-GRADE LUT: a micro uHueShift toward rose on LOUD passages (accent-chroma push),
    *    eased so the frame never snaps.
    *
@@ -2151,10 +2205,12 @@ export class ThreeScene {
     this.smoothedFlowGain += (flowGainTarget - this.smoothedFlowGain) * FLOW_GAIN_EASE
     smearU.uFlowGain.value = this.smoothedFlowGain
 
-    // --- PAINTERLY EDGE breakup widen on drops + slow crawl.
+    // --- PAINTERLY EDGE breakup widen on drops. The breakup field is now STATIC (frame-
+    // anchored, no uTime crawl) to kill drifting-edge "floaters", so uTime is no longer
+    // advanced — only the music WIDENS the found/lost threshold on drops (a value change, not
+    // an animation of the pattern). uMusic is eased so the widen never strobes.
     this.smoothedEdgeMusic += (dropIntensity - this.smoothedEdgeMusic) * EDGE_MUSIC_EASE
     this.painterlyEdgePass.uniforms.uMusic.value = this.smoothedEdgeMusic
-    this.painterlyEdgePass.uniforms.uTime.value += Math.max(0, dt)
 
     // --- PAINT-GRADE LUT accent-chroma push on LOUD passages (micro hue rotation toward rose).
     // Driven by the louder of the drop spike and the beat pulse so the accents warm on emphasis;

@@ -9,10 +9,11 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
  * Luft-Deussen / Montesdeoca MNPR) that turns the flattened gouache washes coming out of
  * Kuwahara into pigment sitting on cold-press paper. Five stacked ops, in order:
  *
- *   1. WET UV WOBBLE — a low-frequency 2D value-noise offset (a "hand tremor") added to
- *      the sample UV so every subsequent fetch reads through `vUv + wobble`. Kept tiny and
- *      slow (`wobbleAmp <= 0.004`, `wobbleSpeed <= 0.15`); any faster/stronger reads as the
- *      whole frame "boiling" rather than wet paper.
+ *   1. STATIC UV WOBBLE — a low-frequency 2D value-noise offset (a baked "hand tremor") added
+ *      to the sample UV so every subsequent fetch reads through `vUv + wobble`. FRAME-ANCHORED
+ *      and TIME-FREE (the old `uTime/wobbleSpeed` boiling was removed — drifting grain reads as
+ *      motion sickness); it is now a fixed spatial offset, never animated. `wobbleAmp <= 0.004`.
+ *      (`time`/`wobbleSpeed` are retained as inert uniforms only for call-site/back-compat.)
  *   2. EDGE-DARKENING — a Sobel gradient on luma marks value boundaries; pigment piles up
  *      there (the Marangoni effect), so the colour is MULTIPLIED toward its own darker self
  *      by `(1 - edge*edgeStrength)`. The darkening is hard-capped at 0.55 (`EDGE_CEILING`)
@@ -175,14 +176,15 @@ export function createWatercolourPigmentPass(opts: {
       void main() {
         vec2 texel = 1.0 / resolution;
 
-        // -- OP 1: WET UV WOBBLE -----------------------------------------------------------
-        // Two decorrelated low-frequency noise lookups (offset/rotated sample points) give a
-        // smooth 2D offset vector. Centred to [-1,1], drifting slowly in time. Amplitude in
-        // UV units, hard-clamped to <= 0.004 so the frame can never "boil".
+        // -- OP 1: STATIC FRAME-ANCHORED UV WOBBLE -----------------------------------------
+        // FLOATER FIX: the wet wobble was time-driven (vec2(0,t) / (5.2,1.3-t)), which made the
+        // whole frame "boil" frame-to-frame (drifting grain == motion sickness). The time term
+        // is REMOVED so the wobble is a STATIC spatial offset anchored to vUv — a fixed hand-
+        // tremor baked into the sheet, never an animated one. Two decorrelated low-frequency
+        // value-noise lookups give a smooth 2D offset; amplitude in UV units, clamped <= 0.004.
         vec2 wob;
-        float t = time * wobbleSpeed;
-        wob.x = valueNoise(vUv * wobbleFreq + vec2(0.0, t)) - 0.5;
-        wob.y = valueNoise(vUv * wobbleFreq + vec2(5.2, 1.3 - t)) - 0.5;
+        wob.x = valueNoise(vUv * wobbleFreq + vec2(0.0, 0.0)) - 0.5;
+        wob.y = valueNoise(vUv * wobbleFreq + vec2(5.2, 1.3)) - 0.5;
         wob *= 2.0;
         vec2 uv = vUv + wob * min(wobbleAmp, 0.004);
 
