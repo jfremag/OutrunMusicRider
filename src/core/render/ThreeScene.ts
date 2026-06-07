@@ -1313,7 +1313,9 @@ export class ThreeScene {
     // quiet field it sits on, dissolving into the field-tinted fog at distance.
     const groundGeometry = new THREE.PlaneGeometry(4000, 4000)
     const groundMaterial = new THREE.MeshStandardMaterial({
-      color: HARMONY.roseGrayField.clone(),
+      // Lifted toward warm cream (0.22) so the off-road field reads as a LUMINOUS mid-key field
+      // (ref 02), not the heavy dark flat zone that was dominating the frame beside the bright road.
+      color: HARMONY.roseGrayField.clone().lerp(HARMONY.warmCream, 0.22),
       roughness: 0.95,
       metalness: 0.0
     })
