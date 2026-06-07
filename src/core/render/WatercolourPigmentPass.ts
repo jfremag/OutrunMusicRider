@@ -241,17 +241,28 @@ export function createWatercolourPigmentPass(opts: {
         float fscale = fscaleTarget;
         // ANALYTIC ANTI-ALIAS (mip-style band-limit, see SubstratePaperPass): cap the world
         // frequency to ~Nyquist on screen so the grazing-angle ground tooth never moirés/aliases.
-        float footprint = max(length(ddx), length(ddy));
+        float lddx = length(ddx);
+        float lddy = length(ddy);
+        float footprint = max(lddx, lddy);
         float fcap = 0.5 / max(footprint, 1e-5);
         fscale = min(fscale, fcap);
         float hWorld = paperHeightWorld(wp, nrm, fscale);
+        // Footprint anisotropy (the grazing stretch that streaks isotropic world noise on screen);
+        // see SubstratePaperPass. Drives the screen-tooth crossfade on the streaking grazing ground.
+        float fpAniso = max(lddx, lddy) / max(min(lddx, lddy), 1e-5);
         // GRAZING-ANGLE FALLBACK (see SubstratePaperPass): at the extreme grazing tarmac lip /
         // horizon, where a pixel's world footprint exceeds a grain cell and the band-limited world
         // lookup can only streak, cross-fade to the stable screen tooth (those pixels sit near the
         // vanishing point and barely move on screen, so no visible swim). The bulk near→mid road
         // stays world-locked.
         float cellsPerPixel = footprint * fscaleTarget;
-        float screenMix = smoothstep(0.32, 0.75, cellsPerPixel);
+        // Cross-fade to the stable screen tooth on grazing surfaces (matched to SubstratePaperPass):
+        // MAX of the on-screen grain rate and the footprint anisotropy, so the streaking grazing
+        // ground reads as fine even print while face-on surfaces stay world-locked.
+        float screenMix = max(
+          smoothstep(0.22, 0.55, cellsPerPixel),
+          smoothstep(2.5, 6.0, fpAniso)
+        );
         return mix(hWorld, hScreen, screenMix);
       }
 

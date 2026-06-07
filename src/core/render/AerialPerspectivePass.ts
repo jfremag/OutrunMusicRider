@@ -69,6 +69,8 @@ export function createAerialPerspectivePass(opts: {
   foreRich?: number
   foreSat?: number
   foreFade?: number
+  horizonHaze?: number
+  horizonBand?: number
 } = {}): ShaderPass {
   return new ShaderPass({
     uniforms: {
@@ -95,6 +97,12 @@ export function createAerialPerspectivePass(opts: {
       // RAW device-depth where the foreground enrichment has faded to 0 (≈ the haze-near start, so
       // foreground-rich and haze hand off across the mid band with no overlap seam).
       uForeFade: { value: opts.foreFade ?? 0.978 },
+      // HORIZON-BAND HAZE: depth-independent screen-space wash that hugs the horizon line (the far
+      // ground packs beyond the depth far plane, so the depth wash can't reach it). uHorizonHaze is
+      // the max wash toward the haze colour right at the horizon; uHorizonBand is how far below the
+      // horizon (in UV) the band extends. 0 = off.
+      uHorizonHaze: { value: opts.horizonHaze ?? 0.0 },
+      uHorizonBand: { value: opts.horizonBand ?? 0.06 },
       // Dev-only depth calibration: 0 = normal; 1 = visualise the haze weight `w` as grayscale
       // (white = full haze); 2 = visualise RAW device depth remapped over [0.95,1.0] so the
       // road's depth spread is readable. Left at 0 in production.
@@ -128,6 +136,8 @@ export function createAerialPerspectivePass(opts: {
       uniform float uForeRich;
       uniform float uForeSat;
       uniform float uForeFade;
+      uniform float uHorizonHaze;
+      uniform float uHorizonBand;
       uniform float uDebug;
 
       float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
@@ -189,6 +199,36 @@ export function createAerialPerspectivePass(opts: {
 
         // (1) WASH toward the pale haze colour — the dominant "distance dissolves into field".
         col = mix(col, uHazeColor, uHazeStrength * w);
+
+        // (4) HORIZON-BAND HAZE (depth-independent seam dissolve). In this low chase view the far
+        // ground packs BEYOND the depth far plane (raw → ~1.0), so the depth-keyed wash above can't
+        // reach the rows right under the horizon and a hard dark-ground / light-sky seam remained.
+        // This adds a SCREEN-SPACE atmospheric band: walk a few taps UP from this fragment; the more
+        // SKY (cleared/far depth) sits just above, the closer this fragment is to the horizon line,
+        // so wash it harder toward the sky-matched haze colour. The band fades out below the horizon
+        // (taps find ground, not sky), and is HARD-GATED to FAR fragments only (this fragment's own
+        // raw depth must be near the far plane) so the FOREGROUND HERO (car) and the near road —
+        // which can be silhouetted against the sky from this low angle and would otherwise be washed
+        // into the ground — are never touched. Only the genuinely distant near-horizon ground is
+        // veiled. This melts the seam regardless of the degenerate far-ground depth.
+        if (uHorizonHaze > 0.001) {
+          float skyAbove = 0.0;
+          for (int i = 1; i <= 6; i++) {
+            float dy = uHorizonBand * (float(i) / 6.0);
+            float rd = texture2D(tDepth, vec2(vUv.x, vUv.y + dy)).r;
+            skyAbove += step(0.9997, rd);                 // 1 if that tap is sky
+          }
+          skyAbove /= 6.0;                                // fraction of upward taps that are sky
+          // Feather the proximity into a smooth gradient that is strongest right at the horizon and
+          // falls off gently downward (a power curve so the band's lower edge dissolves, not steps).
+          float horizonW = smoothstep(0.08, 1.0, skyAbove);
+          horizonW *= horizonW;
+          // HARD FAR-GATE: only fragments that are themselves FAR (near-horizon ground, raw depth
+          // → far plane) get the band wash. The car/near road sit at much lower raw depth, so this
+          // gate is 0 for them — they keep their full painted value (the wash bug fix).
+          float farGate = smoothstep(0.992, 0.9985, rawDepth);
+          col = mix(col, uHazeColor, uHorizonHaze * horizonW * farGate);
+        }
 
         gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
       }

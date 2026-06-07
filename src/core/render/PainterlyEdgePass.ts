@@ -555,6 +555,15 @@ export function createPainterlyEdgePass(opts: {
           depthFade = mix(1.0, 0.35, smoothstep(0.20, 0.80, ld));
           // Hard-exclude the true background (sky / far plane) entirely.
           depthFade *= 1.0 - smoothstep(0.90, 0.985, ld);
+          // HORIZON SEAM FIX: in this grazing chase view the LINEARISED depth collapses to ~0 for
+          // the whole scene, so the ld-based far-exclusion above never fires on the FAR GROUND at
+          // the horizon — and the huge ground/sky depth step there inks a crude dark line ALONG the
+          // horizon (a hard seam). Keying off the RAW device depth instead (which DOES span to ~0.97
+          // at the horizon line in this view) fades the ink out across the far-ground band so the
+          // horizon dissolves into the aerial haze instead of being underlined. Near/mid ground
+          // (raw < ~0.95) is untouched, so its value edges still ink normally.
+          float rawD = texture2D(tDepth, vUv).r;
+          depthFade *= 1.0 - smoothstep(0.945, 0.975, rawD);
         }
 
         // Combine. Saliency AND breakup are the load-bearing lost-and-found pair; coherence and

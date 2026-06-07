@@ -329,11 +329,20 @@ export function createSubstratePaperPass(opts: {
           // surfaces therefore use a slightly coarser (but stable, non-swimming) cell while near
           // face-on surfaces keep the full fine print. This is exactly how a mipmapped texture
           // behaves, and it kills most of the triplanar grazing-angle moiré without swim.
-          float footprint = max(length(ddx), length(ddy));      // world units per screen pixel
+          float lddx = length(ddx);
+          float lddy = length(ddy);
+          float footprint = max(lddx, lddy);                    // world units per screen pixel
           const float NYQ = 0.5;
           float fcap = NYQ / max(footprint, 1e-5);
           fscale = min(fscale, fcap);
           float hWorld = paperHeightWorld(wp, nrm, fscale);
+          // FOOTPRINT ANISOTROPY: a grazing surface (the ground) has a hugely anisotropic per-pixel
+          // world footprint (one axis stretched), so the isotropic world noise PROJECTS to directional
+          // screen streaks. The ratio of the two derivative lengths measures exactly that grazing
+          // stretch — high on the streaking ground, ~1 on face-on surfaces. It drives the screen-grain
+          // crossfade below, so the streaks are replaced by the stable, non-directional screen print
+          // precisely where they would appear, while face-on surfaces stay fully world-locked.
+          float fpAniso = max(lddx, lddy) / max(min(lddx, lddy), 1e-5);
 
           // GRAZING-ANGLE FALLBACK: when one pixel's world footprint approaches/exceeds a grain
           // CELL (footprint * fscale → ~Nyquist), the world lookup is maximally band-limited and a
@@ -346,7 +355,18 @@ export function createSubstratePaperPass(opts: {
           // screen fallback as it passes ~0.5 (Nyquist). Keyed off the UNCAPPED target frequency so
           // the worst grazing (where the cap pins hard) drives the mix fully to the screen grain.
           float cellsPerPixel = footprint * fscaleTarget;
-          float screenMix = smoothstep(0.32, 0.75, cellsPerPixel);
+          // Cross-fade to the stable screen grain at grazing angles so the near grazing tarmac reads
+          // as a fine EVEN print, not directional brushed streaks (the critique's ground streak).
+          // Two drivers, MAX-combined: (a) the on-screen grain rate (footprint×freq, the moiré/Nyquist
+          // limit) and (b) the FOOTPRINT ANISOTROPY (the grazing stretch that turns isotropic world
+          // noise into screen streaks). The anisotropy term catches the whole streaking mid-ground
+          // — whose footprint is only moderate but is highly stretched — while leaving face-on
+          // surfaces (car, props, sky) fully world-locked. Pixels that flip to screen grain sit near
+          // the vanishing point / barely move, so there is no visible swim.
+          float screenMix = max(
+            smoothstep(0.22, 0.55, cellsPerPixel),
+            smoothstep(2.5, 6.0, fpAniso)
+          );
           h = mix(hWorld, hScreen, screenMix);
         }
 
