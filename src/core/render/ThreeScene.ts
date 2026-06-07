@@ -109,10 +109,10 @@ const CAMERA_DEPTH_LERP = 0.12 // per-frame ease of the applied depth toward cam
 // vanishing point ~19% off-centre toward screen-LEFT, the car in the lower-LEFT quadrant
 // (~-36%, safely on-screen through lane changes), the pale sun upper-RIGHT (~+40%, clear of the
 // VP), and ~65-70% quiet negative space on the RIGHT — an off-centre raking diagonal.
-const COMPOSE_YAW = 0.12 // persistent camera-POSITION orbit yaw (rad, ~7°) — a raking 3D viewing angle on the road/car
-const COMPOSE_LOOK_YAW = -0.36 // R-FINAL P3: fixed yaw of the optical AXIS (rad, ~20.6°) — re-measured for the 50mm lens (was -0.24). Slides the road's vanishing point further off-centre screen-LEFT so the signature lower-left→upper-right raking diagonal lands, opening deep quiet negative space on the right
-const COMPOSE_PITCH = 0.11 // R-FINAL P3: fixed upward tilt of the optical axis (rad, ~6.3°, was 0.05) so the horizon RAKES well off the vertical centre instead of bisecting the frame as a flat band
-const COMPOSE_LOOK_OFFSET = 0.4 // R-FINAL P3: lateral world-offset (u) of the look-target along smoothedRight, biasing the aim so the hero kart seats in the LOWER-LEFT quadrant (the off-centre subject anchoring the diagonal) rather than on the vertical centerline. Kept moderate so the kart stays fully on-screen (0.6 clipped it at the edge)
+const COMPOSE_YAW = 0.06 // persistent camera-POSITION orbit yaw (rad, ~7°) — a raking 3D viewing angle on the road/car
+const COMPOSE_LOOK_YAW = 0.0 // R-FINAL P3: fixed yaw of the optical AXIS (rad, ~20.6°) — re-measured for the 50mm lens (was -0.24). Slides the road's vanishing point further off-centre screen-LEFT so the signature lower-left→upper-right raking diagonal lands, opening deep quiet negative space on the right
+const COMPOSE_PITCH = 0.045 // R-FINAL P3: fixed upward tilt of the optical axis (rad, ~6.3°, was 0.05) so the horizon RAKES well off the vertical centre instead of bisecting the frame as a flat band
+const COMPOSE_LOOK_OFFSET = 0.0 // R-FINAL P3: lateral world-offset (u) of the look-target along smoothedRight, biasing the aim so the hero kart seats in the LOWER-LEFT quadrant (the off-centre subject anchoring the diagonal) rather than on the vertical centerline. Kept moderate so the kart stays fully on-screen (0.6 clipped it at the edge)
 const COMPOSE_SUN_OFFSET = 0.55 // sun lateral placement off the view centre (fraction of sun depth)
 
 // Camera-shake + particle tuning (iteration 3). The shake is a transient,
@@ -859,7 +859,7 @@ export class ThreeScene {
     this.kuwaharaPass = createAnisotropicKuwaharaPass({
       texel: fullTexel,
       tensorTexel: halfTexel,
-      radius: 4,
+      radius: 3,
       sharpness: KUWAHARA_Q_REST,
       eccentricityClamp: 0.52,
       anisoGain: 2.0,
@@ -953,10 +953,10 @@ export class ThreeScene {
       // angles — the darks stay FOCAL accents, the field stays a luminous muted painting.
       contrast: 1.7,
       shadowDepth: 0.93,
-      // R-FINAL P2: a mild ~7-level posterize turns the smooth tinted value gradients into
-      // facetted gouache plateaus with darkened plateau boundaries — the literal signature of
-      // gouache, and step-edges the Kuwahara tensor + pigment edge-darken can grab onto.
-      posterize: 7.0
+      // POSTERIZE OFF (user: "don't apply flat effects that obfuscate depth"). The ~7-level
+      // posterize crushed the smooth value gradients into flat plateaus, destroying the 3D
+      // light-and-shadow form modelling — keep the smooth value range so volume/depth read as 3D.
+      posterize: 0.0
     })
 
     // PASS 7 — PainterlyEdge: flow-XDoG ∪ depth/normal edges, gated, MULTIPLY ink. Consumes
@@ -1059,9 +1059,9 @@ export class ThreeScene {
       hazeNear: 0.990,
       hazeFar: 0.997,
       hazeGamma: 1.2,
-      // A strong wash at the far band so the horizon seam DISSOLVES into the sky-matched haze, but
-      // still short of fully painting the far field flat-pale (the obstacles down-track must read).
-      hazeStrength: 0.96,
+      // Reduced (0.96 -> 0.55) so the far band keeps form/detail + depth instead of washing to a
+      // flat pale band (user: respect the 3D). The horizon-band haze below still softens the seam.
+      hazeStrength: 0.55,
       desat: 0.55,
       contrast: 0.52,
       lift: 0.05,
@@ -2973,7 +2973,7 @@ export class ThreeScene {
       CAMERA_JUMP_HEIGHT_MAX,
       this.carVerticalOffset * CAMERA_JUMP_HEIGHT
     )
-    const cameraHeight = 2.0 + jumpHeightBoost
+    const cameraHeight = 1.25 + jumpHeightBoost
     const baseCameraOffset = this.smoothedCarForward
       .clone()
       .multiplyScalar(-cameraDistance)
