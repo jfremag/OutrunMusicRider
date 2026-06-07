@@ -879,9 +879,9 @@ export class ThreeScene {
     this.pigmentPass = createWatercolourPigmentPass({
       resolution: [bufW, bufH],
       paperScale: 3.4,
-      // V2 C2: granulation 0.36 — a fine even print speckle (frequency high via paperScale), lifting
-      // surface energy without coarsening. Fine + even = the comic-print look of ref 02.
-      granulation: 0.36,
+      // Granulation dialed way down (0.08) per feedback — the print speckle read as a static dot
+      // field on the fast scene; keep only a faint hint.
+      granulation: 0.08,
       edgeStrength: 0.55,
       wobbleAmp: 0.0012,
       wobbleSpeed: 0.08,
@@ -973,12 +973,13 @@ export class ThreeScene {
       tensorTexel: halfTexel,
       cameraNear: this.camera.near,
       cameraFar: DEPTH_FAR,
-      // R-FINAL: inkGain 2.4 -> 2.9 so the FOUND dark-accent strokes (sword/kart silhouettes, the
-      // strongest road value edges) ink as DEEPER calligraphic pools — adds the punched darks +
-      // local contrast ref 02 has (lifts both true-dark fraction and the 8x8 surface-tooth metric),
-      // while the slow breakup still keeps most contours lost (found-here/lost-there, not an outline).
-      inkGain: 2.9,
-      edgeDilate: 2.0,
+      // LOST-AND-FOUND, mostly LOST: the global ink was a thick, near-uniform black toon outline at
+      // 1:1 (the critique). inkGain 2.9 -> 1.25 and edgeDilate 2.0 -> 1.1 so the FOUND strokes are
+      // thin, soft, sparse calligraphic accents on only the highest-contrast contours — most
+      // silhouettes simply dissolve (ref 02), no cartoon outline. The breakup gate still drops the
+      // ink on most of each contour's length.
+      inkGain: 1.25,
+      edgeDilate: 1.1,
       // R3: raise the GEOMETRIC edge thresholds so only BIG depth/normal steps ink. The now-large
       // hero kart has an open frame (seat/engine/struts) whose many fine interior depth+normal
       // steps were inking into a busy black tangle that fought the helmet sheen. Higher thresholds
@@ -993,13 +994,13 @@ export class ThreeScene {
       // last push toward ref 02's dark fraction. The slow breakup still keeps it lost-and-found.
       salLo: 0.03,
       salHi: 0.14,
-      // R-FINAL P3: the hero-silhouette shadow-side stroke. heroInkGain 3.5 inks the kart's outer
-      // shaded edge as a BOLD confident pool; heroDilate 3.2 gives it real brush weight (a heavier
-      // broken stroke = the "finished Sienkiewicz" gesture, and its near-black adds punched-dark
-      // mass); lightDir2D is the key light (world ~(-6,13,9)) projected to screen (up-left) so the
-      // stroke lands on the shaded side. The mask-boundary gate keeps the interior fully lost.
-      heroInkGain: 3.5,
-      heroDilate: 3.2,
+      // HERO SILHOUETTE — a SUBTLE, broken, lost-and-found line (mostly LOST), NOT a heavy outline.
+      // heroInkGain 3.5 -> 1.3 and heroDilate 3.2 -> 1.6 so the kart's outer shaded edge gets only a
+      // faint, thin, broken accent where the breakup field allows — most of the silhouette is lost
+      // (the dark painted body + subtle cool sheen carry the read, not an ink line). lightDir2D is the
+      // key light projected to screen (up-left) so what little ink lands sits on the shaded side.
+      heroInkGain: 1.3,
+      heroDilate: 1.6,
       lightDir2D: [-0.55, 0.84]
     })
     this.painterlyEdgePass.uniforms.tTensor.value = this.tensorTargetA.texture
@@ -1046,25 +1047,36 @@ export class ThreeScene {
     this.aerialPass = createAerialPerspectivePass({
       cameraNear: this.camera.near,
       cameraFar: DEPTH_FAR,
-      // Pale cool green-beige haze — the colour the far world dissolves toward (matches the sky
-      // horizon band so the lost horizon reads as ground melting into sky).
-      hazeColor: new THREE.Color(0xc8cdba),
-      // RAW device-depth band, MEASURED for this chase view (the visible ground spans raw ~0.967
-      // near .. ~0.994 at the horizon). Start the wash a touch FARTHER out (0.978) so the whole
-      // near-mid foreground keeps its full RICH/DARK/SATURATED painted value (preserving the prior
-      // palette + near-far weight) and the wash ramps in only across the MID→far band, reaching
-      // full strength at the horizon (0.9935). A gamma keeps the recession smooth into the lost
-      // horizon (the far ground/road/dark-wedge dissolve into the field).
-      hazeNear: 0.978,
-      hazeFar: 0.9935,
-      hazeGamma: 1.55,
-      // A confident wash so the FLAT dark wedge clearly recedes (it was the worst offender), but
-      // short of fully painting the far field flat-pale (the obstacles down-track must still read).
-      hazeStrength: 0.74,
-      desat: 0.5,
+      // Pale cool green-beige haze — EXACTLY the sky horizon-band colour (#CCCCBA) so the far ground
+      // washes into the same value the sky sits at right at the horizon line, dissolving the seam.
+      hazeColor: new THREE.Color(0xccccba),
+      // The HERO CAR sits at raw depth ~0.987 in this chase view, so the depth wash band MUST start
+      // ABOVE it (else the car is fully washed into the ground — a regression that hid it). The far
+      // ground / horizon packs to raw ~0.997..1.0, so the wash band 0.990..0.997 catches the far
+      // ground while sparing the car and near road (raw < 0.99 → w≈0, full painted value kept). The
+      // remaining hard seam right at the horizon line is dissolved by the depth-independent
+      // HORIZON-BAND haze below (which is itself far-gated off the car).
+      hazeNear: 0.990,
+      hazeFar: 0.997,
+      hazeGamma: 1.2,
+      // A strong wash at the far band so the horizon seam DISSOLVES into the sky-matched haze, but
+      // still short of fully painting the far field flat-pale (the obstacles down-track must read).
+      hazeStrength: 0.96,
+      desat: 0.55,
       contrast: 0.52,
       lift: 0.05,
-      pivot: 0.6
+      pivot: 0.6,
+      // The foreground-rich counter-veil enriches the near/mid road, fading out by raw 0.986 — just
+      // below the far-ground wash band (0.990) — so the near/mid foreground (incl. the road under and
+      // around the car) keeps its rich, dark, contrasty painted value while the far ground is owned
+      // by the haze.
+      foreFade: 0.986,
+      // HORIZON-BAND HAZE: the depth-independent seam dissolver (the far ground packs beyond the
+      // depth far plane, so the depth wash above can't reach the rows right under the horizon). This
+      // screen-space band hugs the horizon line and washes the near-horizon ground up toward the
+      // sky-matched haze colour, melting the hard ground/sky value step into an atmospheric blend.
+      horizonHaze: 0.72,
+      horizonBand: 0.05
     })
     this.aerialPass.uniforms.tDepth.value = this.sceneDepthTexture
 
@@ -1087,15 +1099,15 @@ export class ThreeScene {
     this.substratePaperPass = createSubstratePaperPass({
       resolution: [bufW, bufH],
       paperScale: 3.6,
-      // V2 C2: density at the ceiling (0.38 / paperStrength 0.21) = a DENSE but still FINE print
-      // speckle (frequency stays high via paperScale; only the per-pixel speckle COUNT rises). This
-      // lifts the 8x8 surface energy toward ref 02 while reading as fine offset-print grain.
-      granDensity: 0.38,
-      paperStrength: 0.21,
+      // GRAIN DIALED WAY DOWN (user: "no static dots of grain on a fast 3D scene"). The dense
+      // print speckle read as a static dot field on the moving scene; cut density + strength hard
+      // so the grain is only a faint whisper (still world-locked, travels with the geometry) — a
+      // subtle texture, never a dominant dotted overlay.
+      granDensity: 0.08,
+      paperStrength: 0.06,
       paperAniso: 1.05,
-      // V2 C2: a small (still flat) tooth-light 0.10 so the fine grain registers as resolvable
-      // per-pixel value speckle WITHOUT the rough directional relief of the old cold-press tooth.
-      paperLight: 0.10,
+      // Tooth-light nearly off (0.035) so the faint remaining grain has no rough relief.
+      paperLight: 0.035,
       distortAmt: 0.0006,
       // V2 C3: align the (now very faint) tooth-light tints to the new palette — warm-beige peaks,
       // cool sage-green/mauve valleys — so the residual grain hue is in-key, not steel-violet.
@@ -1645,17 +1657,18 @@ export class ThreeScene {
     const scaledW = size.x * scaleFactor
     const scaledH = size.y * scaleFactor
     this.addCarCanopy(target, {
-      // Span most of the kart length and a BROAD beam that reaches out over the wheel hubs, so
-      // the cowl visually UNIFIES the frame into one body (the wheels read as its flanks, not four
-      // separate blocks). Generous so it dominates as the hero form (ref chrome is one big shape).
-      length: desiredLength * 0.92,
-      width: Math.max(1.15, scaledW * 0.86),
-      // A confident rounded dome — the broad top surface the rolling sheen sweeps across.
-      height: Math.max(0.92, scaledH * 0.82),
+      // A LONG, low fairing that spans the full kart length and reaches out over the wheel hubs so
+      // the cowl visually UNIFIES the frame into ONE sleek body (the wheels read as its flanks). The
+      // reshape flattens the crown, so this is a long low hull, not a saucer.
+      length: desiredLength * 1.04,
+      width: Math.max(1.18, scaledW * 0.88),
+      // Height is the pre-flatten reference; the reshape ×0.82 the upper crown, so the visible cowl
+      // is LOW. Keep a moderate reference so the low crown still covers the cockpit/skull.
+      height: Math.max(0.86, scaledH * 0.78),
       // Seat the underside just above the deck (the model already sits on y=0 after baseOffset).
-      baseY: 0.12,
+      baseY: 0.10,
       // Centre over the cockpit, very slightly aft of the nose.
-      zCenter: -desiredLength * 0.05
+      zCenter: -desiredLength * 0.04
     })
     // RimGlowShell is retired (its #00ffff->#ff00ff additive Fresnel halo is banned and
     // would feed a bloom that no longer exists). The in-material car sheen + this P5 cowl
@@ -1736,14 +1749,22 @@ export class ThreeScene {
       let x = pos.getX(i)
       let y = pos.getY(i)
       let z = pos.getZ(i)
-      // Forward taper: at the nose (+z) pinch X/ a touch; at the tail keep full width.
-      const taper = 1.0 - 0.28 * Math.max(0, z * 2.0) // z in [-0.5,0.5] -> taper 1.0..0.72 toward nose
+      const zn = z * 2.0 // z in [-0.5,0.5] -> zn in [-1,1] (nose=+1, tail=-1)
+      // Forward taper: pinch the width toward BOTH ends (nose more) so the hull reads as a sleek
+      // elongated fairing — one long body — rather than a round blister. Tail keeps most width.
+      const taper = 1.0 - 0.30 * Math.max(0, zn) - 0.12 * Math.max(0, -zn)
       x *= dims.width * taper
       z *= dims.length
-      // Flatten + seat: upper half rounds up to the full height; lower half is squashed toward
-      // the deck so the hull's underside tucks down onto the frame (no floating egg).
-      const yScale = y >= 0 ? dims.height : dims.height * 0.42
+      // LOW SLEEK PROFILE: the upper hemisphere is FLATTENED (×0.82) into a low cowl crown — low
+      // enough to read as an integrated body (not a tall saucer) but tall enough to COVER the
+      // cockpit/skull so nothing pokes through; the lower hemisphere tucks hard down onto the deck
+      // (×0.34). This makes one long, low, smooth hull.
+      const yScale = y >= 0 ? dims.height * 0.82 : dims.height * 0.34
       y *= yScale
+      // NOSE-DOWN sweep: gently drop the front of the crown so the cowl slopes down toward the nose
+      // like a windscreen/fairing (a car silhouette), instead of a symmetric egg. Only the upper
+      // crown is swept; the underside stays seated. Gentle so the crown stays smooth (no crease).
+      if (y > 0) y -= dims.height * 0.16 * Math.max(0, zn) * Math.max(0, zn)
       pos.setXYZ(i, x, y, z)
     }
     geo.computeVertexNormals()
@@ -1754,9 +1775,10 @@ export class ThreeScene {
       metalness: 0.0
     })
     const canopy = new THREE.Mesh(geo, canopyMat)
-    // Seat the hull on the deck and centre it over the cockpit (slightly aft of the nose so it
-    // covers the seat/skull). baseY lifts the squashed underside to just above the frame deck.
-    canopy.position.set(0, dims.baseY + dims.height * 0.30, dims.zCenter ?? 0)
+    // Seat the LOW hull on the deck and centre it over the cockpit (slightly aft of the nose so it
+    // covers the seat/skull). With the flattened crown, seat it lower (×0.20) so the cowl hugs the
+    // frame as an integrated body rather than floating above the wheels.
+    canopy.position.set(0, dims.baseY + dims.height * 0.20, dims.zCenter ?? 0)
     canopy.castShadow = true
     canopy.receiveShadow = true
     carGroup.add(canopy)
@@ -1820,15 +1842,14 @@ export class ThreeScene {
             }
             material.needsUpdate = true
 
-            // A8 helmet-shine (hero car only): inject the broad rolling cool-desaturate-capped
-            // sheen lobe into the now-matte material and register it for the per-frame beat-
-            // breath (updateCarSheen). MeshPhysicalMaterial extends MeshStandardMaterial, so it
-            // is accepted by the injector; the shared customProgramCacheKey compiles every
-            // submesh to one program. Done AFTER the matte forcing above so the injector lays
-            // the unlit sheen on top of a clean matte base.
-            if (isPlayer) {
-              this.carSheenMaterials.push(injectCarSheen(material))
-            }
+            // WHEELS/FRAME read CLEAN + LOST: the broad cool sheen is NO LONGER injected on the
+            // imported GLB submeshes. Previously every submesh (the four wheels, the open frame,
+            // the skull cockpit) carried the sheen lobe + its body-base lift, which is what lit the
+            // wheel TOPS into the four stark near-white blocks the critique flagged. Now only the
+            // CANOPY COWL (added in addCarCanopy) carries the sheen — the imported submeshes stay
+            // the matte deep-violet near-black they were lerped to above, so the wheels/frame read
+            // as quiet dark painted forms integrated into the body, not crude bright blocks. The
+            // cowl covers the cockpit; the interior reads LOST behind it (spec §4).
           } else if (material instanceof THREE.MeshBasicMaterial) {
             // Unlit submeshes -> a flat harmony gray so nothing reads as neon.
             material.color.lerp(target, 0.6)
