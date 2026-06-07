@@ -164,8 +164,13 @@ const DEPTH_FAR = 2000
 // Kuwahara sharpness `q` eases DOWN on drops for a looser, WETTER gouache (spec PASS 4:
 // "q eases DOWN on drops"). At rest q sits at its authored 12; at full drop intensity it
 // relaxes toward ~7 so the strokes broaden and bleed on the emotional peak.
-const KUWAHARA_Q_REST = 12 // authored sharpness (crisp-ish strokes at rest)
-const KUWAHARA_Q_DROP = 7 // looser/wetter strokes at full dropIntensity
+// V2 CORRECTION 1 (DE-BLUR): the rest q is raised 12 -> 18 so the variance-combine favours
+// the single lowest-variance sector much more decisively (less cross-sector averaging = CRISP
+// painted shapes, not a blur). The drop q also lifts (7 -> 11) so even the "wetter" peak stays
+// shape-readable. Paired with the smaller radius (7 -> 5) below, the brush keeps its directional
+// character but the forms stay sharp like ref 02's crisp painted edges.
+const KUWAHARA_Q_REST = 18 // authored sharpness (CRISP painted strokes at rest)
+const KUWAHARA_Q_DROP = 11 // looser/wetter strokes at full dropIntensity (still shape-readable)
 const KUWAHARA_Q_EASE = 0.12 // per-frame lerp toward the drop-driven q target (smooth)
 
 // VelocitySmear "watercolour speed" length (spec PASS 8: smearLen ≈ base*(0.6+0.4*speedMul)
@@ -230,17 +235,25 @@ const TREBLE_BURST_LIFETIME = 0.25 // seconds — a quick flick, not a lingering
 const HARMONY = {
   paperPutty: new THREE.Color(0xd9d6ce),   // #1  lightest value / sun core / highlight cap
   warmCream: new THREE.Color(0xede7d8),     // #2  cold-press substrate tint
-  steelVioletField: new THREE.Color(0xa7a3b1), // #3 DOMINANT neutral; sky upper, ambient, fog
-  litSteelBlue: new THREE.Color(0xb8bbce),  // #4  cool sky band lower / cool reflected light
-  roseGrayField: new THREE.Color(0xceb9b9), // #5  warm desaturated ground/horizon glaze
-  sandRoad: new THREE.Color(0xc9b49e),      // #6  road surface — the desaturated "sand" bridge
-  bodyVioletGray: new THREE.Color(0x9f939e), // #7 hero car albedo on lit faces
-  bodyShadowViolet: new THREE.Color(0x706675), // #8 shadow side of the car
-  deepBodyNearBlack: new THREE.Color(0x2c2a38), // #9 darkest the car may reach (not black)
+  // V2 CORRECTION 3: the field/sky/road albedos move off the steel-blue/rose axis onto the new
+  // grayish-green / warm-beige / dusty-purple palette so the FIELD already reads green/beige even
+  // before the LUT (chromaPreserve keeps a sliver of these source hues alive).
+  steelVioletField: new THREE.Color(0x97a08c), // #3 DOMINANT field neutral -> grayish SAGE-GREEN; fog, sky-clear
+  litSteelBlue: new THREE.Color(0xb9bca6),  // #4  cool sky band lower / reflected -> desaturated sage
+  roseGrayField: new THREE.Color(0x99a18a), // #5  the GROUND field -> grayish sage-green (the dominant ground wash)
+  sandRoad: new THREE.Color(0xc9b89a),      // #6  road surface -> the warm BEIGE bridge (#C9B89A)
+  // V2 CORRECTION 4: the car is the bold focal SUBJECT, not a pale gray. Give it a RICHER, more
+  // saturated DUSKY-PURPLE body (deeper + more chroma than the old #9F939E) so it reads as a dark,
+  // saturated form — the bright cool helmet-sheen crest then POPS against it (strong dark-body /
+  // bright-sheen contrast). Harmonises with the mauve shadows and contrasts the crimson sword +
+  // green field. The LUT accent-gate catches its higher source saturation so the hue survives.
+  bodyVioletGray: new THREE.Color(0x6f5a78), // #7 hero car albedo (lit faces) -> rich dusky purple
+  bodyShadowViolet: new THREE.Color(0x453a52), // #8 shadow side of the car -> deep dusky-purple shadow
+  deepBodyNearBlack: new THREE.Color(0x29232f), // #9 darkest the car may reach -> deep mauve near-black
   steelBlueAccent: new THREE.Color(0x6a7aa4), // #11 cool accent / cool rim
   roseMagentaAccent: new THREE.Color(0xa96276), // #12 primary hot accent
   warmSienna: new THREE.Color(0xc59076),    // #13 warm bridge / desaturated warm key light
-  petrolTeal: new THREE.Color(0x48677d),    // #14 cool shadow whisper / road-edge in shade
+  petrolTeal: new THREE.Color(0x5a5566),    // #14 cool shadow whisper / road-edge -> dusty MAUVE (green-purple shadow, not teal)
   signalRed: new THREE.Color(0xd6443b),     // #15 the single saturated obstacle hit
   inkCool: new THREE.Color(0x20211c),       // #16 found-edge dark accents (cool-lit)
   inkWarm: new THREE.Color(0x1e1b22)        // #17 found-edge dark accents (warm-side)
@@ -260,10 +273,15 @@ const HARMONY = {
 // surfaces stay bright. The fill colours are pulled to the literal shadow swatches (#A7A3B1
 // steel-violet ambient, #B8BBCE cool ground bounce) so the shadow side reads cool while the
 // key tints the lit side warm — the warm-light / cool-shadow temperature split of ref 02.
-const LIGHT_SKY_COOL = new THREE.Color(0xb3c4ec)    // hemisphere sky term — SATURATED cool steel-blue (b>>r) so up-facing shadow fields read decisively COOL, balancing the warm key
-const LIGHT_GROUND_WARM = new THREE.Color(0x96a4d0) // hemisphere ground bounce — saturated cool steel-blue (b>>r), cool-shadow underside
-const LIGHT_AMBIENT_COOL = new THREE.Color(0x8290c4) // ambient floor — saturated steel-blue shadow fill (b>>r); pushes shadowed faces decisively COOL (the cool half of the temp split)
-const LIGHT_KEY_WARM = new THREE.Color(0xf2dcc6)    // directional KEY — warm sienna; now the dominant form-shaper
+// V2 CORRECTION 3 (LIGHTING TINTS): shift the cool FILL/SHADOW lights off steel-BLUE onto the
+// new GREEN-PURPLE shadow axis (the user's "cool green-purple shadows, not blue"), and keep a
+// warm-BEIGE key. A light MULTIPLIES albedo, so these stay near-white but TINTED so the lit side
+// reads warm beige and faces turned from the key fall to a cool sage-green / mauve shadow — the
+// warm-beige-light / cool-green-purple-shadow temperature split of ref 02.
+const LIGHT_SKY_COOL = new THREE.Color(0xaec4b2)    // hemisphere sky term — desaturated cool SAGE-GREEN (g>=r,b) so up-facing shadow fields read green-cool, balancing the warm key
+const LIGHT_GROUND_WARM = new THREE.Color(0xa6a0b0) // hemisphere ground bounce — cool dusty-MAUVE (b>=r, violet) underside, the purple half of the cool shadow
+const LIGHT_AMBIENT_COOL = new THREE.Color(0x9aa0a2) // ambient floor — neutral cool green-gray shadow fill; keeps shadowed faces a luminous cool sage-gray, not blue
+const LIGHT_KEY_WARM = new THREE.Color(0xf3e2c8)    // directional KEY — warm BEIGE/cream; the dominant form-shaper (lit side warms toward beige)
 
 export class ThreeScene {
   private renderer: THREE.WebGLRenderer
@@ -744,35 +762,43 @@ export class ThreeScene {
     // eccentricityClamp (0.6 → 0.48) so the edge-aligned ellipse elongates MORE along contours
     // — the strokes now carry directional brush STRUCTURE (Sienkiewicz gouache sweep), not just
     // an isotropic smooth. q stays 12 at rest (KUWAHARA_Q_REST), easing down on drops.
+    // V2 CORRECTION 1 (DE-BLUR / SHARPEN): the Kuwahara was over-smoothing into a BLUR. radius
+    // 7 -> 5 shrinks the averaging footprint so each output pixel pools a SMALLER neighbourhood
+    // (less smear, crisper forms — ref 02 has crisp painted shapes, not soft blur). sharpness q
+    // is raised to KUWAHARA_Q_REST(18) above. ecc lifted 0.40 -> 0.52 and strokeBias trimmed
+    // 0.6 -> 0.42 so the ellipse is LESS extreme/elongated and the along-stroke profile falls off
+    // sooner — keeping the directional brush CHARACTER but stopping the long flat tail that was
+    // dragging colour across edges into a blur. anisoGain trimmed 2.4 -> 2.0 to match.
     this.kuwaharaPass = createAnisotropicKuwaharaPass({
       texel: fullTexel,
       tensorTexel: halfTexel,
-      radius: 7,
+      radius: 5,
       sharpness: KUWAHARA_Q_REST,
-      // R4: lower ecc (0.48 -> 0.40) so the edge-aligned ellipse elongates MORE along contours,
-      // plus the anisoGain/anisoExp/strokeBias brush knobs (factory defaults) that lift the tiny
-      // anisotropy of this low-contrast scene into confident DIRECTIONAL gouache strokes.
-      eccentricityClamp: 0.40,
-      anisoGain: 2.4,
+      eccentricityClamp: 0.52,
+      anisoGain: 2.0,
       anisoExp: 0.5,
-      strokeBias: 0.6
+      strokeBias: 0.42
     })
     this.kuwaharaPass.uniforms.tTensor.value = this.tensorTargetA.texture
 
     // PASS 5 — WatercolourPigment: wobble + edge-darken + granulate + bleed (resolution px).
     // Round 2: COARSER tooth (paperScale 2.2 → 1.1, larger cells) + lighter granulation so the
     // grain reads as watercolour granulation pooling in the paper, not fine uniform static.
+    // V2 CORRECTION 1+2: reduce the wet-wobble SOFTENING (wobbleAmp 0.003 -> 0.0012, slower) and
+    // the density bleed gather (bleedRadius 1.5 -> 0.9) so the pass stops blurring the now-crisp
+    // Kuwahara forms; and push the granulation tooth MUCH FINER (paperScale 2.6 -> 6.2 = many more
+    // cells across the screen) so the grain reads as a FINE PRINT artefact, not coarse paper. The
+    // edge-darkening is KEPT strong (it deepens value boundaries -> contrast, correction 4).
     this.pigmentPass = createWatercolourPigmentPass({
       resolution: [bufW, bufH],
-      // R-FINAL P2: finer cold-press tooth (1.1 -> 2.6) so the granulation carries real
-      // high-frequency value variance INSIDE an 8x8 footprint (the panel's surface-tooth metric),
-      // i.e. actual paper grain in the bright washes, not only a low-frequency brushy mottle.
-      paperScale: 2.6,
-      // R-FINAL P2: lift pigment granulation 0.17 -> 0.39 (just under the 0.40 "dirt" ceiling)
-      // so, paired with the re-pivoted bright-biased bell, the tooth bites where 60-70% of the
-      // frame now lives — driving the 8x8 local luma-std up toward ref 02 (the surface-energy fix).
-      granulation: 0.39,
-      edgeStrength: 0.55
+      paperScale: 3.4,
+      // V2 C2: granulation 0.36 — a fine even print speckle (frequency high via paperScale), lifting
+      // surface energy without coarsening. Fine + even = the comic-print look of ref 02.
+      granulation: 0.36,
+      edgeStrength: 0.55,
+      wobbleAmp: 0.0012,
+      wobbleSpeed: 0.08,
+      bleedRadius: 0.9
     })
 
     // PASS 6 — PaintGradeLUT (PALETTE LOCK). Explicitly build the gouache ramp via paintRamp
@@ -784,23 +810,22 @@ export class ThreeScene {
     // so the punched darks of ref 02 appear WITHOUT undoing Round 1's mid-key base.
     this.paintGradePass = createPaintGradeLUTPass({
       gradient: buildPaintRamp(),
-      // R3: nudge chroma-preserve up (0.22 -> 0.30) so the HERO keeps more of its local hue
-      // through the palette lock — specifically so the cool helmet-sheen crest survives as a cool
-      // feature (and the obstacle red stays a confident red) instead of being warmed/flattened
-      // toward the ramp's bright putty. Still well within the lock (gradeAmount 0.82 holds value).
-      // R-FINAL P1: chromaPreserve 0.30 -> 0.42. The LUT ramp is mostly cool/neutral in the mid,
-      // so on its own it WASHES the warm sienna road/ground toward neutral gray (median sat crashed
-      // to ~0.02, far below the spec's 10-14% floor) AND warms the cool sky — collapsing the
-      // warm/cool split into a desaturated monochrome. Preserving more source colour lets BOTH the
-      // warm ground and the cool sky/shadows keep their in-palette hue, restoring the split and the
-      // tinted-gray saturation. The harmony is still enforced upstream (in-palette albedos + the
-      // cool/warm lighting) and by gradeAmount 0.82, so a looser per-pixel lock stays in-key.
+      // chromaPreserve 0.42: keeps the source's in-palette hue (sage ground, beige road, green
+      // sky) alive through the lock so the field stays green/beige rather than washing to neutral.
       chromaPreserve: 0.42,
-      // R-FINAL P1: re-anchor the LUT darks now that the lighting supplies a real value range.
-      // blackPoint 0.38 -> 0.42 (more of the shadow side reaches the deep ink stops), contrast
-      // 1.32 -> 1.5 (a stronger S-curve so darks deepen and lights stay luminous — value
-      // separation, not a flat dim), shadowDepth 1.0 (full reach into the dark ramp stops).
-      blackPoint: 0.42,
+      // V2 CORRECTION 4 (accent pop): on highly-saturated SOURCE pixels (the crimson sword + the
+      // rich car body) preserve much more chroma (0.85) and boost saturation, so the accents stay
+      // VIVID through the palette lock while the muted field (low source sat) is untouched.
+      accentSatGate: 0.28,
+      accentPreserve: 0.85,
+      accentBoost: 0.55,
+      // V2 CORRECTION 4 (contrast / darks-as-accent): blackPoint 0.33 + shadowDepth 1.0 push the
+      // genuinely darkest forms (under-car, the dusky-purple car shadow side, sword shadow, the
+      // ground-in-deep-shadow band) DOWN into the ramp ink stops -> true punched darks (darkFrac
+      // toward ref 02's ~0.10). The lit sage field sits above the black point so it stays a muted
+      // mid-green; a strong contrast S-curve (1.7) widens the value separation (globalStd) so the
+      // darks read as bold ACCENTS against the luminous field, not a flat dim.
+      blackPoint: 0.345,
       // whitePoint 0.96 (P45-APEX: raised from 0.88). The ramp's top stops were just opened toward
       // true paper-white (paintRamp.ts: putty #ECE9E1 ~0.91, apex #F4F4F8 ~0.96). whitePoint sets
       // the input luma that maps to ramp coord 1.0 (the apex), so RAISING it RESERVES the new bright
@@ -818,12 +843,16 @@ export class ThreeScene {
       // stops (paintRamp.ts putty 0.96 / paper-white 1.0), which only coord >~0.93 reaches — i.e.
       // ONLY the sun's luminous core (src ~0.94 -> coord 1.0) and the helmet-sheen crest. The mid
       // field (sky/ground, coord <=0.84) is untouched, so nothing globally brightens.
-      whitePoint: 0.88,
-      // contrast 1.6 (a stronger S-curve about 0.5): deepens the shadow side toward the dark ink
-      // stops (more true darks / a wider value std, the remaining P1 gap) while simultaneously
-      // pushing the lit side brighter — value SEPARATION, the opposite of a flat dim.
-      contrast: 1.6,
-      shadowDepth: 1.0,
+      // V2 C4: whitePoint 0.85 so the brightest field/sun pixels reach the ramp's luminous warm-cream
+      // top stops -> restores the luminous APEX (lightFrac>0) the brief wants kept, balancing the darks.
+      whitePoint: 0.85,
+      // V2 C4: contrast 1.7 (strong S-curve about 0.5) for value SEPARATION — deep darks + luminous
+      // lights. shadowDepth 0.88 so the genuinely darkest forms (under-car, sword/car shadow sides)
+      // reach the ink stops (the punched darks ref 02 has) while the BROAD shadow-side ground blends
+      // back toward its muted mid-green instead of crushing the whole band black at raking camera
+      // angles — the darks stay FOCAL accents, the field stays a luminous muted painting.
+      contrast: 1.7,
+      shadowDepth: 0.93,
       // R-FINAL P2: a mild ~7-level posterize turns the smooth tinted value gradients into
       // facetted gouache plateaus with darkened plateau boundaries — the literal signature of
       // gouache, and step-edges the Kuwahara tensor + pigment edge-darken can grab onto.
@@ -909,27 +938,34 @@ export class ThreeScene {
     // Round 2: a COARSER cold-press tooth (paperScale 2.6 → 1.25, low-frequency paper grain)
     // and slightly lighter density/strength so the substrate reads as a watercolour SHEET with
     // big granulating tooth, not the fine uniform sandpaper veil of the R1 frame.
+    // V2 CORRECTION 2 (GRAIN = FINE PRINT, NOT ROUGH PAPER): the user wants the flat, subtle,
+    // high-frequency OFFSET/COMIC-PRINT grain of ref 02 — NOT cold-press paper tooth/relief.
+    //   - paperScale 2.6 -> 7.0: many more tiny cells across the screen = a MUCH FINER grain.
+    //   - paperAniso 2.8 -> 1.05: kill the directional brush/scumble STREAKING so the grain is
+    //     near-isotropic high-frequency print noise, not a rough raking tooth.
+    //   - paperLight 0.18 -> 0.045: drop the SIGNED relief raking-light almost out (no rough 3D
+    //     fibre that reads as sandpaper); the grain becomes a flat value speckle.
+    //   - granDensity 0.38 -> 0.20 and paperStrength 0.21 -> 0.13: lower BOTH so the sheet reads
+    //     as a subtle even print grain over the whole frame, not a heavy dirty tooth.
+    //   - distortAmt 0.0015 -> 0.0006: less micro-distortion = less edge softening (correction 1).
+    // Net: a fine, even, flat print grain — the comic offset-dot character of image 02.
     this.substratePaperPass = createSubstratePaperPass({
       resolution: [bufW, bufH],
-      // R-FINAL P2: finer cold-press tooth (1.25 -> 2.6) so the paper grain registers at the
-      // 8x8 scale the panel measures (surface energy) while paperAniso still stretches it into
-      // directional brush/scumble streaks — fine tooth THROUGH a brushed grain, not sandpaper.
-      paperScale: 2.6,
-      // R4 BRUSHWORK: a touch more granulation + a stronger sheet so the surface reads as BRUSHED
-      // gouache on cold-press paper (ref 02), plus the directional paperAniso stretch that turns
-      // the tooth into visible brush/scumble streaks. Stays inside the spec discipline bands
-      // (granDensity 0.18-0.35, paperStrength 0.12-0.22) so it's medium, not dirt.
-      // R-FINAL P2: more tooth in the bright washes — granDensity 0.30 -> 0.34, paperStrength
-      // 0.19 -> 0.21 (both still inside the spec bands 0.18-0.35 / 0.12-0.22, under the "dirt"
-      // ceilings) so the cold-press surface reads where most of the frame sits, lifting 8x8 std.
+      paperScale: 3.6,
+      // V2 C2: density at the ceiling (0.38 / paperStrength 0.21) = a DENSE but still FINE print
+      // speckle (frequency stays high via paperScale; only the per-pixel speckle COUNT rises). This
+      // lifts the 8x8 surface energy toward ref 02 while reading as fine offset-print grain.
       granDensity: 0.38,
       paperStrength: 0.21,
-      paperAniso: 2.8,
-      // R-FINAL P2: stronger SIGNED tooth-light (0.04 -> 0.15) — peaks catch warm light, valleys
-      // fall to a cool micro-shadow. This is per-pixel high-frequency value variance (real paper
-      // fibre catching the raking light), the most direct lever on the 8x8 surface-tooth metric,
-      // and it reads as cold-press tooth rather than a flat veil. Still a subtle fibre sheen.
-      paperLight: 0.18
+      paperAniso: 1.05,
+      // V2 C2: a small (still flat) tooth-light 0.10 so the fine grain registers as resolvable
+      // per-pixel value speckle WITHOUT the rough directional relief of the old cold-press tooth.
+      paperLight: 0.10,
+      distortAmt: 0.0006,
+      // V2 C3: align the (now very faint) tooth-light tints to the new palette — warm-beige peaks,
+      // cool sage-green/mauve valleys — so the residual grain hue is in-key, not steel-violet.
+      warmTint: [0.85, 0.80, 0.69],  // warm beige peak highlight
+      coolTint: [0.58, 0.60, 0.56]   // cool sage-green/mauve micro-shadow valley
     })
 
     // addPass in the EXACT STYLE_SPEC §3 order.
@@ -967,8 +1003,13 @@ export class ThreeScene {
         // DARKER blue, dropping the luminous-field value). These hold the sweet spot: bright enough
         // (luma ~0.72) to keep the negative space LUMINOUS (p90 ~0.78, the top of the value range)
         // yet still decisively cool (b>>r) so the warm/cool split survives.
-        topColor: { value: new THREE.Color(0xa9b8ec) },    // bright cool steel-blue sky upper (b>r, luminous)
-        horizonColor: { value: new THREE.Color(0xbccbf2) } // bright cool steel-blue sky lower band (b>r, luminous)
+        // V2 CORRECTION 3: the big quiet sky negative space moves off steel-BLUE onto the muted
+        // sage-green -> warm-beige gradient. Upper sky a luminous cool sage (g>=r,b), the horizon
+        // band warming toward a pale green-beige so the sky glides green -> beige down to the
+        // horizon (the ref-02 gradient). Bright enough (luma ~0.74) to keep the field luminous
+        // through ACES + the LUT while staying muted/desaturated.
+        topColor: { value: new THREE.Color(0xb6c2ad) },    // luminous cool SAGE-GREEN sky upper
+        horizonColor: { value: new THREE.Color(0xccccba) } // pale green-BEIGE sky lower band (warms toward horizon)
       },
       vertexShader: `
         varying vec3 vWorldPosition;
@@ -1731,12 +1772,13 @@ export class ThreeScene {
           ) {
             const isBlade = material.color.r > material.color.g * 1.1 && material.color.r > material.color.b
             if (isBlade) {
-              // The single saturated hit — matte signal red, NO emissive glow. R-FINAL: deepened
-              // toward a painted oxblood (lerp 0.35 to #6E211D) so the obstacle reads as a DARKER
-              // red that carries shadow weight (contributing the punched-dark mass ref 02 has) while
-              // staying unmistakably the one saturated red accent — and its dark side then anchors
-              // the PainterlyEdge accent stroke. ACES + the LUT keep the lit blade face luminous-red.
-              material.color.copy(HARMONY.signalRed).lerp(new THREE.Color(0x6e211d), 0.35)
+              // V2 CORRECTION 4: the sword is THE bold saturated accent — a VIVID CRIMSON like the
+              // ref-02 lips (#C0392B), the foil to the muted green/beige field. Set the blade albedo
+              // to a confident crimson (only a light lerp 0.15 toward a deep oxblood for the shadow
+              // side / painterly-edge anchor, NOT the old 0.35 that dulled it to dark maroon). The
+              // LUT accent-preserve + boost (gated to this high source saturation) keep it reading
+              // vivid through the palette lock; ACES + the LUT hold the lit face a luminous crimson.
+              material.color.copy(new THREE.Color(0xc0392b)).lerp(new THREE.Color(0x7a1f1a), 0.15)
             } else {
               // Hilt / guard -> desaturated violet-gray, in the harmony.
               material.color.lerp(HARMONY.bodyShadowViolet, 0.6)

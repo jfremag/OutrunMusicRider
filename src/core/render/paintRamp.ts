@@ -60,49 +60,51 @@ interface RampStop {
 /**
  * The default gouache ramp stops.
  *
- * Hand-placed so perceived LUMINANCE rises monotonically from shadow to
- * highlight (each successive stop is lighter than the last), the hue glides
- * shadow-violet -> steel/rose mid -> warm putty, and there is exactly ONE rare
- * punched dark anchoring the very bottom. Positions are slightly eased toward the
- * mid so the dominant steel-violet field (palette #3, the largest area in ref 02)
- * occupies the broad middle of the value scale where most scene pixels sit.
+ * V2 CORRECTION 3 (PALETTE → GRAYISH-GREEN / DUSTY-PURPLE / WARM-BEIGE). Re-authored
+ * away from the old steel-blue / rose axis toward the gradient the user loves in ref 02:
+ *
+ *   warm tinted near-black  ->  dusty PURPLE/mauve shadow  ->  deep sage-GREEN  ->
+ *   grayish-GREEN field (the broad mid)  ->  warm BEIGE  ->  light cream  ->  near-white apex
+ *
+ * The hue glides SMOOTHLY purple ↔ green ↔ beige (smoothstep per segment in the builder),
+ * which is the gradient character of image 02. Perceived LUMINANCE still rises monotonically
+ * (each stop lighter than the last) — mandatory for a luminance LUT — and there is exactly ONE
+ * rare punched warm near-black anchoring the bottom for the deep darks (correction 4). The
+ * green field sits in the broad lower-mid (most scene pixels), beige in the upper-mid, so the
+ * frame reads as a muted sage/olive field warming to beige toward the light, with mauve darks.
  */
 const DEFAULT_STOPS: RampStop[] = [
-  // Rare punched dark — deepest warm shadow pool / negative-space floor (V<22%).
-  { pos: 0.0, hex: 0x1e1b22, label: 'warm tinted near-black (#17)' },
-  // Deep body near-black — hue-preserving violet-blue core shadow.
-  { pos: 0.14, hex: 0x2c2a38, label: 'deep body near-black (#9)' },
-  // Body shadow violet — warmest/most-saturated dark of the form (Sienkiewicz inversion).
-  { pos: 0.3, hex: 0x706675, label: 'body shadow violet (#8)' },
-  // Steel-violet field — DOMINANT neutral; anchors the lower-mid of the value scale.
-  { pos: 0.52, hex: 0xa7a3b1, label: 'steel-violet field (#3)' },
-  // Lit steel-blue — the COOL upper-mid. This is the broad band most bright negative-space
-  // pixels (the airy sky + cool field, ref 02's largest quiet area) land in, so the luminous
-  // negative space reads COOL steel-blue like the reference. R-FINAL P1 WIDENS the cool band a
-  // touch (0.66..0.84) and cools the hex slightly so the now-brighter sky holds its cool against
-  // ACES/tooth desaturation instead of warming into a rosy putty haze (which collapsed the split).
-  { pos: 0.66, hex: 0xb6bdd2, label: 'lit steel-blue (#4) — cool band low' },
-  { pos: 0.84, hex: 0xc4cadd, label: 'lit steel-blue (#4) — cool band high' },
-  // Rose-gray field — the WARM desaturated counterweight, a narrow warm note near the highlight cap
-  // (the warm half of the split). Brightened to #DDCBC8 (luma ~0.82) so the ramp stays luminance-
-  // MONOTONIC between the cool-band-high stop (~0.79) and the putty cap (~0.84). This is roughly
-  // where the bright negative-space sky/field lands (kept put), so the field stays mid-key.
-  { pos: 0.92, hex: 0xddcbc8, label: 'rose-gray field (#5)' },
-  // Paper putty — the warm "white" substitute / gouache highlight. P45-APEX: lifted from #D9D6CE
-  // (~0.84) to #ECE9E1 (luma ~0.91) so the value scale OPENS at the top — the lightest paper/sky
-  // highlights now resolve to a genuinely bright putty instead of the old capped ~0.84. Sits just
-  // under the paper-white apex; the field at pos 0.92 below it is unchanged, so only the brightest
-  // few % (those that map above coord ~0.94) climb into this brighter putty — the field stays put.
-  { pos: 0.96, hex: 0xece9e1, label: 'paper putty highlight (#1) — opened apex' },
-  // Paper-white APEX — the COOL near-paper-white highlight cap (STYLE_SPEC §2 #10 "Helmet-shine
-  // core tints here", lifted to true paper-white). P45-APEX: was #D7D7E6 (~0.85), which CAPPED the
-  // whole frame at ~0.92 with 0% of pixels above it (the critique's flagged nit) — the ramp itself
-  // physically could not emit a luminous high end. Raised to #F4F4F8 (luma ~0.96) so ONLY the very
-  // brightest hero pixels — the sun's achromatic-to-cool core (§5) and the helmet-sheen spark — can
-  // resolve to near-paper-white and give the frame its missing luminous APEX, WITHOUT lifting the
-  // field (which lands at/below the 0.92 rose-gray stop). Keeps a faint cool blue-violet tint so the
-  // apex reads as cool paper light, not a neutral CG white; stays monotonic above the putty stop.
-  { pos: 1.0, hex: 0xf4f4f8, label: 'paper-white apex cool highlight (#10) — luminous top' }
+  // Rare punched dark — deepest warm-mauve near-black shadow pool (V2 C4: deepened to #16131A,
+  // L~0.09, the near-black shattered-glass shadow of ref 02; the darkest the frame may reach).
+  { pos: 0.0, hex: 0x16131a, label: 'warm-mauve near-black' },
+  // Deep mauve shadow (V2 C4: #322C3A, L~0.19) — widens the sub-0.18 dark band so more of the
+  // reshaped shadow coords resolve to a true punched dark before climbing into the field stops.
+  { pos: 0.14, hex: 0x322c3a, label: 'deep mauve shadow' },
+  // Dusty PURPLE/mauve mid-shadow (~#4A4252) — the warm-saturated dark bridging into the field.
+  { pos: 0.26, hex: 0x4a4252, label: 'dusty purple shadow' },
+  // Dusty purple/mauve mid-shadow (~#8B7E92) — the mauve note bridging into the green field.
+  { pos: 0.34, hex: 0x7e7488, label: 'dusty mauve (#8B7E92 fam)' },
+  // Deep sage-GREEN (~#6E7A66) — the cool green that grounds the lower-mid; hue starts the
+  // green field. Sits just above the mauve so the transition reads mauve -> green smoothly.
+  { pos: 0.46, hex: 0x717c69, label: 'deep sage-green (#6E7A66 fam)' },
+  // Grayish-GREEN field LOW (~#8C9A86) — the DOMINANT sage/olive-gray field, lower band. Most
+  // mid scene pixels (ground/field) land here so the broad field reads grayish-green.
+  { pos: 0.6, hex: 0x8c9a86, label: 'grayish-green field low (#8C9A86)' },
+  // Grayish-GREEN field HIGH (~#9AA38C) — the same sage field, upper band; the field plateaus
+  // here so a wide swath of the value scale is the muted green. Luminance still climbing.
+  { pos: 0.72, hex: 0x9aa38c, label: 'sage field high (#9AA38C)' },
+  // Warm BEIGE (~#C9B89A) — the field warms to beige toward the light (green -> beige glide).
+  // This is where the brighter ground/horizon and lit fields land: warm, desaturated, muted.
+  { pos: 0.84, hex: 0xc9b89a, label: 'warm beige (#C9B89A)' },
+  // Warm BEIGE light (~#D8CBAE) — the upper beige; the lit negative space / bright field.
+  { pos: 0.91, hex: 0xd8cbae, label: 'warm beige light (#D8CBAE)' },
+  // Light cream (~#E6DCC4) — the warm "white" substitute / gouache highlight putty. The
+  // brightest field/sky resolves to this luminous warm cream.
+  { pos: 0.96, hex: 0xe6dcc4, label: 'light cream highlight (#E6DCC4)' },
+  // Near-white APEX — the luminous warm-cream paper-white cap. Only the very brightest hero
+  // pixels (sun core, helmet-sheen spark) reach it, giving the frame its luminous APEX while the
+  // field stays at/below the cream stop. Faint warm tint so it reads as warm paper light.
+  { pos: 1.0, hex: 0xf6f3ea, label: 'warm paper-white apex' }
 ]
 
 /** Unpack a 0xRRGGBB integer into a normalised sRGB triplet (display-space). */

@@ -238,7 +238,10 @@ export function createSubstratePaperPass(opts: {
         // SHARPENED (pow > 1) so the granulation reads as discrete pools settling into the
         // tooth (real watercolour granulation) rather than a uniform fine veil over everything.
         float settle = clamp(0.5 - hSigned, 0.0, 1.0); // 0 at peaks, ->1 in deep valleys
-        settle = pow(settle, 1.8);                      // pool in the deep valleys, clear the peaks
+        // V2 CORRECTION 2: flatten the valley-pooling (1.8 -> 1.15) so the (now much finer) grain
+        // is an EVEN fine print speckle across the frame, not discrete watercolour pools clumping
+        // into the tooth. Combined with the higher paperScale this reads as flat comic-print grain.
+        settle = pow(settle, 1.15);
         // R-FINAL P2: RE-PIVOT the luma bell to peak ~0.62 / width 0.30 (was 0.40/0.20). With P1's
         // restored value range the bulk of the frame now sits in the bright washes (~0.6-0.8); the
         // tooth must BITE there (ref 02's bright sky carries visible cold-press tooth) instead of

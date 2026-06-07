@@ -45,6 +45,12 @@ export function createPaintGradeLUTPass(opts: {
   whitePoint?: number
   contrast?: number
   shadowDepth?: number
+  /** V2 C4: source-saturation above which a pixel is treated as an ACCENT (sword/car). */
+  accentSatGate?: number
+  /** V2 C4: extra chroma preserved through the lock on accent pixels (keeps them vivid). */
+  accentPreserve?: number
+  /** V2 C4: extra saturation multiplier applied to accent pixels (makes them POP). */
+  accentBoost?: number
   /** Provide a custom ramp DataTexture; otherwise the default gouache ramp is built. */
   gradient?: import('three').DataTexture | null
 } = {}): ShaderPass {
@@ -77,7 +83,11 @@ export function createPaintGradeLUTPass(opts: {
       uBlackPoint: { value: opts.blackPoint ?? 0.34 },
       uWhitePoint: { value: opts.whitePoint ?? 0.92 },
       uContrast: { value: opts.contrast ?? 1.22 },
-      uShadowDepth: { value: opts.shadowDepth ?? 1.0 }
+      uShadowDepth: { value: opts.shadowDepth ?? 1.0 },
+      // V2 C4 accent pop knobs (defaults are no-ops if the integrator doesn't set them).
+      uAccentSatGate: { value: opts.accentSatGate ?? 0.30 },
+      uAccentPreserve: { value: opts.accentPreserve ?? 0.7 },
+      uAccentBoost: { value: opts.accentBoost ?? 0.5 }
     },
     vertexShader: /* glsl */ `
       varying vec2 vUv;
@@ -99,6 +109,9 @@ export function createPaintGradeLUTPass(opts: {
       uniform float uWhitePoint;
       uniform float uContrast;
       uniform float uShadowDepth;
+      uniform float uAccentSatGate;
+      uniform float uAccentPreserve;
+      uniform float uAccentBoost;
 
       // Cheap hash for the dither (two summed evaluations make it triangular).
       float hash12(vec2 p) {
@@ -146,15 +159,41 @@ export function createPaintGradeLUTPass(opts: {
         // row centre (v = 0.5). NO in-shader pow — ramp + src share display space.
         vec3 graded = texture2D(tGradient, vec2(coord, 0.5)).rgb;
 
+        // V2 CORRECTION 4 (ACCENTS POP): the muted field is a foil for BOLD saturated accents.
+        // Measure the SOURCE saturation; the sword crimson + the rich car body come in highly
+        // saturated, the field/sky/ground come in nearly neutral. Gate the chroma handling on it:
+        //   - high-sat source pixels get MORE chroma preserved through the lock (uAccentPreserve)
+        //     so the accent's vivid hue survives instead of being washed onto the muted ramp,
+        //   - low-sat field pixels keep the base preserve (stay muted/in-palette).
+        float srcMx = max(max(src.r, src.g), src.b);
+        float srcMn = min(min(src.r, src.g), src.b);
+        float srcSat = srcMx > 1e-4 ? (srcMx - srcMn) / srcMx : 0.0;
+        // 0 across the muted field, ramps to 1 on the already-saturated accents (sword/car).
+        float accentGate = smoothstep(uAccentSatGate, uAccentSatGate + 0.18, srcSat);
+
         // Keep a sliver of the source's local hue so the hero/accents stay colour, not dead gray;
-        // then blend the whole thing toward the locked grade. R-FINAL: chroma-preserve is now
-        // VALUE-AWARE — it fades toward 0 in the DARKEST coords so deep shadows lock onto the ramp's
-        // tinted near-black ink stops (real punched darks) instead of being lifted back toward mid-
-        // gray by their own source colour, while the mids/lights keep the full preserve that holds
-        // the warm/cool split + the tinted-gray saturation. Ramps in over coord 0..0.35.
-        float chromaPreserve = uChromaPreserve * smoothstep(0.05, 0.35, coord);
+        // then blend the whole thing toward the locked grade. Chroma-preserve is VALUE-AWARE (fades
+        // toward 0 in the DARKEST coords so deep shadows lock onto the ramp's tinted near-black ink
+        // stops — real punched darks) AND now ACCENT-AWARE (lifts toward uAccentPreserve on saturated
+        // accent pixels so the sword crimson / car body stay vivid through the lock).
+        // V2 C4: fade the preserve over a LATER/wider coord band (0.12..0.46) so the DEEP darks
+        // (under-car, car shadow side, sword shadow) get near-zero source-colour blend and lock
+        // hard onto the ramp's near-black ink stops — true punched darks, not lifted toward mid by
+        // their own sage/mauve source. The mids/lights keep the full preserve (field stays in-hue).
+        float basePreserve = uChromaPreserve * smoothstep(0.12, 0.46, coord);
+        float chromaPreserve = mix(basePreserve, max(basePreserve, uAccentPreserve), accentGate);
         vec3 col = graded * (1.0 - chromaPreserve) + src * chromaPreserve;
         col = mix(src, col, uGradeAmount);
+
+        // V2 CORRECTION 4: a saturation BOOST gated ONLY to the already-saturated accents, so the
+        // sword/car POP vivid while the muted field is left untouched (a per-pixel chroma scale
+        // about the pixel's own luma, in RGB to stay cheap/hue-stable). The field's accentGate ~0
+        // so this is a no-op there; the accents get a confident chroma lift.
+        if (uAccentBoost > 0.001) {
+          float cl = dot(col, vec3(0.2126, 0.7152, 0.0722));
+          float boost = 1.0 + uAccentBoost * accentGate;
+          col = clamp(vec3(cl) + (col - vec3(cl)) * boost, 0.0, 1.0);
+        }
 
         // Optional tiny hue rotation toward rose (music drives this on drops).
         // Branch is uniform-controlled (every fragment takes the same path).
