@@ -27,6 +27,7 @@ import { createSubstratePaperPass } from './SubstratePaperPass'
 import { createSelectiveBloomPass, SelectiveBloom } from './SelectiveBloomPass'
 import { createUnsharpMaskPass } from './UnsharpMaskPass'
 import { injectCarSheen, updateCarSheen, CarSheenMaterial } from './CarSheenMaterial'
+import { injectBladeEmissive } from './BladeMaterial'
 
 // Beat-sync envelope tuning. The FOV "punch" zooms out fast on a beat onset then eases
 // back. Evaluated procedurally each frame from (now - lastBeatTime) so it is frame-rate
@@ -2157,13 +2158,15 @@ export class ThreeScene {
           ) {
             const isBlade = material.color.r > material.color.g * 1.1 && material.color.r > material.color.b
             if (isBlade) {
-              // V2 CORRECTION 4: the sword is THE bold saturated accent — a VIVID CRIMSON like the
-              // ref-02 lips (#C0392B), the foil to the muted green/beige field. Set the blade albedo
-              // to a confident crimson (only a light lerp 0.15 toward a deep oxblood for the shadow
-              // side / painterly-edge anchor, NOT the old 0.35 that dulled it to dark maroon). The
-              // LUT accent-preserve + boost (gated to this high source saturation) keep it reading
-              // vivid through the palette lock; ACES + the LUT hold the lit face a luminous crimson.
-              material.color.copy(new THREE.Color(0xdb3b2e))
+              // ralph(iter 5): the sword is THE bold accent, but it must read as a PREMIUM
+              // dimensional BLOOD-RED form, not a flat hot neon stripe. The albedo is pulled a touch
+              // off 100%-sat crimson toward a richer blood-red (#C73A2C) so it sits in the palette;
+              // the DIMENSIONAL value gradient (hot crimson core -> deeper oxblood at tip/base) and a
+              // cool Fresnel rim are added by injectBladeEmissive below (replacing the old FLAT
+              // emissive that made the blade a single hot stripe with no modelling). The LUT
+              // accent-preserve + boost (gated to this high source saturation) keep it vivid through
+              // the palette lock.
+              material.color.copy(new THREE.Color(0xc73a2c))
             } else {
               // Hilt / guard -> desaturated violet-gray, in the harmony.
               material.color.lerp(HARMONY.bodyShadowViolet, 0.6)
@@ -2179,13 +2182,13 @@ export class ThreeScene {
             if (material instanceof THREE.MeshPhysicalMaterial) {
               material.transmission = 0
             }
-            // BLADE: a LOW self-illumination so it reads as a confident menacing RED at ALL
-            // distances and lighting angles — never a dark grey silhouette that melts into the
-            // horizon and only "pops" red up close. Kept low (lit value ~0.5) so it stays BELOW
-            // the selective-bloom threshold (~0.80): NO neon glow, just a consistently red obstacle.
+            // BLADE: a DIMENSIONAL self-illumination (gradient + cool rim) so it reads as a
+            // premium menacing BLOOD-RED metal form at ALL distances and lighting angles — never a
+            // flat hot stripe, and never a dark grey silhouette that melts into the horizon. The
+            // gradient is anchored to the blade's OWN local long axis, so it is identical above vs
+            // below the horizon (no seam). Kept below the selective-bloom threshold: no neon glow.
             if (isBlade) {
-              material.emissive.copy(new THREE.Color(0xdb3b2e))
-              material.emissiveIntensity = 0.4
+              injectBladeEmissive(material, obj.geometry)
             }
             material.needsUpdate = true
           }

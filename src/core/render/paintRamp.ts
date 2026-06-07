@@ -74,41 +74,50 @@ interface RampStop {
  * frame reads as a muted sage/olive field warming to beige toward the light, with mauve darks.
  */
 const DEFAULT_STOPS: RampStop[] = [
-  // Rare punched dark — deepest warm-mauve near-black shadow pool (V2 C4: deepened to #16131A,
-  // L~0.09, the near-black shattered-glass shadow of ref 02; the darkest the frame may reach).
-  { pos: 0.0, hex: 0x16131a, label: 'warm-mauve near-black' },
-  // Deep mauve shadow (V2 C4: #322C3A, L~0.19) — widens the sub-0.18 dark band so more of the
-  // reshaped shadow coords resolve to a true punched dark before climbing into the field stops.
-  { pos: 0.14, hex: 0x322c3a, label: 'deep mauve shadow' },
-  // Dusty PURPLE/mauve mid-shadow (~#4A4252) — the warm-saturated dark bridging into the field.
-  { pos: 0.26, hex: 0x4a4252, label: 'dusty purple shadow' },
-  // Dusty purple/mauve mid-shadow (~#8B7E92) — the mauve note bridging into the green field.
-  { pos: 0.34, hex: 0x7e7488, label: 'dusty mauve (#8B7E92 fam)' },
-  // Deep sage-GREEN (~#6E7A66) — the cool green that grounds the lower-mid; hue starts the
-  // green field. Sits just above the mauve so the transition reads mauve -> green smoothly.
-  { pos: 0.46, hex: 0x717c69, label: 'deep sage-green (#6E7A66 fam)' },
-  // Grayish-GREEN field LOW (~#8C9A86) — the DOMINANT sage/olive-gray field, lower band. Most
-  // mid scene pixels (ground/field) land here so the broad field reads grayish-green.
-  { pos: 0.6, hex: 0x8c9a86, label: 'grayish-green field low (#8C9A86)' },
-  // Grayish-GREEN field HIGH (~#9AA38C) — the same sage field, upper band; the field plateaus
-  // here so a wide swath of the value scale is the muted green. Luminance still climbing.
-  { pos: 0.72, hex: 0x9aa38c, label: 'sage field high (#9AA38C)' },
-  // ralph(iter3): upper-mid stops COOLED + BRIGHTENED #C9B89A -> #CCC6AC (priority-6). The sky/bright
-  // field lands here; the old warm beige made the sky read as a DINGY beige wall. Cooling it (lifting
-  // green/blue toward the yellow so it is a luminous cool-cream, not amber) and brightening it a notch
-  // makes the bright sky band read LUMINOUS-COOL — ref 02's luminous mid-key — without leaving the
-  // muted harmony. Luminance still rises monotonically into the cream/apex.
-  { pos: 0.84, hex: 0xccc6ac, label: 'luminous cool-cream (was warm beige #C9B89A)' },
-  // ralph(iter3): #D8CBAE -> #DDDAC6 — the upper sky/lit negative-space band, cooled + brightened to a
-  // luminous cool cream so the bright sky reads luminous, not dingy beige.
-  { pos: 0.91, hex: 0xdddac6, label: 'luminous cool-cream light (was #D8CBAE)' },
-  // Light cream (~#E6DCC4) — the warm "white" substitute / gouache highlight putty. The
-  // brightest field/sky resolves to this luminous warm cream.
-  { pos: 0.96, hex: 0xe6dcc4, label: 'light cream highlight (#E6DCC4)' },
-  // Near-white APEX — the luminous warm-cream paper-white cap. Only the very brightest hero
-  // pixels (sun core, helmet-sheen spark) reach it, giving the frame its luminous APEX while the
-  // field stays at/below the cream stop. Faint warm tint so it reads as warm paper light.
-  { pos: 1.0, hex: 0xf6f3ea, label: 'warm paper-white apex' }
+  // ralph(iter 5) PALETTE ENRICH: the frame read flat gray-beige rather than ref-02's deliberate
+  // gouache with coloured warm/cool drama. The reopened contrast lands on a RICHER harmony now —
+  // the darks carry more violet CHROMA (coloured darks, not neutral near-black), the mid mauve/sage
+  // stops are nudged a touch more saturated, and the upper-cream stops are cooled toward a luminous
+  // (not amber-dingy) cream. Luminance stays monotonic; the single punched dark is preserved.
+  //
+  // Rare punched dark — deepest COLOURED mauve near-black shadow pool. ralph(iter5): more violet
+  // chroma (#1A1422, slightly bluer/redder than green) so the darkest darks read as a deep coloured
+  // shadow (ref 02's coloured shattered-glass darks), never a flat neutral black. L still ~0.09.
+  { pos: 0.0, hex: 0x1a1422, label: 'coloured mauve near-black' },
+  // Deep mauve shadow. ralph(iter5): #382F44 — a touch more violet chroma + value than #322C3A so
+  // the sub-0.18 dark band reads as a rich coloured shadow climbing into the field.
+  { pos: 0.14, hex: 0x382f44, label: 'deep coloured mauve shadow' },
+  // Dusty PURPLE/mauve mid-shadow. ralph(iter5): #504658 — more chroma than #4A4252, the warm-
+  // saturated coloured dark bridging into the field.
+  { pos: 0.26, hex: 0x504658, label: 'dusty purple shadow' },
+  // Dusty purple/mauve mid-shadow. ralph(iter5): #7C7088 — more violet chroma than #7E7488 while
+  // held a hair below the sage above it (monotonic), the mauve note bridging into the green field
+  // with visible warm/cool drama.
+  { pos: 0.34, hex: 0x7c7088, label: 'dusty mauve (#8B7E92 fam)' },
+  // Deep sage-GREEN. ralph(iter5): #727F68 — more green chroma than #717C69 AND a touch brighter so
+  // it clears the mauve below (keeps the LUT monotonic) — the lower-mid field reads as a deliberate
+  // sage, not gray. Sits just above the mauve (mauve -> green glide).
+  { pos: 0.46, hex: 0x727f68, label: 'deep sage-green (#6E7A66 fam)' },
+  // Grayish-GREEN field LOW. ralph(iter5): #8B9B82 — a touch more sage chroma than #8C9A86 so the
+  // DOMINANT mid field (most ground/road pixels) reads as a clear muted green, not gray-beige.
+  { pos: 0.6, hex: 0x8b9b82, label: 'grayish-green field low (#8C9A86)' },
+  // Grayish-GREEN field HIGH. ralph(iter5): #9BA489 — slightly more sage chroma than #9AA38C; the
+  // field plateaus here as the muted green over a wide swath of the value scale.
+  { pos: 0.72, hex: 0x9ba489, label: 'sage field high (#9AA38C)' },
+  // ralph(iter5): upper-mid cream COOLED further #CCC6AC -> #C9C7B0 (lift green/blue relative to red
+  // so it reads as a LUMINOUS COOL cream, not an amber-dingy beige). The sky/bright field lands here;
+  // this is ref 02's luminous mid-key cool. Luminance still rises monotonically into the apex.
+  { pos: 0.84, hex: 0xc9c7b0, label: 'luminous cool-cream' },
+  // ralph(iter5): upper sky/lit negative-space band cooled #DDDAC6 -> #DBDBC8 — a luminous cool cream
+  // (green/blue >= red) so the bright sky reads luminous, never dingy beige.
+  { pos: 0.91, hex: 0xdbdbc8, label: 'luminous cool-cream light' },
+  // Light cream highlight. ralph(iter5): #E6DCC4 -> #E7E2D2 — cooled toward a luminous neutral cream
+  // (the warm "white" substitute) so the brightest field/sky resolves luminous-cool, not amber.
+  { pos: 0.96, hex: 0xe7e2d2, label: 'light cream highlight' },
+  // Near-white APEX — luminous near-neutral paper-white cap (a whisper of warmth). Only the very
+  // brightest hero pixels (sun core, helmet-sheen spark) reach it, giving the frame its luminous
+  // APEX while the field stays at/below the cream stop.
+  { pos: 1.0, hex: 0xf6f4ee, label: 'warm paper-white apex' }
 ]
 
 /** Unpack a 0xRRGGBB integer into a normalised sRGB triplet (display-space). */
