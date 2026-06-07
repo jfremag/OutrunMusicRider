@@ -1929,12 +1929,13 @@ export class ThreeScene {
     // petrol-teal #48677D in shadow), NEVER as bright neon grid lines here. The per-frame
     // road morph still recomputes clean normals (morphRoadToMusic) to feed that edge pass.
     const roadMaterial = new THREE.MeshStandardMaterial({
-      // The sand bridge must read a touch LIGHTER and warmer than the rose-gray FIELD it
-      // crosses (ref 02: the road sits ~0.10 value above its surroundings, a pale warm
-      // ribbon), otherwise field and road merge into one flat value and the path stops
-      // reading. Lift the #C9B49E sand slightly toward the warm-cream sheet to get that
-      // separation while keeping it a desaturated sand, not a bright lane.
-      color: HARMONY.sandRoad.clone().lerp(HARMONY.warmCream, 0.28),
+      // The sand bridge must read CLEARLY LIGHTER + warmer than the sage-green FIELD it
+      // crosses, or the luminance-keyed palette-lock LUT collapses field and road to the
+      // same ramp stop and the track disappears (the bug the user hit). A ~0.10 value lift
+      // was far too subtle; push the #C9B49E sand strongly toward the warm-cream sheet so
+      // the road luma (~0.62 field) jumps to ~0.82, landing on the LUT's pale-beige stop —
+      // a distinct warm ribbon on the green field that the edge pass also inks at the seam.
+      color: HARMONY.sandRoad.clone().lerp(HARMONY.warmCream, 0.62),
       roughness: 0.9,
       metalness: 0.0
     })
